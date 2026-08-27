@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>تثبيت Academic AI</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#12417a">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<style>
+  :root { color-scheme: light dark; --bg:#f4f6f9; --card:#fff; --ink:#0e1b2b; --soft:#33445a;
+          --line:#dde3ec; --blue:#12417a; --ok:#0f7a52; --bad:#a4243d; --warn:#8a6100; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0a121c; --card:#111c2b; --ink:#e7eef7; --soft:#c2d0e0; --line:#223145;
+            --blue:#5fa0e4; --ok:#4cc38a; --bad:#f2839a; --warn:#e0b252; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; background:var(--bg); color:var(--ink); line-height:1.7;
+         font-family:"IBM Plex Sans Arabic","Segoe UI",system-ui,-apple-system,sans-serif; }
+  main { max-width: 32rem; margin: 0 auto; }
+  header { text-align:center; margin-bottom:24px; }
+  header img { width:76px; height:76px; border-radius:20px; }
+  h1 { font-size:1.35rem; margin:14px 0 4px; }
+  .lede { color:var(--soft); margin:0; font-size:.95rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:18px; margin-bottom:16px; }
+  button { width:100%; padding:15px; border:0; border-radius:12px; background:var(--blue);
+           color:#fff; font:inherit; font-size:1.05rem; font-weight:600; cursor:pointer; }
+  button[disabled] { opacity:.45; cursor:not-allowed; }
+  #hint { margin:12px 0 0; font-size:.9rem; color:var(--soft); }
+  ul { list-style:none; margin:0; padding:0; }
+  li { display:flex; gap:10px; align-items:flex-start; padding:9px 0;
+       border-bottom:1px solid var(--line); font-size:.93rem; }
+  li:last-child { border-bottom:0; }
+  .mark { flex:none; width:1.4rem; font-weight:700; }
+  .ok .mark { color:var(--ok); } .bad .mark { color:var(--bad); } .warn .mark { color:var(--warn); }
+  .detail { color:var(--soft); font-size:.85rem; display:block; }
+  h2 { font-size:.8rem; letter-spacing:.08em; text-transform:uppercase; color:var(--soft);
+       margin:0 0 10px; font-weight:600; }
+  a { color:var(--blue); }
+  .manual { font-size:.9rem; color:var(--soft); }
+  .manual b { color:var(--ink); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="/icons/icon-192.png" alt="">
+    <h1>تثبيت Academic AI</h1>
+    <p class="lede">هذه الصفحة تثبّت التطبيق على جهازك، وتخبرك بالسبب إن لم تستطع.</p>
+  </header>
+
+  <div class="card">
+    <button id="install" disabled>جارٍ الفحص…</button>
+    <p id="hint"></p>
+  </div>
+
+  <div class="card">
+    <h2>فحص الجهاز</h2>
+    <ul id="checks"></ul>
+  </div>
+
+  <div class="card manual">
+    <h2>التثبيت اليدوي</h2>
+    <p><b>Android — Chrome:</b> النقاط الثلاث في أعلى يمين الشاشة ← «تثبيت التطبيق» أو «إضافة إلى الشاشة الرئيسية».</p>
+    <p><b>Android — Samsung Internet:</b> زر ☰ في أسفل الشاشة ← «إضافة الصفحة إلى» ← «الشاشة الرئيسية».</p>
+    <p><b>iPhone — Safari:</b> زر المشاركة (مربع وسهم لأعلى) ← «إضافة إلى الشاشة الرئيسية».</p>
+    <p><b>ويندوز/ماك — Chrome أو Edge:</b> أيقونة التثبيت في يسار شريط العنوان، أو القائمة ← «تثبيت».</p>
+    <p style="margin-bottom:0">إن فتحت الرابط من داخل واتساب أو فيسبوك أو تيليجرام فلن يظهر خيار التثبيت إطلاقًا — افتحه في Chrome أولًا.</p>
+  </div>
+
+  <p style="text-align:center"><a href="/">العودة إلى التطبيق</a></p>
+</main>
+
+<script>
+(function () {
+  var list = document.getElementById('checks');
+  var button = document.getElementById('install');
+  var hint = document.getElementById('hint');
+  var prompt = null;
+
+  function row(state, label, detail) {
+    var li = document.createElement('li');
+    li.className = state;
+    li.innerHTML = '<span class="mark">' +
+      (state === 'ok' ? '✓' : state === 'bad' ? '✕' : '!') + '</span><span>' + label +
+      (detail ? '<span class="detail">' + detail + '</span>' : '') + '</span>';
+    list.appendChild(li);
+    return li;
+  }
+
+  var standalone = window.matchMedia('(display-mode: standalone)').matches ||
+                   window.navigator.standalone === true;
+
+  row(location.protocol === 'https:' ? 'ok' : 'bad', 'اتصال آمن (HTTPS)', location.protocol);
+
+  var ua = navigator.userAgent;
+  var isAndroid = /Android/i.test(ua);
+  var isIOS = /iPhone|iPad|iPod/i.test(ua);
+  var inApp = /FBAN|FBAV|Instagram|Line|WhatsApp|Telegram/i.test(ua);
+  var isChrome = /Chrome\//i.test(ua) && !/EdgA?\//i.test(ua) && !/SamsungBrowser/i.test(ua);
+  var browser = /SamsungBrowser/i.test(ua) ? 'Samsung Internet'
+              : /EdgA?\//i.test(ua) ? 'Edge'
+              : /Firefox|FxiOS/i.test(ua) ? 'Firefox'
+              : isChrome ? 'Chrome'
+              : isIOS ? 'Safari' : 'غير معروف';
+
+  row(inApp ? 'bad' : 'ok', 'المتصفح: ' + browser,
+      inApp ? 'الصفحة مفتوحة داخل تطبيق آخر — لن يظهر خيار التثبيت. افتحها في Chrome.'
+            : (isAndroid ? 'Android' : isIOS ? 'iOS' : 'كمبيوتر'));
+
+  fetch('/manifest.webmanifest').then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (m) {
+      row(m ? 'ok' : 'bad', 'ملف التطبيق (manifest)',
+          m ? m.name + ' · ' + m.icons.length + ' أيقونات' : 'تعذّر تحميله');
+    })
+    .catch(function () { row('bad', 'ملف التطبيق (manifest)', 'تعذّر تحميله'); });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').then(function () {
+      return navigator.serviceWorker.ready;
+    }).then(function (reg) {
+      row('ok', 'عامل الخدمة (Service Worker)', 'يعمل · ' + (reg.active ? 'نشط' : 'قيد التفعيل'));
+    }).catch(function (e) {
+      row('bad', 'عامل الخدمة (Service Worker)', String(e).slice(0, 90));
+    });
+  } else {
+    row('bad', 'عامل الخدمة (Service Worker)', 'غير مدعوم في هذا المتصفح');
+  }
+
+  if (standalone) {
+    button.textContent = 'التطبيق مثبَّت بالفعل ✓';
+    hint.textContent = 'أنت تستخدم النسخة المثبَّتة الآن.';
+    row('ok', 'حالة التثبيت', 'مثبَّت ويعمل كتطبيق مستقل');
+    return;
+  }
+
+  var promptRow = row('warn', 'عرض التثبيت من المتصفح', 'بانتظار المتصفح…');
+
+  window.addEventListener('beforeinstallprompt', function (event) {
+    event.preventDefault();
+    prompt = event;
+    promptRow.className = 'ok';
+    promptRow.querySelector('.mark').textContent = '✓';
+    promptRow.querySelector('.detail').textContent = 'جاهز — اضغط الزر بالأعلى';
+    button.disabled = false;
+    button.textContent = 'تثبيت التطبيق الآن';
+    hint.textContent = '';
+  });
+
+  window.addEventListener('appinstalled', function () {
+    button.textContent = 'تم التثبيت ✓';
+    button.disabled = true;
+    hint.textContent = 'ابحث عن أيقونة Academic AI بين تطبيقاتك.';
+  });
+
+  button.addEventListener('click', function () {
+    if (!prompt) return;
+    button.disabled = true;
+    prompt.prompt();
+    prompt.userChoice.then(function (choice) {
+      if (choice.outcome === 'accepted') {
+        button.textContent = 'تم التثبيت ✓';
+      } else {
+        button.disabled = false;
+        button.textContent = 'تثبيت التطبيق الآن';
+        hint.textContent = 'أُلغي التثبيت. يمكنك المحاولة مرة أخرى.';
+      }
+    });
+  });
+
+  setTimeout(function () {
+    if (prompt || standalone) return;
+    button.textContent = 'التثبيت غير متاح تلقائيًا';
+    hint.textContent = isIOS
+      ? 'في آيفون لا يوجد زر تثبيت: استخدم زر المشاركة ← «إضافة إلى الشاشة الرئيسية».'
+      : 'متصفحك لم يعرض التثبيت. استخدم الطريقة اليدوية بالأسفل، وأخبرني بما تراه في قائمة الفحص.';
+    promptRow.querySelector('.detail').textContent =
+      'لم يعرضه المتصفح خلال 6 ثوانٍ' + (isIOS ? ' (طبيعي في آيفون)' : '');
+  }, 6000);
+})();
+</script>
+</body>
+</html>

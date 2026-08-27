@@ -1,0 +1,152 @@
+# =============================================================================
+#  Academic AI Research Assistant — Environment Variables
+# =============================================================================
+#  Copy this file to `.env` for local development, and paste the same keys into
+#  Vercel → Project → Settings → Environment Variables for production.
+#  NEVER commit `.env`. This file must never contain a real secret.
+#
+#  المطلوب فعليًا لتشغيل التطبيق = المجموعات (1) و(2) و(3) و(4).
+#  الباقي اختياري ويمكن إضافته لاحقًا.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# (1) قاعدة البيانات — DATABASE  [مطلوب]
+# -----------------------------------------------------------------------------
+# رابط PostgreSQL 14+. على Neon: Dashboard → Connection string → Pooled connection.
+# يجب أن ينتهي بـ ?sslmode=require مع Neon و Supabase.
+# مثال Neon:
+#   postgresql://user:pass@ep-xxx-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL=""
+
+
+# -----------------------------------------------------------------------------
+# (2) المصادقة — AUTHENTICATION  [مطلوب]
+# -----------------------------------------------------------------------------
+# سر توقيع الجلسات. ولّده بأمر:  openssl rand -base64 32
+# غيّره = تسجيل خروج جميع المستخدمين.
+AUTH_SECRET=""
+
+# حساب المالك: يحصل على صلاحيات المدير وعلى الخطة الأعلى بشكل دائم ومجاني،
+# دون اشتراك ودون المرور ببوابة الدفع. المقارنة غير حساسة لحالة الأحرف،
+# ويمكن وضع أكثر من بريد مفصولة بفاصلة. اتركه فارغًا لتعطيل هذا الاستثناء.
+OWNER_EMAIL=""
+
+
+# عنوان التطبيق العام. على Vercel ضعه بعد أول نشر (https://your-app.vercel.app).
+# يُستخدم أيضًا لبناء روابط البريد إن لم يُضبط APP_URL.
+AUTH_URL=""
+
+# تسجيل الدخول عبر Google — اختياري بالكامل.
+# اتركه فارغًا ويختفي الزر من الواجهة تلقائيًا.
+# لتفعيله: console.cloud.google.com → APIs & Services → Credentials → OAuth client
+# Authorized redirect URI:  https://your-app.vercel.app/api/auth/callback/google
+AUTH_GOOGLE_ID=""
+AUTH_GOOGLE_SECRET=""
+
+
+# -----------------------------------------------------------------------------
+# (3) الذكاء الاصطناعي — AI PROVIDER  [مطلوب — بدونه لا تعمل وظائف التوليد]
+# -----------------------------------------------------------------------------
+# أي مزوّد نشط: anthropic | openai | google
+# التبديل لا يحتاج أي تعديل في الكود، ويمكن تجاوزه من لوحة الإدارة.
+AI_PROVIDER="anthropic"
+
+# Anthropic (الافتراضي والموصى به للكتابة الأكاديمية العربية)
+# المفتاح من: console.anthropic.com → API Keys
+ANTHROPIC_API_KEY=""
+ANTHROPIC_MODEL="claude-sonnet-4-5"
+
+# OpenAI — بديل. المفتاح من platform.openai.com/api-keys
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-4.1"
+
+# Google Gemini — بديل. المفتاح من aistudio.google.com/apikey
+GOOGLE_AI_API_KEY=""
+GOOGLE_MODEL="gemini-2.5-pro"
+
+
+# -----------------------------------------------------------------------------
+# (4) البريد الإلكتروني — EMAIL  [مطلوب لاستعادة كلمة المرور]
+# -----------------------------------------------------------------------------
+# console = يطبع الرسالة في سجل الخادم بدل إرسالها (للتطوير فقط).
+# resend  = إرسال حقيقي.  ⚠️ استخدم "resend" في الإنتاج.
+EMAIL_PROVIDER="resend"
+
+# المفتاح من: resend.com → API Keys
+RESEND_API_KEY=""
+
+# المرسِل. للاختبار الفوري بدون نطاق خاص استخدم:
+#   Academic AI <onboarding@resend.dev>
+# وبعد توثيق نطاقك في Resend → Domains استبدله بـ:
+#   Academic AI <no-reply@your-domain.com>
+EMAIL_FROM="Academic AI <onboarding@resend.dev>"
+
+# العنوان العام المستخدم في روابط البريد. يعود إلى AUTH_URL إن تُرك فارغًا.
+APP_URL=""
+
+
+# -----------------------------------------------------------------------------
+# (5) الاشتراكات والدفع — BILLING  [اختياري]
+# -----------------------------------------------------------------------------
+# manual = نظام الاشتراك يعمل كاملًا بلا بوابة دفع (ترقية/إلغاء/حدود) دون خصم مال.
+# paypal = دفع حقيقي عبر PayPal Subscriptions  (الموصى به للأردن)
+# stripe = دفع حقيقي عبر Stripe               (غير متاح للتجار في الأردن)
+BILLING_PROVIDER="manual"
+
+# حماية: في الإنتاج يرفض الوضع اليدوي منح الخطط المدفوعة إلا إذا ضبطت هذا صراحةً.
+# اتركه false حتى لا تتحول خطة Pro إلى ترقية مجانية عند غياب مفاتيح Stripe.
+MANUAL_BILLING_ALLOW_PAID="false"
+
+# Stripe — من dashboard.stripe.com
+# Webhook endpoint:  https://your-app.vercel.app/api/billing/webhook
+# الأحداث المطلوبة: checkout.session.completed ·
+#   customer.subscription.created|updated|deleted · invoice.payment_failed
+STRIPE_SECRET_KEY=""
+STRIPE_WEBHOOK_SECRET=""
+STRIPE_PRO_PRICE_ID=""
+
+# --- PayPal (بوابة الدفع الموصى بها للأردن) ---------------------------------
+# 1) أنشئ حساب PayPal Business من https://www.paypal.com/jo/business
+# 2) أنشئ تطبيقًا من https://developer.paypal.com/dashboard/applications/live
+# 3) أضف Webhook على العنوان: https://<domain>/api/billing/webhook
+#    واشترك في الأحداث: BILLING.SUBSCRIPTION.ACTIVATED / UPDATED / CANCELLED /
+#    SUSPENDED / EXPIRED / PAYMENT.FAILED و PAYMENT.SALE.COMPLETED / REFUNDED
+# خطة Pro تُنشأ تلقائيًا في PayPal انطلاقًا من السعر المخزّن في قاعدة البيانات.
+PAYPAL_ENVIRONMENT="live"          # sandbox للتجربة، live للأموال الحقيقية
+PAYPAL_CLIENT_ID=""
+PAYPAL_CLIENT_SECRET=""
+PAYPAL_WEBHOOK_ID=""               # بدونه تُرفض كل الـ Webhooks
+PAYPAL_PRO_PLAN_ID=""              # اختياري: لإعادة استخدام خطة موجودة
+PAYPAL_BRAND_NAME="Academic AI"    # الاسم الظاهر على صفحة الدفع
+
+
+
+# -----------------------------------------------------------------------------
+# (6) التشغيل — OPERATIONS  [اختياري، لها قيم افتراضية آمنة]
+# -----------------------------------------------------------------------------
+# memory = عدّاد داخل كل نسخة (كافٍ لنسخة واحدة).
+# redis  = نافذة مشتركة بين كل النسخ (مطلوب عند التوسّع الأفقي).
+RATE_LIMIT_STORE="memory"
+UPSTASH_REDIS_REST_URL=""
+UPSTASH_REDIS_REST_TOKEN=""
+
+# الحد العام: عدد الطلبات لكل IP داخل النافذة.
+RATE_LIMIT_WINDOW_SECONDS="60"
+RATE_LIMIT_MAX_REQUESTS="60"
+
+# محاولات التسجيل واستعادة كلمة المرور لكل IP كل ١٥ دقيقة.
+# ارفعه إن كان مستخدموك في شبكة جامعية تشترك في عنوان عام واحد.
+AUTH_RATE_LIMIT_MAX="5"
+
+# debug | info | warn | error
+LOG_LEVEL="info"
+
+
+# -----------------------------------------------------------------------------
+# (7) البذور — SEED  [اختياري — يُنشئ حساب المدير أول مرة فقط]
+# -----------------------------------------------------------------------------
+# إن ضبطتهما، يُنشأ حساب بصلاحية ADMIN عند أول نشر/بذر.
+# احذفهما من Vercel بعد أول نشر ناجح.
+SEED_ADMIN_EMAIL=""
+SEED_ADMIN_PASSWORD=""

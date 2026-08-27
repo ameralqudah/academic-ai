@@ -17,8 +17,22 @@ import { detectDelimiter, parseCsv } from '@/analysis/parse';
 import { parseXlsx } from '@/analysis/parse-xlsx';
 import { profileDataset } from '@/analysis/profile';
 import { toCsv, reportToText } from '@/analysis/serialize';
-import { kurtosis, mean, median, quantile, rank, skewness, standardDeviation, toNumber } from '@/analysis/stats-core';
-import type { CleaningAction } from '@/analysis/types';
+import {
+  chiSquareQuantile,
+  chiSquareSf,
+  fCdf,
+  fQuantile,
+  fSf,
+  normalCdf,
+  normalQuantile,
+  tCdf,
+  tQuantile,
+  tTwoTailed,
+} from '@/analysis/distributions';
+import { DataParseError } from '@/analysis/parse';
+import { cronbachAlpha } from '@/analysis/reliability';
+import { kurtosis, mean, median, pearson, quantile, rank, skewness, standardDeviation, toNumber } from '@/analysis/stats-core';
+import type { CleaningAction, Dataset } from '@/analysis/types';
 
 let passed = 0;
 let failed = 0;
@@ -278,6 +292,239 @@ async function main() {
   const trickyRoundTrip = parseCsv(toCsv(tricky), 'tricky2.csv');
   check('a comma inside a value survives a round trip', trickyRoundTrip.rows[0]?.[0], 'x,y');
   check('a quote inside a value survives a round trip', trickyRoundTrip.rows[0]?.[1], 'he said "no"');
+
+  /* -------------------------------------------------------- distributions */
+
+  /*
+   * Checked against published table values rather than against this
+   * implementation's own output. Every one of these numbers can be looked up in
+   * the back of a statistics textbook, which is the point: a p-value is only
+   * worth printing if it agrees with the tables the examiner will check it
+   * against.
+   */
+
+  close('Φ(0) = 0.5', normalCdf(0), 0.5, 1e-15);
+  close('Φ(1) = 0.8413447461', normalCdf(1), 0.8413447460685429, 1e-12);
+  close('Φ(1.96) = 0.9750021049', normalCdf(1.96), 0.9750021048517795, 1e-12);
+  close('Φ(-3) = 0.0013498980', normalCdf(-3), 0.0013498980316301, 1e-14);
+  close('Φ⁻¹(0.975) = 1.959963985', normalQuantile(0.975), 1.9599639845400545, 1e-11);
+  close('the normal distribution is symmetric', normalCdf(-1.4) + normalCdf(1.4), 1, 1e-14);
+
+  // Two-sided critical values of t, as printed in every methods appendix.
+  close('t(0.975, df=10) = 2.228', tQuantile(0.975, 10), 2.228, 5e-4);
+  close('t(0.975, df=30) = 2.042', tQuantile(0.975, 30), 2.042, 5e-4);
+  close('t(0.995, df=20) = 2.845', tQuantile(0.995, 20), 2.845, 5e-4);
+  close('a t of 2.228 at df=10 gives p = 0.05', tTwoTailed(2.228138851965, 10), 0.05, 1e-9);
+  close('t is symmetric about zero', tCdf(-1.7, 12) + tCdf(1.7, 12), 1, 1e-14);
+  close('t with huge df approaches the normal', tCdf(1.96, 5_000_000), normalCdf(1.96), 1e-6);
+
+  // Chi-square critical values.
+  close('χ²(0.95, df=1) = 3.841', chiSquareQuantile(0.95, 1), 3.841, 5e-4);
+  close('χ²(0.95, df=2) = 5.991', chiSquareQuantile(0.95, 2), 5.991, 5e-4);
+  close('χ²(0.95, df=10) = 18.307', chiSquareQuantile(0.95, 10), 18.307, 5e-4);
+  close('χ²(0.99, df=4) = 13.277', chiSquareQuantile(0.99, 4), 13.277, 5e-4);
+
+  // F critical values.
+  close('F(0.95; 5, 10) = 3.3258', fQuantile(0.95, 5, 10), 3.3258, 5e-4);
+  close('F(0.95; 1, 10) = 4.9646', fQuantile(0.95, 1, 10), 4.9646, 5e-4);
+  close('F(0.95; 3, 20) = 3.0984', fQuantile(0.95, 3, 20), 3.0984, 5e-4);
+
+  /*
+   * Identities that must hold between the families. These catch a whole class
+   * of error that table lookups cannot: a distribution that is individually
+   * plausible but inconsistent with its neighbours.
+   */
+  close('χ² with df=1 is the square of a normal', chiSquareSf(1.96 ** 2, 1), 2 * (1 - normalCdf(1.96)), 1e-14);
+  close('t² with df=n is F(1, n)', fSf(2.5 ** 2, 1, 17), tTwoTailed(2.5, 17), 1e-14);
+  close('the F quantile inverts the F cdf', fCdf(fQuantile(0.95, 5, 10), 5, 10), 0.95, 1e-12);
+  close('the χ² quantile inverts the χ² cdf', chiSquareSf(chiSquareQuantile(0.99, 7), 7), 0.01, 1e-10);
+
+  /*
+   * The tail is computed directly rather than as 1 − cdf. Were it not, this
+   * assertion would read p = 0, and "p = 0" is never true of a continuous
+   * distribution — it is a rounding error being reported as a discovery.
+   */
+  assertTrue('a far tail keeps its precision instead of collapsing to zero', tTwoTailed(12, 20) > 0);
+  assertTrue('the far tail is genuinely small', tTwoTailed(12, 20) < 1e-9);
+
+  /* ------------------------------------------------------------- pearson */
+
+  close('a perfect positive relationship is r = 1', pearson([1, 2, 3, 4], [2, 4, 6, 8]), 1, 1e-14);
+  close('a perfect negative relationship is r = −1', pearson([1, 2, 3, 4], [8, 6, 4, 2]), -1, 1e-14);
+  // Two series differing by one swapped pair: r = 0.8 exactly.
+  close('a mixed relationship', pearson([1, 2, 3, 4, 5], [2, 1, 4, 3, 5]), 0.8, 1e-14);
+  assertTrue('a constant series has no correlation', Number.isNaN(pearson([3, 3, 3], [1, 2, 3])));
+
+  /* ----------------------------------------------------- Cronbach's alpha */
+
+  /*
+   * A five-item attitude scale answered by twenty respondents. Items 1–4 hang
+   * together; item 5 was written in the opposite direction and never recoded,
+   * which is the single most common defect in student questionnaire data.
+   *
+   * Every expected value below was produced independently with NumPy from the
+   * defining formulas, not recorded from this implementation.
+   */
+  const scaleRows = [
+    [4, 5, 4, 4, 3], [2, 2, 3, 2, 4], [5, 4, 5, 5, 2], [3, 3, 2, 3, 5],
+    [4, 4, 4, 5, 3], [1, 2, 1, 1, 4], [5, 5, 4, 5, 1], [3, 2, 3, 3, 5],
+    [2, 3, 2, 2, 3], [4, 4, 5, 4, 2], [3, 4, 3, 3, 4], [5, 5, 5, 4, 3],
+    [2, 1, 2, 2, 5], [4, 3, 4, 4, 2], [3, 3, 4, 3, 4], [1, 1, 2, 1, 3],
+    [5, 4, 4, 5, 4], [2, 3, 3, 2, 2], [4, 5, 5, 4, 5], [3, 2, 3, 4, 3],
+  ];
+
+  const scaleDataset: Dataset = {
+    columns: ['q1', 'q2', 'q3', 'q4', 'q5'],
+    rows: scaleRows.map((row) => [...row]),
+    source: 'scale.csv',
+    skippedRows: 0,
+  };
+  const scaleProfile = profileDataset(scaleDataset);
+  const items = ['q1', 'q2', 'q3', 'q4', 'q5'];
+
+  check('every scale item is recognised as Likert', scaleProfile.columns.every((column) => column.type === 'likert'), true);
+  check('Likert items are ordinal, not interval', scaleProfile.columns.every((column) => column.scale === 'ordinal'), true);
+
+  const alpha = cronbachAlpha(scaleDataset, scaleProfile, items);
+
+  close('α = 0.7477422833', alpha.alpha, 0.7477422833265936, 1e-12);
+  close('the sum of item variances', alpha.sumItemVariances, 7.844736842105263, 1e-12);
+  close('the variance of the total score', alpha.scaleVariance, 19.52368421052631, 1e-12);
+  close('standardised α = 0.7317613127', alpha.standardisedAlpha, 0.731761312724813, 1e-12);
+  close('the mean inter-item correlation', alpha.averageInterItemCorrelation, 0.35300399733387944, 1e-12);
+  close('the scale mean', alpha.scaleMean, 16.55, 1e-12);
+  check('α of 0.75 reads as acceptable', alpha.band, 'acceptable');
+  check('all twenty respondents were used', alpha.sampleSize, 20);
+  check('no rows were dropped', alpha.rowsDropped, 0);
+  check('five items', alpha.itemCount, 5);
+
+  close('the first item correlates .906 with the rest', alpha.items[0]?.itemTotalCorrelation ?? 0, 0.9059092110313696, 1e-12);
+  close('dropping the first item would hurt', alpha.items[0]?.alphaIfDeleted ?? 0, 0.5361875637104994, 1e-12);
+  close('the un-recoded item correlates −.372 with the rest', alpha.items[4]?.itemTotalCorrelation ?? 0, -0.37169877482930874, 1e-12);
+  close('dropping the un-recoded item would raise α to .947', alpha.items[4]?.alphaIfDeleted ?? 0, 0.9473850031505986, 1e-12);
+
+  assertTrue(
+    'the un-recoded item is reported as reverse-coded',
+    alpha.warnings.some((warning) => warning.code === 'reverse-coded-item' && warning.columns.includes('q5')),
+  );
+  assertTrue(
+    'the reverse-coded warning is an error, not a note',
+    alpha.warnings.find((warning) => warning.code === 'reverse-coded-item')?.severity === 'error',
+  );
+  assertTrue(
+    'a sample of twenty is flagged as small',
+    alpha.warnings.some((warning) => warning.code === 'small-sample'),
+  );
+
+  // The confidence interval is asymmetric, brackets the estimate, and stays below 1.
+  assertTrue('α has a confidence interval', alpha.confidenceInterval !== null);
+  assertTrue('the interval brackets the estimate', (alpha.confidenceInterval?.lower ?? 1) < alpha.alpha && alpha.alpha < (alpha.confidenceInterval?.upper ?? 0));
+  assertTrue('the upper bound stays below 1', (alpha.confidenceInterval?.upper ?? 2) < 1);
+
+  /* Recoding the offending item is what the warning is telling the user to do. */
+  const recodedDataset: Dataset = {
+    ...scaleDataset,
+    rows: scaleRows.map((row) => [row[0]!, row[1]!, row[2]!, row[3]!, 6 - row[4]!]),
+  };
+  const recoded = cronbachAlpha(recodedDataset, profileDataset(recodedDataset), items);
+  close('recoding the reversed item raises α to .898', recoded.alpha, 0.8975026014568157, 1e-12);
+  check('the recoded scale reads as good', recoded.band, 'good');
+  assertTrue(
+    'no item is flagged as reversed once it is recoded',
+    !recoded.warnings.some((warning) => warning.code === 'reverse-coded-item'),
+  );
+
+  /* Missing data is deleted listwise, and the deletion is reported. */
+  const gappyRows = scaleRows.map((row) => [...row] as (number | null)[]);
+  gappyRows[2]![1] = null;
+  gappyRows[7]![3] = null;
+  const gappyDataset: Dataset = {
+    columns: ['q1', 'q2', 'q3', 'q4', 'q5'],
+    rows: gappyRows,
+    source: 'gappy.csv',
+    skippedRows: 0,
+  };
+  const gappy = cronbachAlpha(gappyDataset, profileDataset(gappyDataset), items);
+  check('a respondent with any blank item is dropped', gappy.sampleSize, 18);
+  check('the dropped rows are counted', gappy.rowsDropped, 2);
+  check('the original row count is kept for comparison', gappy.rowsSupplied, 20);
+  close('α on the eighteen complete cases', gappy.alpha, 0.7742063492063491, 1e-12);
+  assertTrue(
+    'the listwise deletion is reported to the user',
+    gappy.warnings.some((warning) => warning.code === 'listwise-deletion' || warning.code === 'heavy-listwise-deletion'),
+  );
+
+  /* A perfectly parallel set has α = 1 exactly. */
+  const parallelDataset: Dataset = {
+    columns: ['a', 'b', 'c'],
+    rows: [[1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5, 6]],
+    source: 'parallel.csv',
+    skippedRows: 0,
+  };
+  close('perfectly parallel items give α = 1', cronbachAlpha(parallelDataset, profileDataset(parallelDataset), ['a', 'b', 'c']).alpha, 1, 1e-12);
+
+  /* ------------------------------------------- what alpha must refuse */
+
+  function refuses(label: string, run: () => unknown, expectedReason: string) {
+    try {
+      run();
+      failed += 1;
+      console.error(`✗ ${label}\n    expected a DataParseError, got a result`);
+    } catch (error) {
+      if (error instanceof DataParseError && error.reasonKey === expectedReason) passed += 1;
+      else {
+        failed += 1;
+        console.error(`✗ ${label}\n    expected: ${expectedReason}\n    actual:   ${String(error)}`);
+      }
+    }
+  }
+
+  refuses(
+    'a single item is not a scale',
+    () => cronbachAlpha(scaleDataset, scaleProfile, ['q1']),
+    'analysis.reliability.error.tooFewItems',
+  );
+  refuses(
+    'the same item twice is refused',
+    () => cronbachAlpha(scaleDataset, scaleProfile, ['q1', 'q1', 'q2']),
+    'analysis.reliability.error.duplicateItem',
+  );
+  refuses(
+    'a column that is not in the file is refused',
+    () => cronbachAlpha(scaleDataset, scaleProfile, ['q1', 'q99']),
+    'analysis.reliability.error.unknownColumn',
+  );
+
+  /*
+   * The measurement-scale guard. A name or a city is nominal, and summing it
+   * into a scale score is meaningless however willing the arithmetic is.
+   */
+  const textDataset: Dataset = {
+    columns: ['q1', 'city'],
+    rows: [
+      [4, 'Irbid'], [2, 'Amman'], [5, 'Irbid'], [3, 'Zarqa'], [4, 'Amman'],
+      [1, 'Irbid'], [5, 'Zarqa'], [3, 'Amman'], [2, 'Irbid'], [4, 'Zarqa'],
+    ],
+    source: 'text.csv',
+    skippedRows: 0,
+  };
+  refuses(
+    'a categorical column cannot be a scale item',
+    () => cronbachAlpha(textDataset, profileDataset(textDataset), ['q1', 'city']),
+    'analysis.reliability.error.notNumericColumn',
+  );
+
+  const constantDataset: Dataset = {
+    columns: ['a', 'b'],
+    rows: [[3, 3], [3, 3], [3, 3], [3, 3]],
+    source: 'constant.csv',
+    skippedRows: 0,
+  };
+  refuses(
+    'a scale with no variance has no reliability',
+    () => cronbachAlpha(constantDataset, profileDataset(constantDataset), ['a', 'b']),
+    'analysis.reliability.error.noVariance',
+  );
 
   console.log(
     failed === 0

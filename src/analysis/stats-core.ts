@@ -144,6 +144,43 @@ export function toNumber(value: unknown): number | null {
   return percent ? signed / 100 : signed;
 }
 
+/**
+ * Pearson's product-moment correlation between two equal-length series.
+ *
+ * Returns `NaN` when either series is constant, which is the honest answer: a
+ * variable that does not vary cannot co-vary with anything, and returning zero
+ * would state independence where nothing was measured. Callers are expected to
+ * check, and the reliability module reports such items rather than averaging
+ * them in.
+ *
+ * Computed in two passes from the means rather than from the sums of squares.
+ * The single-pass form is famous for losing every significant digit when the
+ * values are large and their spread is small — a 5-point Likert item is safe,
+ * but an income column in the same table is not.
+ */
+export function pearson(xs: number[], ys: number[]): number {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 2) return Number.NaN;
+
+  const mx = mean(xs.slice(0, n));
+  const my = mean(ys.slice(0, n));
+
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    const dx = (xs[i] as number) - mx;
+    const dy = (ys[i] as number) - my;
+    sxy += dx * dy;
+    sxx += dx * dx;
+    syy += dy * dy;
+  }
+
+  if (sxx === 0 || syy === 0) return Number.NaN;
+  return sxy / Math.sqrt(sxx * syy);
+}
+
 /** Ranks with ties averaged — the basis of Spearman's correlation. */
 export function rank(values: number[]): number[] {
   const indexed = values.map((value, index) => ({ value, index }));

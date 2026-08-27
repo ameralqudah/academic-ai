@@ -12,6 +12,30 @@ export { parseXlsx } from './parse-xlsx';
 export { profileDataset } from './profile';
 export { applyCleaning, planCleaning } from './clean';
 export { reportToText, toCsv } from './serialize';
+export {
+  chiSquareCdf,
+  chiSquareQuantile,
+  chiSquareSf,
+  fCdf,
+  fQuantile,
+  fSf,
+  normalCdf,
+  normalQuantile,
+  normalSf,
+  tCdf,
+  tQuantile,
+  tSf,
+  tTwoTailed,
+} from './distributions';
+export { bandFor, cronbachAlpha } from './reliability';
+export type {
+  ReliabilityBand,
+  ReliabilityItem,
+  ReliabilityOptions,
+  ReliabilityResult,
+  ReliabilityWarning,
+  ReliabilityWarningCode,
+} from './reliability';
 export * from './types';
 
 import { DataParseError, parseCsv } from './parse';

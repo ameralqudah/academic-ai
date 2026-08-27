@@ -1,0 +1,701 @@
+/**
+ * Integration tests against a real PostgreSQL database.
+ *
+ *   createdb academic_ai_test
+ *   DATABASE_URL=postgresql://…/academic_ai_test npm run db:migrate
+ *   DATABASE_URL=postgresql://…/academic_ai_test npm run db:seed
+ *   DATABASE_URL=postgresql://…/academic_ai_test npm run test:integration
+ *
+ * These exercise the service layer — ownership, plan limits, usage metering,
+ * billing, section versioning, export — with real SQL underneath. They never call
+ * an AI provider, so no API key is needed.
+ *
+ * Every test creates its own users with a run-scoped email prefix and deletes
+ * them at the end, so the suite is safe to re-run and leaves nothing behind.
+ */
+
+import 'dotenv/config';
+
+import bcrypt from 'bcryptjs';
+import { eq, like } from 'drizzle-orm';
+
+import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
+import { resetEnvCache } from '@/config/env';
+import { db } from '@/server/db';
+import { users } from '@/server/db/schema';
+import { AppError } from '@/server/http/errors';
+import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
+import * as adminRepo from '@/server/repositories/admin.repository';
+import * as paymentsRepo from '@/server/repositories/payments.repository';
+import * as plansRepo from '@/server/repositories/plans.repository';
+import { periodKeyFor } from '@/server/repositories/usage.repository';
+import {
+  register,
+  requestPasswordReset,
+  resetPassword,
+} from '@/server/services/account.service';
+import { applyBillingEvent, cancelSubscription, listUserPayments, startCheckout } from '@/server/services/billing.service';
+import { exportProjectDocx } from '@/server/services/export.service';
+import {
+  createProject,
+  getOwnedProject,
+  getProjectWithSections,
+  switchDocType,
+} from '@/server/services/project.service';
+import { addReference, listReferences, markVerified } from '@/server/services/reference.service';
+import { approveSection, listVersions, saveSection } from '@/server/services/section.service';
+import { resolvePlanForUser } from '@/server/services/subscription.service';
+import { isOwnerEmail } from '@/server/auth/owner';
+import {
+  assertCanCreateProject,
+  assertCanUseAI,
+  getSummary,
+  recordAIUsage,
+} from '@/server/services/usage.service';
+
+const RUN = `itest-${Date.now()}`;
+let passed = 0;
+let failed = 0;
+
+function check(name: string, actual: unknown, expected: unknown) {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  if (ok) {
+    passed += 1;
+    console.log(`  ok   ${name}`);
+  } else {
+    failed += 1;
+    console.log(`  FAIL ${name}: got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+  }
+}
+
+function assertTrue(name: string, value: boolean) {
+  check(name, value, true);
+}
+
+async function expectAppError(name: string, code: string, run: () => Promise<unknown>) {
+  try {
+    await run();
+    failed += 1;
+    console.log(`  FAIL ${name}: expected ${code} but nothing was thrown`);
+  } catch (error) {
+    if (error instanceof AppError && error.code === code) {
+      passed += 1;
+      console.log(`  ok   ${name}`);
+    } else {
+      failed += 1;
+      console.log(
+        `  FAIL ${name}: expected ${code}, got ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
+function section(title: string) {
+  console.log(`\n${title}`);
+}
+
+async function newUser(tag: string) {
+  const email = `${RUN}-${tag}@example.test`;
+  const created = await register({
+    name: `Test ${tag}`,
+    email,
+    password: 'Passw0rd123',
+    confirmPassword: 'Passw0rd123',
+    locale: 'ar',
+  });
+  return created.id;
+}
+
+const projectInput = {
+  academicField: 'educationalSciences' as const,
+  specialization: 'المناهج وطرق التدريس',
+  degree: 'MASTER' as const,
+  language: 'AR' as const,
+  researchType: 'QUANTITATIVE' as const,
+  docType: 'PAPER' as const,
+  keywords: ['التعلم النشط', 'التحصيل الدراسي'],
+  problemArea:
+    'ضعف مستوى التحصيل في مادة الرياضيات لدى طلبة المرحلة الأساسية رغم تطبيق استراتيجيات حديثة.',
+};
+
+async function main() {
+  /* ---------------------------------------------------------------- accounts */
+  section('accounts & default plan');
+
+  const userA = await newUser('a');
+  const summaryA = await getSummary(userA);
+  check('new account lands on the default plan', summaryA.plan.code, 'FREE');
+  check('free plan allows one project', summaryA.projects.limit, 1);
+  check('free plan starts with zero usage', summaryA.aiRequests.used, 0);
+
+  await expectAppError('duplicate email is rejected', 'CONFLICT', () =>
+    register({
+      name: 'Duplicate',
+      email: `${RUN}-a@example.test`,
+      password: 'Passw0rd123',
+      confirmPassword: 'Passw0rd123',
+      locale: 'ar',
+    }),
+  );
+
+  // Three server components resolve the plan concurrently on a real page render.
+  // The unique index on subscriptions.userId used to make the losers throw 23505.
+  const userRace = await newUser('race');
+  const raced = await Promise.all([
+    resolvePlanForUser(userRace),
+    resolvePlanForUser(userRace),
+    resolvePlanForUser(userRace),
+  ]);
+  check('concurrent plan resolution does not race', raced.map((r) => r.plan.code), [
+    'FREE',
+    'FREE',
+    'FREE',
+  ]);
+
+  /* ---------------------------------------------------------------- projects */
+  section('projects & plan limits');
+
+  const project = await createProject(userA, projectInput);
+  const { sections } = await getProjectWithSections(project.id, userA);
+  check('a paper project gets the 13 wizard sections', sections.length, WIZARD_STEPS.length);
+  check('sections start empty', sections.every((s) => s.status === 'EMPTY'), true);
+
+  await expectAppError('second project hits the free limit', 'PLAN_LIMIT', () =>
+    assertCanCreateProject(userA),
+  );
+
+  const userB = await newUser('b');
+  await expectAppError("another user cannot open the project", 'NOT_FOUND', () =>
+    getOwnedProject(project.id, userB),
+  );
+
+  /* ---------------------------------------------------------------- sections */
+  section('sections, versions & approval');
+
+  const draft = 'مشكلة الدراسة تتمثل في تدنّي مستوى التحصيل رغم توافر الإمكانات.';
+  const saved = await saveSection({
+    projectId: project.id,
+    userId: userA,
+    sectionKey: 'PROBLEM',
+    content: draft,
+    origin: 'AI',
+    status: 'AI_SUGGESTED',
+  });
+  check('saving records the word count', saved.wordCount > 0, true);
+  check('AI output is marked as suggested', saved.status, 'AI_SUGGESTED');
+
+  await saveSection({
+    projectId: project.id,
+    userId: userA,
+    sectionKey: 'PROBLEM',
+    content: `${draft} وقد لوحظ ذلك عبر ثلاث سنوات متتالية.`,
+    origin: 'USER',
+  });
+
+  const versions = await listVersions(project.id, userA, 'PROBLEM');
+  check('every save keeps a version', versions.length, 2);
+  check('versions record who wrote them', versions.map((v) => v.origin).sort(), ['AI', 'USER']);
+
+  const approved = await approveSection(project.id, userA, 'PROBLEM');
+  check('approval sets the status', approved.status, 'APPROVED');
+  assertTrue('approval stamps approvedAt', approved.approvedAt instanceof Date);
+
+  // The upsert conflict path used to drop approvedAt.
+  const reapproved = await saveSection({
+    projectId: project.id,
+    userId: userA,
+    sectionKey: 'PROBLEM',
+    content: approved.content,
+    origin: 'USER',
+    status: 'APPROVED',
+  });
+  assertTrue('re-saving an approved section keeps approvedAt', reapproved.approvedAt instanceof Date);
+
+  const afterApproval = await getOwnedProject(project.id, userA);
+  assertTrue('project progress moves off zero', afterApproval.progressPercent > 0);
+  assertTrue('project word count is aggregated', afterApproval.totalWords > 0);
+
+  await expectAppError('an empty section cannot be approved', 'CONFLICT', () =>
+    approveSection(project.id, userA, 'CONCLUSION'),
+  );
+
+  /* ------------------------------------------------------------- doc type */
+  section('document type switching');
+
+  await switchDocType(project.id, userA, 'PROPOSAL');
+  const afterSwitch = await getProjectWithSections(project.id, userA);
+  check('switching to a proposal keeps existing sections', afterSwitch.project.docType, 'PROPOSAL');
+  check(
+    'every proposal part now exists',
+    PROPOSAL_SECTIONS.every((key) =>
+      afterSwitch.sections.some((row) => row.sectionKey === key),
+    ),
+    true,
+  );
+  check(
+    'the approved problem statement survived the switch',
+    afterSwitch.sections.find((row) => row.sectionKey === 'PROBLEM')?.status,
+    'APPROVED',
+  );
+
+  /* ------------------------------------------------------------- references */
+  section('references & verification');
+
+  const reference = await addReference({
+    projectId: project.id,
+    userId: userA,
+    rawText: 'الزهراني، محمد. (2021). أثر التعلم النشط في التحصيل. مجلة التربية، 12(3)، 45-67.',
+  });
+  check('a new reference is unverified', reference.verification, 'UNVERIFIED');
+
+  const verified = await markVerified(project.id, userA, reference.id);
+  check('only an explicit action confirms it', verified.verification, 'USER_CONFIRMED');
+
+  await expectAppError('references are project-scoped', 'NOT_FOUND', () =>
+    listReferences(project.id, userB),
+  );
+
+  /* ------------------------------------------------------------------ usage */
+  section('usage metering');
+
+  await recordAIUsage({
+    userId: userA,
+    projectId: project.id,
+    generatedWords: 450,
+    tokensIn: 1200,
+    tokensOut: 800,
+    costMicroUsd: 15_600,
+    provider: 'anthropic',
+    model: 'test-model',
+  });
+
+  const afterUsage = await getSummary(userA);
+  check('a request is counted', afterUsage.aiRequests.used, 1);
+  check('generated words are counted', afterUsage.generatedWords.used, 450);
+  check('remaining is derived from the plan', afterUsage.aiRequests.remaining, 19);
+
+  for (let i = 0; i < 19; i += 1) {
+    await recordAIUsage({
+      userId: userA,
+      projectId: project.id,
+      generatedWords: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costMicroUsd: 1,
+      provider: 'anthropic',
+      model: 'test-model',
+    });
+  }
+
+  await expectAppError('the request quota is enforced', 'PLAN_LIMIT', () =>
+    assertCanUseAI(userA, 10),
+  );
+
+  /* ---------------------------------------------------------------- billing */
+  section('billing');
+
+  const checkout = await startCheckout({ userId: userA, planCode: 'PRO', locale: 'ar' });
+  check('manual billing applies the change directly', checkout.applied, true);
+
+  const proSummary = await getSummary(userA);
+  check('the user is now on Pro', proSummary.plan.code, 'PRO');
+  check('Pro raises the project limit', proSummary.projects.limit, 25);
+  check('Pro unlocks the editor', proSummary.toolAccess.editor, true);
+  check('usage carries over, it is not reset by an upgrade', proSummary.aiRequests.used, 20);
+
+  await assertCanCreateProject(userA);
+  passed += 1;
+  console.log('  ok   a Pro user can create another project');
+
+  /* ----------------------------------------------------------------- export */
+  section('export');
+
+  const exported = await exportProjectDocx({
+    projectId: project.id,
+    userId: userA,
+    sectionLabels: { problem: 'مشكلة الدراسة' },
+    referencesLabel: 'المراجع',
+    unverifiedLabel: 'غير متحقَّق منه',
+  });
+  check('export produces a docx container', exported.buffer.subarray(0, 2).toString('latin1'), 'PK');
+  assertTrue('the exported file is not trivially small', exported.buffer.byteLength > 2000);
+  assertTrue('the filename comes from the project title', exported.filename.endsWith('.docx'));
+
+  await expectAppError('a free user cannot export', 'PLAN_LIMIT', () =>
+    exportProjectDocx({
+      projectId: project.id,
+      userId: userB,
+      sectionLabels: {},
+      referencesLabel: 'المراجع',
+      unverifiedLabel: 'غير متحقَّق منه',
+    }),
+  );
+
+  /* ------------------------------------------------------------ cancellation */
+  section('cancellation');
+
+  await cancelSubscription(userA, false);
+  const afterCancel = await getSummary(userA);
+  check('cancelling returns the user to the free plan', afterCancel.plan.code, 'FREE');
+  check('the free plan locks the editor again', afterCancel.toolAccess.editor, false);
+
+  /* ---------------------------------------------------------------- admin */
+  section('admin aggregates');
+
+  const periodKey = periodKeyFor();
+  const stats = await adminRepo.platformStats(periodKey);
+  assertTrue('platform stats count our users', stats.totalUsers >= 3);
+  assertTrue('platform stats count AI requests', stats.aiRequestsThisPeriod >= 20);
+
+  const byUser = await adminRepo.usageByUser(periodKey, 10);
+  assertTrue('usage by user includes the test account', byUser.some((row) => row.userId === userA));
+
+  const byProvider = await adminRepo.usageByProvider(periodKey);
+  assertTrue(
+    'usage by provider groups the test model',
+    byProvider.some((row) => row.model === 'test-model'),
+  );
+
+  const daily = await adminRepo.dailyUsage(30);
+  assertTrue('daily usage returns at least today', daily.length >= 1);
+
+  const listed = await adminRepo.listUsers({ search: RUN, limit: 10, offset: 0 });
+  check('user search finds this run', listed.total, 3);
+
+  /* -------------------------------------------------------- password reset */
+  section('password reset');
+
+  const resetEmail = `${RUN}-b@example.test`;
+  const requested = await requestPasswordReset(resetEmail, 'ar');
+  assertTrue('a reset link is issued for a known address', Boolean(requested.devUrl));
+
+  const link = new URL(requested.devUrl ?? 'http://x/');
+  const uid = link.searchParams.get('uid') ?? '';
+  const resetToken = link.searchParams.get('token') ?? '';
+  check('the link carries the user id', uid, userB);
+  check('the token is 32 random bytes in hex', resetToken.length, 64);
+
+  await resetPassword({ userId: uid, token: resetToken, password: 'BrandNew123' });
+  const [afterReset] = await db.select().from(users).where(eq(users.id, userB)).limit(1);
+  assertTrue(
+    'the new password is stored hashed and verifies',
+    await bcrypt.compare('BrandNew123', afterReset?.passwordHash ?? ''),
+  );
+  assertTrue(
+    'the old password no longer works',
+    !(await bcrypt.compare('Passw0rd123', afterReset?.passwordHash ?? '')),
+  );
+
+  await expectAppError('a reset link works only once', 'CONFLICT', () =>
+    resetPassword({ userId: uid, token: resetToken, password: 'Another123' }),
+  );
+
+  await expectAppError('a forged token is rejected', 'CONFLICT', () =>
+    resetPassword({ userId: uid, token: 'f'.repeat(64), password: 'Another123' }),
+  );
+
+  const unknown = await requestPasswordReset(`${RUN}-nobody@example.test`, 'ar');
+  check('an unknown address reveals nothing', unknown.devUrl, undefined);
+
+  /* ------------------------------------------------------------ rate limit */
+  section('rate limiting');
+
+  resetRateLimitStore();
+  const limitKey = `test:${RUN}`;
+  const first = await consume(limitKey, 3, 60);
+  await consume(limitKey, 3, 60);
+  const third = await consume(limitKey, 3, 60);
+  const fourth = await consume(limitKey, 3, 60);
+
+  check('the first request is allowed', first.allowed, true);
+  check('remaining counts down', third.remaining, 0);
+  check('the fourth request is blocked', fourth.allowed, false);
+  assertTrue('a blocked request reports when to retry', fourth.retryAfterSeconds > 0);
+
+  const otherKey = await consume(`test:${RUN}:other`, 3, 60);
+  check('separate keys have separate windows', otherKey.allowed, true);
+
+  /* --------------------------------------------------- billing lifecycle */
+  section('billing lifecycle (gateway events)');
+
+  const payer = await newUser('payer');
+  const nextMonth = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+  await applyBillingEvent({
+    type: 'subscription.activated',
+    userId: payer,
+    planCode: 'PRO',
+    externalSubscriptionId: `I-${RUN}-SUB`,
+    externalCustomerId: `CUST-${RUN}`,
+    periodEnd: nextMonth,
+    externalEventId: `evt-${RUN}-1`,
+  });
+
+  const activated = await resolvePlanForUser(payer);
+  check('an activation event grants Pro', activated.plan.code, 'PRO');
+  check('activation records the renewal date', activated.periodEnd !== null, true);
+  assertTrue('activation marks the account as Pro', activated.isPro);
+
+  // The renewal charge: a sale with no next-billing date must still roll the
+  // period forward, otherwise a paying subscriber lapses after one month.
+  await applyBillingEvent({
+    type: 'payment.succeeded',
+    externalSubscriptionId: `I-${RUN}-SUB`,
+    externalEventId: `evt-${RUN}-2`,
+    payment: {
+      externalPaymentId: `PAY-${RUN}-1`,
+      amountCents: 1500,
+      currency: 'USD',
+      occurredAt: new Date(),
+    },
+  });
+
+  const afterRenewal = await resolvePlanForUser(payer);
+  check('a renewal keeps the account on Pro', afterRenewal.plan.code, 'PRO');
+
+  const ledger = await listUserPayments(payer);
+  check('the charge is written to the ledger', ledger.length, 1);
+  check('the ledger stores the amount in minor units', ledger[0]?.amountCents, 1500);
+  check('the ledger marks it paid', ledger[0]?.status, 'SUCCEEDED');
+
+  // PayPal redelivers webhooks routinely; counting a sale twice would overstate
+  // revenue in the admin dashboard.
+  await applyBillingEvent({
+    type: 'payment.succeeded',
+    externalSubscriptionId: `I-${RUN}-SUB`,
+    externalEventId: `evt-${RUN}-2-redelivered`,
+    payment: {
+      externalPaymentId: `PAY-${RUN}-1`,
+      amountCents: 1500,
+      currency: 'USD',
+      occurredAt: new Date(),
+    },
+  });
+
+  check('a redelivered webhook is not double-counted', (await listUserPayments(payer)).length, 1);
+
+  /* a failed payment must never be a route to Pro */
+  const deadbeat = await newUser('deadbeat');
+  await applyBillingEvent({
+    type: 'payment.failed',
+    userId: deadbeat,
+    externalSubscriptionId: `I-${RUN}-FAIL`,
+    externalEventId: `evt-${RUN}-3`,
+  });
+
+  const failedPlan = await resolvePlanForUser(deadbeat);
+  check('a failed payment leaves the account on Free', failedPlan.plan.code, 'FREE');
+  assertTrue('a failed payment does not grant Pro', !failedPlan.isPro);
+  check('the failure is recorded', (await listUserPayments(deadbeat))[0]?.status, 'FAILED');
+
+  /* cancellation honours time already paid for */
+  await applyBillingEvent({
+    type: 'subscription.canceled',
+    userId: payer,
+    externalSubscriptionId: `I-${RUN}-SUB`,
+    externalEventId: `evt-${RUN}-4`,
+  });
+
+  const cancelled = await resolvePlanForUser(payer);
+  check('cancelling keeps Pro until the period ends', cancelled.plan.code, 'PRO');
+  assertTrue('cancelling flags the end of the period', cancelled.cancelAtPeriodEnd);
+
+  /* …and the plan lapses once that period is over */
+  const payerSub = await plansRepo.findSubscriptionByUser(payer);
+  if (payerSub) {
+    await plansRepo.updateSubscription(payerSub.subscription.id, {
+      periodEnd: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    });
+  }
+
+  const lapsed = await resolvePlanForUser(payer);
+  check('an expired period falls back to Free', lapsed.plan.code, 'FREE');
+  assertTrue('an expired period revokes Pro', !lapsed.isPro);
+
+  /* a renewal that lands after the grace period must restore Pro, not bury it */
+  const straggler = await newUser('straggler');
+  await applyBillingEvent({
+    type: 'subscription.activated',
+    userId: straggler,
+    planCode: 'PRO',
+    providerStatus: 'ACTIVE',
+    externalSubscriptionId: `I-${RUN}-LATE`,
+    periodEnd: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    externalEventId: `evt-${RUN}-10`,
+  });
+
+  const stragglerSub = await plansRepo.findSubscriptionByUser(straggler);
+  if (stragglerSub) {
+    await plansRepo.updateSubscription(stragglerSub.subscription.id, {
+      periodEnd: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+    });
+  }
+
+  check('the lapse takes effect on read', (await resolvePlanForUser(straggler)).plan.code, 'FREE');
+
+  // The retried card finally clears. Without the paid plan surviving the lapse,
+  // this event would write ACTIVE-on-FREE and strand a paying customer.
+  await applyBillingEvent({
+    type: 'payment.succeeded',
+    externalSubscriptionId: `I-${RUN}-LATE`,
+    externalEventId: `evt-${RUN}-11`,
+    payment: {
+      externalPaymentId: `PAY-${RUN}-LATE`,
+      amountCents: 1500,
+      currency: 'USD',
+      occurredAt: new Date(),
+    },
+  });
+
+  const restored = await resolvePlanForUser(straggler);
+  check('a late renewal restores the paid plan', restored.plan.code, 'PRO');
+  assertTrue('a late renewal restores Pro access', restored.isPro);
+
+  /* an UPDATED event that PayPal does not call ACTIVE must grant nothing */
+  const editor = await newUser('editor');
+  await applyBillingEvent({
+    type: 'payment.failed',
+    userId: editor,
+    externalSubscriptionId: `I-${RUN}-SUSP`,
+    externalEventId: `evt-${RUN}-12`,
+  });
+
+  const updateOutcome = await applyBillingEvent({
+    type: 'subscription.updated',
+    userId: editor,
+    planCode: 'PRO',
+    providerStatus: 'SUSPENDED',
+    externalSubscriptionId: `I-${RUN}-SUSP`,
+    periodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    externalEventId: `evt-${RUN}-13`,
+  });
+
+  check('a non-active update is ignored', updateOutcome, 'ignored');
+  check(
+    'editing a funding source does not grant Pro',
+    (await resolvePlanForUser(editor)).plan.code,
+    'FREE',
+  );
+
+  /* a sale that arrives before its activation must be retried, not dropped */
+  const orphan = await applyBillingEvent({
+    type: 'payment.succeeded',
+    externalSubscriptionId: `I-${RUN}-UNKNOWN`,
+    externalEventId: `evt-${RUN}-14`,
+    payment: {
+      externalPaymentId: `PAY-${RUN}-ORPHAN`,
+      amountCents: 1500,
+      currency: 'USD',
+      occurredAt: new Date(),
+    },
+  });
+  check('an unattributable sale asks for redelivery', orphan, 'unmatched');
+
+  /* refunds link back through the charge they reverse */
+  await applyBillingEvent({
+    type: 'payment.refunded',
+    relatedPaymentId: `PAY-${RUN}-1`,
+    externalEventId: `evt-${RUN}-15`,
+    payment: {
+      externalPaymentId: `REF-${RUN}-1`,
+      amountCents: 1500,
+      currency: 'USD',
+      occurredAt: new Date(),
+    },
+  });
+
+  const afterRefund = await listUserPayments(payer);
+  check(
+    'a refund is matched through the original charge',
+    afterRefund.some((row) => row.status === 'REFUNDED'),
+    true,
+  );
+
+  /* a retried failure notice does not pile up in the history */
+  const failEvent = {
+    type: 'payment.failed' as const,
+    userId: deadbeat,
+    externalSubscriptionId: `I-${RUN}-FAIL`,
+    externalEventId: `evt-${RUN}-3`,
+  };
+  await applyBillingEvent(failEvent);
+  await applyBillingEvent(failEvent);
+  check(
+    'a redelivered failure is recorded once',
+    (await listUserPayments(deadbeat)).filter((row) => row.status === 'FAILED').length,
+    1,
+  );
+
+  const revenue = await paymentsRepo.revenueSummary();
+  assertTrue('revenue reporting counts the successful charge', revenue.grossCents >= 1500);
+
+  /* ------------------------------------------------------ owner override */
+  section('owner override');
+
+  const ownerEmail = `${RUN}-owner@example.test`;
+  process.env.OWNER_EMAIL = `  ${ownerEmail.toUpperCase()}  `;
+  resetEnvCache();
+
+  const ownerId = await newUser('owner');
+  const ownerPlan = await resolvePlanForUser(ownerId);
+
+  check('the owner lands on the paid plan', ownerPlan.plan.code, 'PRO');
+  assertTrue('the owner counts as Pro', ownerPlan.isPro);
+  assertTrue('the owner is flagged as owner', ownerPlan.isOwner);
+  check('the owner plan never expires', ownerPlan.periodEnd, null);
+
+  // The address is matched case-insensitively and with surrounding whitespace,
+  // because it is typed into a hosting panel by hand.
+  assertTrue('owner matching ignores case', isOwnerEmail(ownerEmail.toUpperCase()));
+  assertTrue('owner matching ignores padding', isOwnerEmail(`  ${ownerEmail}  `));
+  assertTrue('a different address is not the owner', !isOwnerEmail('someone@example.test'));
+
+  // Owner access must not come from a subscription row, and must not create one
+  // that the billing system would then try to renew or cancel.
+  const ownerSubscription = await plansRepo.findSubscriptionByUser(ownerId);
+  check(
+    'the owner has no paid subscription record',
+    ownerSubscription ? ownerSubscription.plan.priceCents : 0,
+    0,
+  );
+
+  await expectAppError('the owner cannot start a checkout', 'CONFLICT', () =>
+    startCheckout({ userId: ownerId, planCode: 'PRO', locale: 'ar' }),
+  );
+
+  // Pro limits apply to the owner, so metering keeps working normally.
+  const ownerUsage = await getSummary(ownerId);
+  check('the owner gets the paid plan limits', ownerUsage.plan.code, 'PRO');
+  assertTrue('the owner is unrestricted by the free project cap', ownerUsage.projects.limit !== 1);
+
+  /* everyone else is untouched */
+  const bystander = await newUser('bystander');
+  const bystanderPlan = await resolvePlanForUser(bystander);
+  check('other accounts stay on the free plan', bystanderPlan.plan.code, 'FREE');
+  assertTrue('other accounts are not owners', !bystanderPlan.isOwner);
+  assertTrue('other accounts are not Pro', !bystanderPlan.isPro);
+
+  delete process.env.OWNER_EMAIL;
+  resetEnvCache();
+  check(
+    'clearing OWNER_EMAIL removes the override',
+    (await resolvePlanForUser(ownerId)).plan.code,
+    'FREE',
+  );
+
+  /* --------------------------------------------------------------- cleanup */
+  await db.delete(users).where(like(users.email, `${RUN}-%`));
+
+  console.log(
+    failed === 0
+      ? `\n✓ ${passed} integration assertions passed\n`
+      : `\n✗ ${failed} failing, ${passed} passing\n`,
+  );
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+main().catch(async (error) => {
+  console.error('\nintegration run crashed:', error);
+  await db.delete(users).where(like(users.email, `${RUN}-%`)).catch(() => undefined);
+  process.exit(1);
+});

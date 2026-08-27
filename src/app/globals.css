@@ -1,0 +1,205 @@
+/*
+ * Fonts are self-hosted from npm (@fontsource) rather than linked from Google.
+ * That means no third-party request on first paint, no dependency on
+ * fonts.gstatic.com being reachable at build time, and the woff2 files ship with
+ * the bundle. Each file is unicode-range scoped, so a page in English never
+ * downloads the Arabic faces and vice versa.
+ */
+@import '@fontsource/ibm-plex-sans-arabic/300.css';
+@import '@fontsource/ibm-plex-sans-arabic/400.css';
+@import '@fontsource/ibm-plex-sans-arabic/500.css';
+@import '@fontsource/ibm-plex-sans-arabic/600.css';
+@import '@fontsource/ibm-plex-sans-arabic/700.css';
+@import '@fontsource/amiri/400.css';
+@import '@fontsource/amiri/700.css';
+
+@import 'tailwindcss';
+
+/* Dark mode is driven by a `.dark` class on <html>, set by the theme script so the
+   first paint is already correct. `system` falls back to the media query. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-soft: var(--primary-soft);
+  --color-on-primary: var(--on-primary);
+
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-upgrade: var(--upgrade);
+  --color-upgrade-soft: var(--upgrade-soft);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display);
+
+  --radius-card: 0.75rem;
+}
+
+:root {
+  --font-body: 'IBM Plex Sans Arabic';
+  --font-display: 'Amiri';
+
+  --ground: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #eef2f7;
+  --ink: #0e1b2b;
+  --ink-soft: #33445a;
+  --muted: #5d6b7f;
+  --line: #dce3ec;
+  --line-strong: #c3cfde;
+
+  --primary: #12417a;
+  --primary-hover: #0d3161;
+  --primary-soft: #e6eefa;
+  --on-primary: #ffffff;
+
+  --accent: #0e8c97;
+  --accent-soft: #e0f4f5;
+  --upgrade: #6b57c7;
+  --upgrade-soft: #eee9fb;
+
+  --success: #1f7a55;
+  --warning: #9a6412;
+  --danger: #b4342c;
+
+  color-scheme: light;
+}
+
+.dark {
+  --ground: #0a121c;
+  --surface: #111c29;
+  --surface-2: #16232f;
+  --ink: #e7eef7;
+  --ink-soft: #c2d0e0;
+  --muted: #93a4b8;
+  --line: #223244;
+  --line-strong: #31465c;
+
+  --primary: #5fa0e4;
+  --primary-hover: #7fb2ea;
+  --primary-soft: #16283d;
+  --on-primary: #07131f;
+
+  --accent: #3fc0cb;
+  --accent-soft: #102b2f;
+  --upgrade: #9b8ae6;
+  --upgrade-soft: #201c39;
+
+  --success: #4cbf8e;
+  --warning: #d9a548;
+  --danger: #e4736a;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body), system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Arabic needs a slightly taller line box than Latin at the same size. */
+  [dir='rtl'] body {
+    line-height: 1.85;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display), Georgia, serif;
+    text-wrap: balance;
+  }
+
+  ::selection {
+    background-color: var(--primary);
+    color: var(--on-primary);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+  }
+
+  /* Numeric columns line up in dashboards and admin tables. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .container-page {
+    width: 100%;
+    margin-inline: auto;
+    padding-inline: 1.25rem;
+    max-width: 76rem;
+  }
+
+  .surface-card {
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-card);
+  }
+
+  .prose-editor {
+    font-size: 1.0625rem;
+    line-height: 1.9;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background-color: var(--line-strong);
+    border-radius: 999px;
+  }
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

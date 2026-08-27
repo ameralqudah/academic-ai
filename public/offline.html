@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>لا يوجد اتصال · Academic AI</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px;
+    background: #f4f6f9; color: #0e1b2b;
+    font-family: "IBM Plex Sans Arabic", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #0a121c; color: #e7eef7; } }
+  .card { max-width: 30rem; text-align: center; }
+  img { width: 72px; height: 72px; border-radius: 18px; margin-bottom: 20px; }
+  h1 { font-size: 1.4rem; margin: 0 0 10px; }
+  p { margin: 0 0 8px; line-height: 1.85; color: #33445a; }
+  @media (prefers-color-scheme: dark) { p { color: #c2d0e0; } }
+  .en { direction: ltr; font-family: "Segoe UI", system-ui, sans-serif; font-size: .9rem; opacity: .75; margin-top: 18px; }
+  button {
+    margin-top: 22px; padding: 11px 26px; border: 0; border-radius: 10px; cursor: pointer;
+    background: #12417a; color: #fff; font: inherit; font-size: .95rem;
+  }
+  button:hover { background: #0d3161; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="/icons/icon-192.png" alt="Academic AI">
+    <h1>لا يوجد اتصال بالإنترنت</h1>
+    <p>يحتاج Academic AI إلى اتصال للوصول إلى مشاريعك ومساعد الذكاء الاصطناعي. تحقّق من الشبكة ثم أعد المحاولة.</p>
+    <p class="en">You’re offline. Academic AI needs a connection to reach your projects and the AI assistant.</p>
+    <button onclick="location.reload()">إعادة المحاولة · Retry</button>
+  </div>
+</body>
+</html>

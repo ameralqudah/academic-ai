@@ -181,6 +181,44 @@ export function pearson(xs: number[], ys: number[]): number {
   return sxy / Math.sqrt(sxx * syy);
 }
 
+/**
+ * Sample covariance (n − 1), the unstandardised sibling of Pearson's r.
+ *
+ * Reported rarely and used constantly: covariance matrices are what factor
+ * analysis and structural models are actually fitted to, so this is here as
+ * much for what comes later as for what uses it now.
+ */
+export function covariance(xs: number[], ys: number[]): number {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 2) return Number.NaN;
+
+  const mx = mean(xs.slice(0, n));
+  const my = mean(ys.slice(0, n));
+
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    sum += ((xs[i] as number) - mx) * ((ys[i] as number) - my);
+  }
+
+  return sum / (n - 1);
+}
+
+/**
+ * Spearman's rank correlation: Pearson's r computed on the ranks.
+ *
+ * Implemented this way rather than through the shortcut formula 1 − 6Σd²/n(n²−1),
+ * which is the version in most textbooks and is **wrong whenever there are
+ * ties**. Likert data is nothing but ties — twenty respondents choosing among
+ * five options — so the shortcut would be wrong on essentially every dataset
+ * this product will meet. Ranking with ties averaged and correlating those
+ * ranks is correct in both cases and costs nothing extra.
+ */
+export function spearman(xs: number[], ys: number[]): number {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 2) return Number.NaN;
+  return pearson(rank(xs.slice(0, n)), rank(ys.slice(0, n)));
+}
+
 /** Ranks with ties averaged — the basis of Spearman's correlation. */
 export function rank(values: number[]): number[] {
   const indexed = values.map((value, index) => ({ value, index }));

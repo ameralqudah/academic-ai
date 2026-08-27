@@ -22,12 +22,100 @@ export {
   normalCdf,
   normalQuantile,
   normalSf,
+  studentizedRangeCdf,
+  studentizedRangeQuantile,
+  studentizedRangeSf,
   tCdf,
   tQuantile,
   tSf,
   tTwoTailed,
 } from './distributions';
-export { bandFor, cronbachAlpha } from './reliability';
+export { bandForAlpha, cronbachAlpha } from './reliability';
+export {
+  backSubstitute,
+  identity,
+  inverseFromR,
+  leastSquares,
+  multiply,
+  multiplyVector,
+  qrDecompose,
+  SingularMatrixError,
+  transpose,
+} from './linear-algebra';
+export type { Matrix, QRDecomposition, Vector } from './linear-algebra';
+export { AnovaError, oneWayAnova, tukeyHsd } from './inference/anova';
+export {
+  chiSquareGoodnessOfFit,
+  chiSquareIndependence,
+  ChiSquareError,
+  crossTabulate,
+  fisherExact2x2,
+} from './inference/chi-square';
+export type { ChiSquareOptions, ContingencyTable } from './inference/chi-square';
+export { correlate, correlationMatrix, CorrelationError, fisherInterval } from './inference/correlation';
+export { adjustPValues, multipleComparisonRisk } from './inference/multiple-comparisons';
+export type { PAdjustMethod } from './inference/multiple-comparisons';
+export { recommendTest, shouldCheckReliability } from './inference/recommend';
+export type {
+  Recommendation,
+  RecommendationConfidence,
+  RoleAssignment,
+  TestCandidate,
+} from './inference/recommend';
+export {
+  durbinWatsonStatistic,
+  heteroscedasticityTrend,
+  linearRegression,
+  RegressionError,
+  varianceInflationFactors,
+} from './inference/regression';
+export type { RegressionCoefficient, RegressionOptions } from './inference/regression';
+export type { CorrelationCell, CorrelationMatrixResult, CorrelationMethod, CorrelationOptions } from './inference/correlation';
+export type { AnovaOptions, TukeyComparison } from './inference/anova';
+export {
+  independentTTest,
+  oneSampleTTest,
+  pairedTTest,
+  TTestError,
+} from './inference/t-test';
+export type { TTestOptions } from './inference/t-test';
+export {
+  assessHomogeneity,
+  assessNormality,
+  independenceCheck,
+  levene,
+  shapiroWilk,
+  SHAPIRO_WILK_MAX_N,
+  SHAPIRO_WILK_MIN_N,
+} from './inference/assumptions';
+export type {
+  HomogeneityAssessment,
+  LeveneCenter,
+  LeveneResult,
+  NormalityAssessment,
+  ShapiroWilkResult,
+} from './inference/assumptions';
+export {
+  bandForCohensD,
+  bandForCorrelation,
+  bandForCramersV,
+  bandForEtaSquared,
+} from './inference/types';
+export type {
+  AnalysisWarning,
+  AssumptionCheck,
+  AssumptionKey,
+  AssumptionStatus,
+  ConfidenceInterval,
+  EffectBand,
+  EffectSize,
+  GroupEstimate,
+  InferentialResult,
+  MissingPolicy,
+  TestKey,
+  VariableRole,
+  VariableSpec,
+} from './inference/types';
 export type {
   ReliabilityBand,
   ReliabilityItem,

@@ -361,6 +361,180 @@ export function fQuantile(p: number, df1: number, df2: number): number {
 }
 
 /* -------------------------------------------------------------------------- */
+/*                       Studentized range distribution                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The distribution of q, the studentized range — needed by Tukey's HSD and by
+ * nothing else in this product.
+ *
+ * This is the odd one out in this file. The other four distributions have
+ * closed forms built from the incomplete gamma and beta functions; q does not.
+ * Its cumulative distribution is a double integral with no elementary
+ * antiderivative, so it is computed by numerical quadrature.
+ *
+ * Why it has to exist at all: after an ANOVA says "these groups are not all
+ * equal", the researcher needs to know *which* pairs differ. Running ordinary
+ * t-tests on every pair inflates the error rate — with five groups there are
+ * ten comparisons, and the chance of at least one false positive rises to
+ * about 40%. Tukey's HSD controls that by comparing against the distribution of
+ * the largest difference among k means rather than the distribution of one
+ * difference, and this function is that distribution.
+ *
+ * P(q ≤ value) = k ∫ φ(z) [Φ(z) − Φ(z − q·s)]^(k−1) dz, averaged over the
+ * sampling distribution of s, the estimated standard deviation on `df` degrees
+ * of freedom. Both integrals are evaluated with Gauss–Legendre quadrature over
+ * a truncated range; the integrands decay rapidly, so a fixed number of nodes
+ * reaches the accuracy needed for a p-value.
+ */
+
+/**
+ * Gauss–Legendre nodes and weights, computed rather than transcribed.
+ *
+ * The tables for these are printed in every numerical-methods reference and it
+ * is tempting to paste one in. This function exists because that is exactly
+ * what was tried first, and one weight in the middle of thirty was wrong: the
+ * set summed to 1.807 instead of 2, and every studentized-range probability
+ * came out 9.7% too small — a uniform bias that looked entirely plausible and
+ * would have quietly shifted every Tukey p-value in the product.
+ *
+ * Computing them makes the error impossible. The nodes are the roots of the
+ * n-th Legendre polynomial, found by Newton's method from the standard
+ * asymptotic starting guess, and the weights follow from the derivative at each
+ * root. The result is exact to machine precision and, unlike a table, cannot be
+ * mistyped. Computed once and cached; the cost is invisible.
+ */
+const quadratureCache = new Map<number, { nodes: number[]; weights: number[] }>();
+
+function gaussLegendre(n: number): { nodes: number[]; weights: number[] } {
+  const cached = quadratureCache.get(n);
+  if (cached) return cached;
+
+  const nodes = new Array<number>(n).fill(0);
+  const weights = new Array<number>(n).fill(0);
+
+  for (let i = 0; i < n; i += 1) {
+    // Chebyshev-like starting guess, accurate enough for Newton to converge fast.
+    let x = Math.cos((Math.PI * (i + 0.75)) / (n + 0.5));
+    let derivative = 0;
+
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      // Legendre recurrence: (m+1)P_{m+1} = (2m+1)xP_m − mP_{m−1}
+      let previous = 1;
+      let current = x;
+
+      for (let m = 1; m < n; m += 1) {
+        const next = ((2 * m + 1) * x * current - m * previous) / (m + 1);
+        previous = current;
+        current = next;
+      }
+
+      derivative = (n * (x * current - previous)) / (x * x - 1);
+      const step = current / derivative;
+      x -= step;
+      if (Math.abs(step) < 1e-15) break;
+    }
+
+    nodes[i] = x;
+    weights[i] = 2 / ((1 - x * x) * derivative * derivative);
+  }
+
+  const result = { nodes, weights };
+  quadratureCache.set(n, result);
+  return result;
+}
+
+/** Integrates `f` over [a, b] by composite Gauss–Legendre with `panels` panels. */
+function quadrature(f: (x: number) => number, a: number, b: number, panels: number, order = 24): number {
+  const { nodes, weights } = gaussLegendre(order);
+  const width = (b - a) / panels;
+  let total = 0;
+
+  for (let panel = 0; panel < panels; panel += 1) {
+    const centre = a + panel * width + width / 2;
+    const halfWidth = width / 2;
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      total += (weights[i] as number) * f(centre + halfWidth * (nodes[i] as number));
+    }
+  }
+
+  return total * (width / 2);
+}
+
+/** The standard normal density. */
+function normalPdf(z: number): number {
+  return Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+}
+
+/**
+ * P(range ≤ q) for k independent standard normals — the inner integral, with
+ * the standard deviation treated as known.
+ */
+function rangeCdfKnownSigma(q: number, k: number): number {
+  if (q <= 0) return 0;
+
+  const integrand = (z: number) => {
+    const upper = normalCdf(z);
+    const lower = normalCdf(z - q);
+    const gap = upper - lower;
+    if (gap <= 0) return 0;
+    return normalPdf(z) * Math.pow(gap, k - 1);
+  };
+
+  // The integrand is negligible beyond ±8 standard deviations either side.
+  return Math.min(1, k * quadrature(integrand, -8, 8 + q, 16));
+}
+
+/**
+ * P(q ≤ value) for the studentized range with `k` groups and `df` degrees of
+ * freedom on the error term.
+ *
+ * The outer integral averages the known-sigma result over the χ distribution of
+ * the estimated standard deviation. For large df the estimate is essentially
+ * exact, so the outer integral is skipped — which also avoids the loss of
+ * precision in the χ density at large df.
+ */
+export function studentizedRangeCdf(q: number, k: number, df: number): number {
+  if (!Number.isFinite(q) || q <= 0 || k < 2 || df < 1) return Number.NaN;
+  if (df > 25_000) return rangeCdfKnownSigma(q, k);
+
+  const half = df / 2;
+  const logConstant = half * Math.log(half) - logGamma(half);
+
+  const integrand = (s: number) => {
+    if (s <= 0) return 0;
+    // Density of s = sqrt(chi2_df / df), written in logs to survive large df.
+    const logDensity = logConstant + (df - 1) * Math.log(s) - (half * s * s) + Math.log(2);
+    const density = Math.exp(logDensity);
+    if (!Number.isFinite(density) || density === 0) return 0;
+    return density * rangeCdfKnownSigma(q * s, k);
+  };
+
+  /*
+   * s concentrates around 1 and its spread shrinks as df grows, so the range of
+   * integration is scaled to the standard deviation of s rather than fixed.
+   */
+  const spread = 1 / Math.sqrt(2 * df);
+  const lower = Math.max(1e-8, 1 - 10 * spread);
+  const upper = 1 + 10 * spread;
+
+  return Math.min(1, Math.max(0, quadrature(integrand, lower, upper, 12)));
+}
+
+/** The upper tail — the p-value of a Tukey comparison. */
+export function studentizedRangeSf(q: number, k: number, df: number): number {
+  const cdf = studentizedRangeCdf(q, k, df);
+  return Number.isFinite(cdf) ? Math.min(1, Math.max(0, 1 - cdf)) : Number.NaN;
+}
+
+/** The critical value of q — what a Tukey confidence interval is built from. */
+export function studentizedRangeQuantile(p: number, k: number, df: number): number {
+  if (!Number.isFinite(p) || p <= 0 || p >= 1 || k < 2 || df < 1) return Number.NaN;
+  return solveQuantile((q) => studentizedRangeCdf(q, k, df), p, 1e-6, 200);
+}
+
+/* -------------------------------------------------------------------------- */
 /*                                  Solver                                    */
 /* -------------------------------------------------------------------------- */
 

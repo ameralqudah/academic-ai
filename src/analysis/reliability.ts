@@ -322,7 +322,7 @@ export function cronbachAlpha(
   return {
     alpha,
     standardisedAlpha,
-    band: bandFor(alpha),
+    band: bandForAlpha(alpha),
     itemCount: k,
     sampleSize: n,
     rowsSupplied: dataset.rows.length,
@@ -409,7 +409,7 @@ function feldtInterval(
 }
 
 /** The conventional reading of the coefficient. */
-export function bandFor(alpha: number): ReliabilityBand {
+export function bandForAlpha(alpha: number): ReliabilityBand {
   if (!Number.isFinite(alpha)) return 'unacceptable';
   if (alpha >= 0.9) return 'excellent';
   if (alpha >= 0.8) return 'good';

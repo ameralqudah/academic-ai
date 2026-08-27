@@ -1,0 +1,16 @@
+# Academic AI — https://academic-ai-app.onrender.com
+
+User-agent: *
+Allow: /
+
+Disallow: /api/
+Disallow: /*/admin
+Disallow: /*/dashboard
+Disallow: /*/projects
+Disallow: /*/settings
+Disallow: /*/billing
+Disallow: /*/tools
+Disallow: /*/forgot-password
+Disallow: /*/reset-password
+
+Sitemap: https://academic-ai-app.onrender.com/sitemap.xml

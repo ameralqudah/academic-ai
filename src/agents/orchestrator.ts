@@ -28,6 +28,7 @@
 import { recommendTest, type RoleAssignment } from '@/analysis';
 import { logger } from '@/lib/logger';
 import * as tasksRepo from '@/server/repositories/agent-tasks.repository';
+import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 import {
   runAnalysis,
@@ -289,6 +290,12 @@ function planFor(intent: IntentKey): PlanStep[] {
         { id: 'recommend', labelKey: 'agent.step.recommend' },
       ];
 
+    case 'research.results':
+      return [
+        { id: 'gatherResults', labelKey: 'agent.step.gatherResults' },
+        { id: 'writeResults', labelKey: 'agent.step.writeResults' },
+      ];
+
     case 'stats.reliability':
       return [
         { id: 'profile', labelKey: 'agent.step.profile' },
@@ -445,6 +452,61 @@ async function executeStep(input: {
           payload: outcome.result as Record<string, unknown>,
         },
       };
+    }
+
+    /*
+     * Writing the results chapter needs analyses the researcher attached to a
+     * section — not a file, and not everything they ever ran. Attaching is the
+     * deliberate act that separates a finding they intend to report from one
+     * they were exploring, and the chapter is written from that set alone.
+     */
+    case 'gatherResults': {
+      if (!request.projectId) {
+        return {
+          kind: 'question',
+          question:
+            locale === 'ar'
+              ? 'لأي مشروع تريد كتابة فصل النتائج؟ افتح المشروع أولًا ثم اطلب ذلك.'
+              : 'Which project should I write the results chapter for? Open the project first, then ask.',
+        };
+      }
+
+      const attached = await analysisRunsRepo.listAttached(request.projectId, request.userId);
+
+      if (attached.length === 0) {
+        return {
+          kind: 'question',
+          question:
+            locale === 'ar'
+              ? 'لا توجد نتائج تحليل مرتبطة بهذا المشروع بعد. شغّل التحليلات التي تريد عرضها ثم أرفقها بقسم النتائج، وسأكتب الفصل من أرقامك الحقيقية.'
+              : 'No analyses are attached to this project yet. Run the analyses you want to report and attach them to the results section, and I will write the chapter from your real figures.',
+        };
+      }
+
+      return {
+        kind: 'event',
+        event: {
+          type: 'result',
+          kind: 'analysis',
+          payload: {
+            attachedCount: attached.length,
+            tests: attached.map((run) => run.testKey),
+          },
+        },
+      };
+    }
+
+    case 'writeResults': {
+      if (!request.projectId) return { kind: 'event', event: null };
+
+      const { generateSection } = await import('@/server/services/ai.service');
+      const generated = await generateSection(
+        request.userId,
+        request.projectId,
+        'RESULTS' as Parameters<typeof generateSection>[2],
+      );
+
+      return { kind: 'event', event: { type: 'delta', text: generated.content } };
     }
 
     case 'analyse': {

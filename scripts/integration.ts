@@ -24,6 +24,7 @@ import bcrypt from 'bcryptjs';
 import { eq, like } from 'drizzle-orm';
 
 import type { AgentEvent } from '@/agents/events';
+import { buildResultsContext } from '@/ai/context/results';
 import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
 import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
@@ -1133,6 +1134,73 @@ async function main() {
   assertTrue('reliability produces a coefficient', typeof (alphaEvent?.payload as { alpha?: number })?.alpha === 'number');
 
   clearIntentStubForTests();
+
+  /* ------------------------------------------- results from real analyses */
+
+  section('results chapter: written from attached analyses, not invented');
+
+  /*
+   * The end-to-end version of the guarantee. A real file, a real t-test, a real
+   * row in `analysis_runs`, attached to a real project — and then the check that
+   * the figures which reach the prompt are the ones the engines computed.
+   */
+  const chapterRun = await runAnalysis({
+    datasetId: statsFile.dataset.id,
+    userId: statsOwner,
+    test: 't.independent',
+    columns: { dependent: 'score', grouping: 'gender' },
+  });
+
+  /* Nothing attached yet: the section must still refuse to invent. */
+  check(
+    'an unattached analysis does not reach the chapter',
+    buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')),
+    null,
+  );
+
+  await attachRun({
+    runId: chapterRun.run.id,
+    userId: statsOwner,
+    projectId: statsProject.id,
+    sectionKey: 'RESULTS',
+  });
+
+  const attachedForChapter = await analysisRunsRepo.listForSection(
+    statsProject.id,
+    statsOwner,
+    'RESULTS',
+  );
+  check('attaching makes it available to the chapter', attachedForChapter.length, 1);
+
+  const chapterContext = buildResultsContext(attachedForChapter) ?? '';
+  const computed = chapterRun.result as { statistic: { value: number }; pValue: number };
+
+  /*
+   * The figures in the prompt must be the figures the engine produced. Not
+   * approximately — the same numbers, formatted once, here.
+   */
+  assertTrue(
+    'the computed statistic reaches the prompt',
+    chapterContext.includes(computed.statistic.value.toFixed(3)),
+  );
+  assertTrue(
+    'and the computed p-value',
+    chapterContext.includes(computed.pValue < 0.001 ? 'p < .001' : `p = ${computed.pValue.toFixed(3)}`),
+  );
+  assertTrue('the variables are named', chapterContext.includes('male'));
+  assertTrue('the rules travel with the numbers', chapterContext.includes('They are facts.'));
+
+  /*
+   * Detaching restores the original behaviour exactly. This is what makes the
+   * whole feature safe to ship: it adds a capability when results exist and
+   * changes nothing when they do not.
+   */
+  await detachRun(chapterRun.run.id, statsOwner);
+  check(
+    'detaching returns the section to producing a template',
+    buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')),
+    null,
+  );
 
   await rm(storageRoot, { recursive: true, force: true });
   delete process.env.STORAGE_LOCAL_DIR;

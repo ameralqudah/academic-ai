@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
+import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
 import {
   availableCapabilities,
   CAPABILITIES,
@@ -404,11 +405,18 @@ check('comparing groups needs a dataset', capabilityFor('stats.compare').require
 check('planning a study does not', capabilityFor('research.plan').requiresDataset, false);
 
 /*
- * Writing the results chapter is held back deliberately. The prose is the easy
- * part; the wiring that puts verified numbers into the model's context as facts
- * is not, and without it this would mean writing results with no results.
+ * Writing the results chapter is available now that verified analyses can reach
+ * the prompt as facts. The condition it depends on is what these assertions
+ * guard: it must need attached *analyses* rather than a file, since a
+ * researcher who analysed their data last week should not have to re-upload
+ * anything to write the chapter.
  */
-check('writing the results chapter is not offered yet', capabilityFor('research.results').status, 'planned');
+check('writing the results chapter is available', capabilityFor('research.results').status, 'available');
+check('and needs analyses rather than a live file', capabilityFor('research.results').requiresDataset, false);
+assertTrue(
+  'and it costs model calls, unlike the statistical work',
+  capabilityFor('research.results').units > 0,
+);
 
 console.log('\nkeyword intent matching');
 
@@ -585,6 +593,141 @@ for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as c
   }
   assertNoDottedKeys(agent, '');
 }
+
+console.log('\nverified results in the prompt');
+
+/*
+ * The feature this product was built toward, and the one with the most room to
+ * go quietly wrong.
+ *
+ * Asked to write a results chapter with no data, a language model writes a
+ * convincing one anyway — means, p-values, a table that looks exactly right —
+ * because that is what results chapters look like. A committee then reads
+ * numbers describing a study nobody conducted.
+ *
+ * The defence is not a sterner instruction. It is that every figure arrives
+ * already computed and already formatted, so there is nothing left to invent.
+ * These assertions check that the arrival is exact.
+ */
+
+const sampleRun = {
+  id: 'run-1',
+  testKey: 't.independent',
+  spec: { columns: { dependent: 'score', grouping: 'gender' } },
+  result: {
+    test: 't.independent',
+    variables: ['male', 'female'],
+    statistic: { name: 't (Welch)', value: -2.220943084706801 },
+    df: 23.195677474150397,
+    pValue: 0.036394189951284385,
+    effect: { name: 'cohensD', value: -0.5187530798249348, band: 'medium' },
+    estimates: [
+      { label: 'male', n: 8, mean: 10.0375, sd: 0.2825 },
+      { label: 'female', n: 24, mean: 13.25, sd: 7.0711 },
+    ],
+    assumptions: [
+      { key: 'normality', status: 'met', pValue: 0.978 },
+      { key: 'homogeneity-of-variance', status: 'violated', pValue: 0.0000739 },
+    ],
+    warnings: [
+      { code: 'welch-student-disagree', severity: 'warning', columns: ['male', 'female'] },
+      { code: 'small-group', severity: 'warning', columns: ['male'] },
+    ],
+    n: 32,
+    rowsDropped: 3,
+    secondary: {
+      label: 'student',
+      statistic: { name: 't (Student)', value: -1.270680348068361 },
+      df: 30,
+      pValue: 0.213608180614561,
+    },
+  },
+} as unknown as Parameters<typeof describeRun>[0];
+
+const described = describeRun(sampleRun, 0);
+
+/* The statistic, its degrees of freedom and its p-value, formatted to APA. */
+assertTrue('the test statistic reaches the prompt', described.includes('-2.221'));
+assertTrue('with its non-integer degrees of freedom', described.includes('23.20'));
+assertTrue('and its p-value at three decimals', described.includes('p = 0.036'));
+assertTrue('the effect size travels too', described.includes('-0.519'));
+assertTrue('and is labelled', described.includes('medium'));
+
+/* Group statistics, which are the substance of the table. */
+assertTrue('group means are included', described.includes('M = 10.04'));
+assertTrue('and standard deviations', described.includes('SD = 0.282'));
+assertTrue('and group sizes', described.includes('n = 8'));
+
+/*
+ * The secondary form. A chapter reporting Welch's t without mentioning that
+ * Student's was also computed — and disagreed — hides the most interesting
+ * thing about the comparison.
+ */
+assertTrue('the secondary form is included', described.includes('t (Student)'));
+assertTrue('with its own p-value', described.includes('p = 0.214'));
+
+/*
+ * Assumptions and warnings are not optional context. A finding whose
+ * assumptions failed must carry that where the finding is stated.
+ */
+assertTrue('violated assumptions are flagged', described.includes('homogeneity-of-variance'));
+assertTrue('and warnings are listed', described.includes('welch-student-disagree'));
+assertTrue('including which columns they concern', described.includes('male'));
+assertTrue('excluded cases are reported', described.includes('Cases excluded for missing data: 3'));
+
+/* Rounding happens here so the model never makes that decision. */
+const tinyP = describeRun(
+  { ...sampleRun, result: { ...(sampleRun as { result: object }).result, pValue: 0.0000001 } } as typeof sampleRun,
+  0,
+);
+assertTrue('a very small p is written as "< .001", not as zeros', tinyP.includes('p < .001'));
+
+/* The block that carries the rules the model must follow. */
+const block = buildResultsContext([sampleRun]);
+assertTrue('the block exists when there are results', block !== null);
+assertTrue('and states the figures are facts', (block ?? '').includes('They are facts.'));
+assertTrue('and forbids recomputing them', (block ?? '').toLowerCase().includes('do not recompute'));
+assertTrue(
+  'and forbids adding statistics that are not present',
+  (block ?? '').includes('Do not add any statistic that does not appear below'),
+);
+assertTrue(
+  'and requires violated assumptions to be reported in the text',
+  (block ?? '').includes('violated assumption'),
+);
+
+/*
+ * The empty case matters as much as the full one. With nothing attached the
+ * block is null, which is what keeps the original behaviour intact: the section
+ * still produces table shells and says the numbers must come from the
+ * researcher's own analysis. The change is strictly additive.
+ */
+check('no attached analyses means no block', buildResultsContext([]), null);
+check('and the section knows it has nothing to write from', hasVerifiedResults([]), false);
+check('while one analysis is enough', hasVerifiedResults([sampleRun]), true);
+
+/* A reliability result has a different shape and must survive it. */
+const alphaRun = {
+  id: 'run-2',
+  testKey: 'reliability.cronbachAlpha',
+  spec: { columns: { items: ['q1', 'q2', 'q3'] } },
+  result: {
+    alpha: 0.7477422833265936,
+    band: 'acceptable',
+    itemCount: 5,
+    sampleSize: 20,
+    warnings: [{ code: 'reverse-coded-item', severity: 'error', columns: ['q5'] }],
+  },
+} as unknown as typeof sampleRun;
+
+const alphaDescribed = describeRun(alphaRun, 1);
+assertTrue('alpha reaches the prompt', alphaDescribed.includes('0.748'));
+assertTrue('with its interpretation', alphaDescribed.includes('acceptable'));
+assertTrue('and its item count', alphaDescribed.includes('5 items'));
+assertTrue(
+  'and a reverse-coded item is reported, not buried',
+  alphaDescribed.includes('reverse-coded-item'),
+);
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

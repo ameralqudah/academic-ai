@@ -99,6 +99,13 @@ export function sectionPrompt(
   sectionKey: SectionKey,
   context: ProjectContext,
   extra?: string,
+  /**
+   * Analyses the researcher attached to this section, already formatted as
+   * facts. Its presence changes what the section is: with it, the results are
+   * written from real figures; without it, the old behaviour stands and a
+   * template is produced instead.
+   */
+  verifiedResults?: string | null,
 ): string {
   const definition = SECTION_BY_KEY[sectionKey];
   const instruction =
@@ -108,12 +115,25 @@ export function sectionPrompt(
     ? `\n\nAim for roughly ${definition.targetWords} words. Depth matters more than hitting the number exactly.`
     : '';
 
-  const dataWarning = definition?.requiresUserData
-    ? '\n\nThis section depends on the researcher\'s own data. If it has not been provided, produce the structure and say what is needed — do not invent content.'
-    : '';
+  /*
+   * The data instruction has two forms, and which one applies is decided by
+   * whether real results are present rather than by the model's judgement.
+   *
+   * With results attached, the standing "do not invent numbers" warning would
+   * be actively unhelpful — it reads as discouragement from using the very
+   * figures that were supplied. It is replaced by an instruction to use them
+   * and nothing else.
+   */
+  const dataWarning = verifiedResults
+    ? '\n\nThe researcher has supplied verified analysis results, included below. Write this section from those figures. Every number in your output must appear in that block; do not compute, estimate, or add any other.'
+    : definition?.requiresUserData
+      ? '\n\nThis section depends on the researcher\'s own data. If it has not been provided, produce the structure and say what is needed — do not invent content.'
+      : '';
+
+  const results = verifiedResults ? `\n\n${verifiedResults}` : '';
 
   return buildSystemPrompt(
-    `${instruction}${target}${dataWarning}${extra ? `\n\nAdditional instruction from the researcher: ${extra}` : ''}
+    `${instruction}${target}${dataWarning}${extra ? `\n\nAdditional instruction from the researcher: ${extra}` : ''}${results}
 
 Output the section content only — no preamble, no "here is your section", no meta-commentary. Use markdown for structure.`,
     context,

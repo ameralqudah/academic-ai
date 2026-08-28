@@ -9,6 +9,7 @@
 import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
 import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
+import { buildResultsContext } from '@/ai/context/results';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
 import {
   titleComparisonPrompt,
@@ -23,6 +24,7 @@ import { countWords } from '@/lib/text';
 import { logger } from '@/lib/logger';
 import type { ResearchProject, ResearchSection, TitleCandidate } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
@@ -324,13 +326,33 @@ export async function generateSection(
 
   const { project, context, provider } = await prepare(userId, projectId, sectionKey, estimate);
 
+  /*
+   * Analyses the researcher deliberately attached to this section.
+   *
+   * Only attached ones: a researcher explores and discards, and everything they
+   * ever ran travelling into the prompt would let a rejected analysis reappear
+   * as a finding. Empty is the normal case and leaves the old behaviour exactly
+   * as it was — the section produces a template and says the numbers must come
+   * from their own analysis.
+   */
+  const attachedRuns = await analysisRunsRepo.listForSection(projectId, userId, sectionKey);
+  const verifiedResults = buildResultsContext(attachedRuns);
+
+  if (verifiedResults) {
+    logger.info('ai.section.withVerifiedResults', {
+      projectId,
+      sectionKey,
+      analyses: attachedRuns.length,
+    });
+  }
+
   const result = await runCompletion({
     userId,
     projectId,
     provider,
     task: 'wizard.section',
     locale: project.language === 'AR' ? 'ar' : 'en',
-    system: sectionPrompt(sectionKey, context, instruction),
+    system: sectionPrompt(sectionKey, context, instruction, verifiedResults),
     messages: [
       {
         role: 'user',

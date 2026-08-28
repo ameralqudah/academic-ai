@@ -893,7 +893,6 @@
       "cbSem": "CB-SEM is not built yet — it is deferred to a later stage.",
       "logistic": "Logistic regression is not built yet. Your outcome is categorical, and a linear regression would not be valid for it.",
       "nonparametric": "Non-parametric tests are not built yet. The right test for your data is one of them, and substituting a parametric test could mislead you.",
-      "resultsWriting": "Writing the results chapter is not available yet. It will be enabled once your analyses are wired into the context, so the chapter is written from your real numbers rather than from nothing.",
       "surveyGenerator": "Questionnaire generation is not available yet.",
       "test": {
         "nonparametric_mannWhitney": "The right test for your data is Mann–Whitney U, which is not built yet.",
@@ -967,6 +966,8 @@
       "ordinal": "ordinal",
       "interval": "interval",
       "ratio": "ratio"
-    }
+    },
+    "step_gatherResults": "Gathering your analyses",
+    "step_writeResults": "Writing the results chapter"
   }
 }

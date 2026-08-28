@@ -207,20 +207,25 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
   /**
    * Writing the results chapter from analyses the researcher attached.
    *
-   * Marked planned rather than available because the piece that matters is not
-   * the prose — it is the wiring that puts verified numbers into the model's
-   * context as facts it may describe but not produce. Until that exists,
-   * offering this would mean asking a model to write a results chapter with no
-   * results, which is precisely the failure this product is built to avoid.
+   * Available now that the wiring exists: attached results are formatted as
+   * facts and travel into the prompt, so the model describes figures it was
+   * given rather than producing figures of its own. That distinction is the
+   * whole feature — asked to write a results chapter with no results, a model
+   * writes a convincing one anyway, and a committee reads numbers describing a
+   * study nobody ran.
+   *
+   * `requiresDataset` is false because the requirement is attached *analyses*,
+   * not a file still in the conversation. A researcher who analysed their data
+   * last week and comes back to write the chapter should not have to re-upload
+   * anything.
    */
   'research.results': {
     intent: 'research.results',
-    status: 'planned',
+    status: 'available',
     agent: 'research',
-    requiresDataset: true,
+    requiresDataset: false,
     units: 3,
-    estimatedCalls: 2,
-    unavailableReason: 'agent.unavailable.resultsWriting',
+    estimatedCalls: 1,
   },
   'research.survey': {
     intent: 'research.survey',

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
+import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
 import {
   availableCapabilities,
   CAPABILITIES,
@@ -408,6 +409,107 @@ check('planning a study does not', capabilityFor('research.plan').requiresDatase
  * is not, and without it this would mean writing results with no results.
  */
 check('writing the results chapter is not offered yet', capabilityFor('research.results').status, 'planned');
+
+console.log('\nkeyword intent matching');
+
+/*
+ * These exist because of a production failure: the model classifier returned
+ * nothing usable and every request, however plainly worded, came back as "I did
+ * not understand". Requests that name their analysis outright should never have
+ * depended on a model to begin with — "PLS-SEM" is a name, not a sentence — so
+ * they are matched here, deterministically, and these assertions are the
+ * regression guard.
+ *
+ * Every phrase below is one a researcher would actually type, in both languages.
+ */
+const keywordCases: [string, string][] = [
+  // The exact phrasings that failed in production.
+  ['أريد تحليل PLS-SEM', 'stats.plsSem'],
+  ['أريد تحليل PLS-SEM لنموذج قياس فيه ثلاثة متغيرات كامنة', 'stats.plsSem'],
+  ['I want to run a PLS-SEM analysis', 'stats.plsSem'],
+  ['smartpls', 'stats.plsSem'],
+  ['المربعات الجزئية', 'stats.plsSem'],
+
+  ['أريد التحليل العاملي التوكيدي', 'stats.cbSem'],
+  ['نمذجة المعادلات البنائية', 'stats.cbSem'],
+  ['run a CFA', 'stats.cbSem'],
+  ['AMOS', 'stats.cbSem'],
+
+  ['الانحدار اللوجستي', 'stats.logistic'],
+  ['logistic regression please', 'stats.logistic'],
+
+  ['اختبار مان-ويتني', 'stats.nonparametric'],
+  ['Mann-Whitney U test', 'stats.nonparametric'],
+  ['أريد اختبارات لا معلمية', 'stats.nonparametric'],
+
+  ['احسب ألفا كرونباخ', 'stats.reliability'],
+  ['معامل الثبات للمقياس', 'stats.reliability'],
+  ['check reliability of my scale', 'stats.reliability'],
+
+  ['أريد تحليل الانحدار المتعدد', 'stats.predict'],
+  ['multiple regression', 'stats.predict'],
+
+  ['احسب معامل الارتباط', 'stats.relate'],
+  ['ارتباط بيرسون بين المتغيرين', 'stats.relate'],
+  ['spearman correlation', 'stats.relate'],
+
+  ['قارن بين الذكور والإناث', 'stats.compare'],
+  ['أريد تحليل التباين الأحادي', 'stats.compare'],
+  ['الفروق بين المجموعتين', 'stats.compare'],
+  ['run a t-test', 'stats.compare'],
+  ['ANOVA', 'stats.compare'],
+
+  ['مربع كاي للاستقلالية', 'stats.categorical'],
+  ['chi-square test', 'stats.categorical'],
+
+  ['نظف بياناتي', 'data.clean'],
+  ['clean my data', 'data.clean'],
+  ['الإحصاء الوصفي', 'data.describe'],
+
+  ['ما هو التحليل الإحصائي المناسب', 'stats.recommend'],
+  ['which test should I use', 'stats.recommend'],
+
+  ['أنشئ استبانة لهذا البحث', 'research.survey'],
+  ['اكتب فصل النتائج', 'research.results'],
+  ['الفصل الرابع', 'research.results'],
+  ['أريد خطة بحث كاملة', 'research.plan'],
+];
+
+for (const [message, expected] of keywordCases) {
+  const match = classifyByKeyword(message);
+  check(`"${message.slice(0, 42)}" → ${expected}`, match?.intent, expected);
+}
+
+/*
+ * Ordering is part of the logic. A PLS-SEM request contains words that would
+ * otherwise match the looser structural-equation rule, so the specific method
+ * must be tested before the general family.
+ */
+check(
+  'PLS-SEM is checked before CB-SEM',
+  KEYWORD_RULE_ORDER.indexOf('stats.plsSem') < KEYWORD_RULE_ORDER.indexOf('stats.cbSem'),
+  true,
+);
+check(
+  'unbuilt methods are checked before built ones',
+  KEYWORD_RULE_ORDER.indexOf('stats.nonparametric') < KEYWORD_RULE_ORDER.indexOf('stats.compare'),
+  true,
+);
+
+/*
+ * A weak match must return null so the caller falls through to the model.
+ * Matching loosely to save an API call would trade a slow correct answer for a
+ * fast wrong one.
+ */
+check('a vague request is left to the model', classifyByKeyword('ساعدني'), null);
+check('an empty message matches nothing', classifyByKeyword(''), null);
+check('small talk matches nothing', classifyByKeyword('مرحبا كيف حالك'), null);
+check('a bare question matches nothing', classifyByKeyword('what can you do?'), null);
+
+/* Every intent a keyword rule can produce must exist in the catalogue. */
+for (const intent of KEYWORD_RULE_ORDER) {
+  assertTrue(`the keyword rule for ${intent} names a real intent`, isKnownIntent(intent));
+}
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

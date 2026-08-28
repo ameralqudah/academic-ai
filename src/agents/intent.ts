@@ -38,6 +38,7 @@ import type { AIResult } from '@/ai/types';
 import type { DatasetProfile } from '@/analysis';
 import { logger } from '@/lib/logger';
 
+import { classifyByKeyword } from './keywords';
 import { classifiableIntents, isKnownIntent, type IntentKey } from './registry';
 
 /** Below this the agent asks instead of acting. */
@@ -170,6 +171,26 @@ export function clearIntentStubForTests(): void {
 export async function classifyIntent(input: IntentInput): Promise<IntentResult> {
   if (stub && process.env.NODE_ENV !== 'production') return stub;
 
+  /*
+   * Keywords first. A message that names its analysis outright does not need a
+   * model to interpret it, and routing it through one adds latency, cost, and a
+   * way for the whole thing to fail — which is exactly what happened the first
+   * time this ran against a real provider.
+   */
+  const keyword = classifyByKeyword(input.message);
+  if (keyword) {
+    logger.info('agent.intent.keyword', { intent: keyword.intent, matched: keyword.matched });
+
+    return {
+      intent: keyword.intent,
+      confidence: 1,
+      mentionedColumns: matchColumns(input, extractQuoted(input.message)),
+      restatement: input.message.slice(0, 200),
+      clarifyingQuestion: null,
+      usage: { tokensIn: 0, tokensOut: 0 },
+    };
+  }
+
   const provider = await resolveProvider();
 
   const history = (input.history ?? []).slice(-6);
@@ -180,14 +201,38 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
     messages: [...history, { role: 'user', content: input.message }],
     // Zero temperature: the same request should classify the same way twice.
     temperature: 0,
-    maxTokens: 400,
+    /*
+     * Generous for a reply that is four short fields.
+     *
+     * The reason is reasoning models. Gemini and the newer OpenAI models spend
+     * output tokens on internal thinking before writing anything, and that
+     * spending counts against the same budget. At 400 the budget was exhausted
+     * before the JSON began, the response came back empty, and every request in
+     * production was answered with "I did not understand" — a failure that no
+     * amount of testing against a stubbed classifier could have found.
+     */
+    maxTokens: 2048,
     json: true,
   });
 
   const parsed = parseJsonOutput<RawIntent>(result.text);
 
   if (!parsed) {
-    logger.warn('agent.intent.unparsable', { sample: result.text.slice(0, 200) });
+    /*
+     * Logged with enough detail to tell the three failure modes apart: an empty
+     * response (a budget or safety-filter problem), a non-JSON response (a
+     * provider that ignored the format request), and a truncated one. Without
+     * these fields all three look identical from the outside, which is what made
+     * the original failure so hard to diagnose.
+     */
+    logger.warn('agent.intent.unparsable', {
+      provider: result.provider,
+      model: result.model,
+      stopReason: result.stopReason,
+      textLength: result.text.length,
+      tokensOut: result.usage.tokensOut,
+      sample: result.text.slice(0, 300),
+    });
     return unclear(input, result.usage, 'The classifier returned nothing usable.');
   }
 
@@ -245,6 +290,25 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
 /* -------------------------------------------------------------------------- */
 /*                                  Helpers                                   */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Column names a user wrote in quotes or backticks.
+ *
+ * Used only on the keyword path, where no model is available to pick them out.
+ * Deliberately conservative: an unquoted word that happens to match a column is
+ * left alone, because "compare the score" should not silently commit the user
+ * to a column they did not name.
+ */
+function extractQuoted(message: string): string[] {
+  const found = message.match(/[\"'`\u201c\u201d]([^\"'`\u201c\u201d]{1,64})[\"'`\u201c\u201d]/g) ?? [];
+  return found.map((token) => token.slice(1, -1).trim()).filter((token) => token.length > 0);
+}
+
+/** Keeps only names that exist in the dataset — an invented one is dropped. */
+function matchColumns(input: IntentInput, candidates: string[]): string[] {
+  const known = new Set(input.profile?.columns.map((column) => column.name) ?? []);
+  return candidates.filter((name) => known.has(name)).slice(0, 30);
+}
 
 function clampConfidence(value: unknown): number {
   const number = typeof value === 'number' ? value : Number.NaN;

@@ -1019,6 +1019,7 @@ async function main() {
       mentionedColumns: [],
       restatement: intent,
       clarifyingQuestion: null,
+      searchQueries: [],
       usage: { tokensIn: 0, tokensOut: 0 },
     });
 

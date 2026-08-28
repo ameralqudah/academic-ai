@@ -60,6 +60,8 @@ export type IntentKey =
   | 'stats.cbSem'
   | 'stats.logistic'
   | 'stats.nonparametric'
+  // Literature — searching real academic databases
+  | 'research.literature'
   // Conversation
   | 'general.question'
   | 'general.unclear';
@@ -227,6 +229,28 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
     units: 3,
     estimatedCalls: 1,
   },
+  /**
+   * Searching the academic databases for real studies.
+   *
+   * Separate from `research.plan` and from `general.question` because it is the
+   * one intent that must never be answered from the model's memory. A model
+   * asked for studies on a topic will produce a list of plausible-looking
+   * titles with plausible-looking authors, and a student will cite them. This
+   * intent exists so that request is routed to Crossref and OpenAlex instead,
+   * and comes back with DOIs that resolve.
+   *
+   * Costs one unit rather than zero: the search itself is free, but composing
+   * the answer from what came back takes a model call.
+   */
+  'research.literature': {
+    intent: 'research.literature',
+    status: 'available',
+    agent: 'research',
+    requiresDataset: false,
+    units: 1,
+    estimatedCalls: 1,
+  },
+
   'research.survey': {
     intent: 'research.survey',
     status: 'planned',

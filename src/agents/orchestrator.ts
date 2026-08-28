@@ -30,7 +30,8 @@ import { logger } from '@/lib/logger';
 import * as tasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
-import { answerGeneralQuestion } from '@/server/services/ai.service';
+import { answerGeneralQuestion, summariseSources } from '@/server/services/ai.service';
+import { search as searchKnowledge, type CoverageReport, type Source } from '@/server/knowledge';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 import {
   runAnalysis,
@@ -182,6 +183,8 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
 
     /* ------------------------------ execute ------------------------------ */
 
+    let lastLiterature: { sources: Source[]; coverage: CoverageReport } | undefined;
+
     for (const step of steps.slice(0, MAX_STEPS)) {
       yield { type: 'step', id: step.id, status: 'running', labelKey: step.labelKey, params: step.params };
 
@@ -190,7 +193,15 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
         request,
         intent: intent.intent,
         mentionedColumns: intent.mentionedColumns,
+        searchQueries: intent.searchQueries,
+        lastLiterature,
       });
+
+      /* Carry the sources to the summarising step that follows. */
+      if (outcome.kind === 'event' && outcome.event?.type === 'result' && outcome.event.kind === 'literature') {
+        const payload = outcome.event.payload as { sources: Source[]; coverage: CoverageReport };
+        lastLiterature = { sources: payload.sources, coverage: payload.coverage };
+      }
 
       if (outcome.kind === 'question') {
         yield { type: 'step', id: step.id, status: 'done', labelKey: step.labelKey };
@@ -298,6 +309,12 @@ function planFor(intent: IntentKey): PlanStep[] {
         { id: 'writeResults', labelKey: 'agent.step.writeResults' },
       ];
 
+    case 'research.literature':
+      return [
+        { id: 'searchLiterature', labelKey: 'agent.step.searchLiterature' },
+        { id: 'summariseLiterature', labelKey: 'agent.step.summariseLiterature' },
+      ];
+
     case 'stats.reliability':
       return [
         { id: 'profile', labelKey: 'agent.step.profile' },
@@ -333,6 +350,16 @@ async function executeStep(input: {
   request: AgentRequest;
   intent: IntentKey;
   mentionedColumns: string[];
+  /** Queries the classifier produced, for the literature search. */
+  searchQueries?: { text: string; language: 'ar' | 'en' }[];
+  /**
+   * What the previous step found.
+   *
+   * Passed forward rather than re-searched: the summarising step describes the
+   * sources the search returned, and running the search twice would risk
+   * summarising a different set than the one shown to the user.
+   */
+  lastLiterature?: { sources: Source[]; coverage: CoverageReport };
 }): Promise<StepOutcome> {
   const { request, intent } = input;
   const locale = request.locale;
@@ -555,6 +582,84 @@ async function executeStep(input: {
      * then silently did nothing. Every specialist agent had been built and the
      * one that answers when there is no specialist had not.
      */
+    /*
+     * Searching the academic databases.
+     *
+     * The one intent that must never be answered from the model's memory. Asked
+     * for studies on a topic, a language model produces titles that look right,
+     * authors who plausibly wrote them, and years that fit — and a student
+     * cites them. This path exists so the request reaches Crossref and OpenAlex
+     * instead, and returns DOIs that resolve.
+     */
+    case 'searchLiterature': {
+      const queries = input.searchQueries ?? [];
+
+      if (queries.length === 0) {
+        return {
+          kind: 'question',
+          question:
+            locale === 'ar'
+              ? 'عن أي موضوع تريد أن أبحث؟ اذكر الموضوع بكلمات قليلة.'
+              : 'What topic should I search for? A few words is enough.',
+        };
+      }
+
+      const report = await searchKnowledge({
+        queries: queries.map((query) => ({ text: query.text, language: query.language })),
+        preferredLanguage: locale,
+        kind: 'academic',
+        limit: 10,
+      });
+
+      if (report.sources.length === 0) {
+        return {
+          kind: 'question',
+          question:
+            locale === 'ar'
+              ? 'لم أجد دراسات بهذه الكلمات. جرّب مصطلحات أوسع أو بصياغة أخرى.'
+              : 'I found no studies with those terms. Try broader or differently worded ones.',
+        };
+      }
+
+      return {
+        kind: 'event',
+        event: {
+          type: 'result',
+          kind: 'literature',
+          payload: {
+            sources: report.sources,
+            coverage: report.coverage,
+            providers: report.providers,
+            queries: report.queriesRun,
+          },
+        },
+      };
+    }
+
+    /*
+     * Describing what the search found.
+     *
+     * The sources are passed to the model as facts it may summarise and must
+     * not extend — the same discipline the results chapter uses for statistics.
+     * Every title, author and year in the answer has to appear in the list, so
+     * there is nothing left to invent.
+     */
+    case 'summariseLiterature': {
+      const found = input.lastLiterature;
+      if (!found || found.sources.length === 0) return { kind: 'event', event: null };
+
+      const summary = await summariseSources({
+        userId: request.userId,
+        locale,
+        topic: (input.searchQueries?.[0]?.text ?? request.message).slice(0, 200),
+        sources: found.sources,
+        coverageNoticeKey: found.coverage.arabicCoverageNoticeKey,
+        projectId: request.projectId ?? null,
+      });
+
+      return { kind: 'event', event: { type: 'delta', text: summary } };
+    }
+
     case 'respond': {
       const projectTitle = request.projectId
         ? (await projectsRepo.findOwned(request.projectId, request.userId))?.title ?? null

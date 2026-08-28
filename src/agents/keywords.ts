@@ -259,6 +259,36 @@ const RULES: Rule[] = [
       /\bwrite\s+(the\s+)?results\s+(chapter|section)\b/i,
     ],
   },
+  /*
+   * Requests for actual studies, matched before the plan rule.
+   *
+   * "أريد دراسات سابقة عن التعلم التعاوني" and "اكتب لي خطة بحث" both mention
+   * research, and only the first can be answered by a database. Getting this
+   * wrong in the other direction is the dangerous one: a request for literature
+   * routed to a writing agent produces invented citations, which is the single
+   * failure this product exists to prevent.
+   */
+  {
+    intent: 'research.literature',
+    patterns: [
+      /(^|\s)(دراسات|أبحاث|بحوث)\s+(سابقة|عربية|أجنبية|حول|عن|في)/,
+      /(^|\s)(ابحث|أبحث|اعثر)\s+.{0,15}(دراسات|أبحاث|مراجع|مصادر)/,
+      /(^|\s)مراجعة\s+(الأدبيات|أدبيات)/,
+      /(^|\s)الإطار\s+النظري\s+(عن|حول|في)/,
+      /*
+       * An adjective may sit between the noun and its preposition — "مراجع
+       * عربية عن التعليم" — so up to two words are allowed to intervene. The
+       * same shape recurs across these rules and Arabic makes it common.
+       */
+      /(^|\s)(مراجع|مصادر)(\s+\S+){0,2}\s+(عن|حول|في)/,
+      /(^|\s)(مراجع|مصادر)\s+(علمية|أكاديمية|عربية|أجنبية)/,
+      /\bliterature\s+review\b/i,
+      /\b(find|search\s+for)\s+(studies|papers|research|articles)\b/i,
+      /\b(recent|previous|prior)\s+(studies|research|papers)\s+(on|about)\b/i,
+      /\bpapers?\s+(on|about)\b/i,
+    ],
+  },
+
   {
     intent: 'research.plan',
     patterns: [

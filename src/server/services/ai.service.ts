@@ -444,6 +444,98 @@ export async function answerGeneralQuestion(input: {
   return { content: result.text, usage: result.usage };
 }
 
+/**
+ * Describes academic sources that were actually retrieved.
+ *
+ * The rules given to the model are the same ones the results chapter uses for
+ * statistics, and for the same reason. Asked to summarise literature on a
+ * topic, a model will happily add a study it half-remembers — the title reads
+ * correctly, the authors are people who work in the field, the year is
+ * plausible — and a student will cite it. The defence is not a sterner
+ * instruction but a closed set: every source is listed below, and the model is
+ * told it may describe those and nothing else.
+ *
+ * The coverage notice is passed in as a fixed message rather than left to the
+ * model's judgement. Whether Arabic sources were thin is a fact the search
+ * computed; a model asked to decide would mention it inconsistently, and the
+ * one thing worse than not saying it is saying it when it is untrue.
+ */
+export async function summariseSources(input: {
+  userId: string;
+  locale: 'ar' | 'en';
+  topic: string;
+  sources: {
+    title: string;
+    authors?: string[];
+    year?: number;
+    container?: string;
+    doi?: string;
+    snippet?: string;
+    citationCount?: number;
+    language: string;
+  }[];
+  coverageNoticeKey?: string | null;
+  projectId?: string | null;
+}): Promise<string> {
+  await assertCanUseAI(input.userId, 600);
+
+  const provider = await resolveProvider();
+
+  const listed = input.sources
+    .map((source, index) => {
+      const parts = [`[${index + 1}] ${source.title}`];
+      if (source.authors?.length) parts.push(`Authors: ${source.authors.slice(0, 4).join(', ')}`);
+      parts.push(
+        `${source.year ?? 'n.d.'} · ${source.container ?? 'unknown venue'} · ` +
+          `${source.citationCount ?? 0} citations · language: ${source.language}`,
+      );
+      if (source.doi) parts.push(`DOI: ${source.doi}`);
+      if (source.snippet) parts.push(`Abstract: ${source.snippet}`);
+      return parts.join('\n    ');
+    })
+    .join('\n\n');
+
+  const system = `You are summarising academic sources for a researcher writing in ${
+    input.locale === 'ar' ? 'Arabic' : 'English'
+  }. Answer in that language.
+
+These sources were retrieved from Crossref and OpenAlex just now. They are real.
+
+RULES — these override everything else:
+1. Describe only the sources listed below. Do not add a study, an author, a year, or a finding that is not in the list, however confident you are that it exists.
+2. Refer to sources by their number, like [3]. The interface shows the full citation next to your text.
+3. Do not state a finding a source's abstract does not support. Where an abstract is missing, say what the study is about from its title and no more.
+4. Group the sources by theme where they group naturally. Say plainly when they do not.
+5. Note where the sources disagree, and where a claim rests on only one of them.
+6. This is a description of what was found, not a literature review. Do not write conclusions the researcher has not reached.
+
+SOURCES:
+
+${listed}`;
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: input.projectId ?? '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system,
+    messages: [
+      {
+        role: 'user',
+        content:
+          input.locale === 'ar'
+            ? `لخّص لي ما وجدته من دراسات حول: ${input.topic}`
+            : `Summarise what these sources say about: ${input.topic}`,
+      },
+    ],
+    maxTokens: 2000,
+    temperature: 0.4,
+  });
+
+  return result.text;
+}
+
 export async function streamChat(
   userId: string,
   projectId: string,

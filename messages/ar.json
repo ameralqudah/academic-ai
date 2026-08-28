@@ -961,7 +961,8 @@
       "stats_logistic": "الانحدار اللوجستي",
       "stats_nonparametric": "الاختبارات اللامعلمية",
       "general_question": "سؤال عام",
-      "general_unclear": "طلب غير واضح"
+      "general_unclear": "طلب غير واضح",
+      "research_literature": "البحث عن دراسات"
     },
     "unavailable": {
       "generic": "هذه الميزة غير متاحة بعد.",
@@ -1055,7 +1056,9 @@
     "noProject": "بدون مشروع",
     "noProjectHint": "يمكنك التحليل والسؤال بلا مشروع",
     "newProject": "إنشاء مشروع جديد",
-    "projectContextOn": "المساعد يرى محتوى هذا المشروع"
+    "projectContextOn": "المساعد يرى محتوى هذا المشروع",
+    "step_searchLiterature": "البحث في قواعد البيانات العلمية",
+    "step_summariseLiterature": "تلخيص ما وجدته"
   },
   "knowledge": {
     "coverage": {
@@ -1075,6 +1078,11 @@
       "openAccess": "متاح مجانًا",
       "citations": "{count} استشهاد",
       "viaProvider": "المصدر: {provider}"
-    }
+    },
+    "sourcesFound": "وجدت {count} مصدرًا",
+    "languageBreakdown": "{arabic} عربي · {english} إنجليزي",
+    "arabic": "عربي",
+    "english": "إنجليزي",
+    "openAccess": "متاح مجانًا"
   }
 }

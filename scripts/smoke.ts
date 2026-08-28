@@ -879,6 +879,43 @@ assertTrue(
 );
 
 
+
+console.log('\nliterature search routing');
+
+/*
+ * The intent that must never be answered from memory.
+ *
+ * A model asked for studies on a topic produces titles that read correctly,
+ * authors who work in the field, and years that fit — and a student cites them.
+ * Routing these requests to a real database instead is the point of the whole
+ * knowledge layer, so the routing itself is guarded here.
+ *
+ * Getting it wrong in the other direction is the dangerous one: a request for
+ * literature sent to the writing agent produces invented citations.
+ */
+const literatureCases: [string, string][] = [
+  ['أريد دراسات سابقة عن التعلم التعاوني', 'research.literature'],
+  ['ابحث عن دراسات حول الذكاء الاصطناعي في التعليم', 'research.literature'],
+  ['مراجعة الأدبيات عن التحصيل الدراسي', 'research.literature'],
+  ['أريد مراجع عربية عن التعليم', 'research.literature'],
+  ['find studies on cooperative learning', 'research.literature'],
+  ['literature review on AI in education', 'research.literature'],
+  ['recent research on machine learning', 'research.literature'],
+];
+
+for (const [message, expected] of literatureCases) {
+  check(`"${message.slice(0, 44)}" → ${expected}`, classifyByKeyword(message)?.intent, expected);
+}
+
+/* Writing a plan is not searching for studies, though both mention research. */
+check('a request to write a plan stays with the research agent', classifyByKeyword('اكتب لي خطة بحث عن الذكاء الاصطناعي')?.intent, 'research.plan');
+check('and so does the English form', classifyByKeyword('write a research plan about AI')?.intent, 'research.plan');
+
+/* The capability is real, costs a model call, and needs no file. */
+check('literature search is available', capabilityFor('research.literature').status, 'available');
+check('it needs no dataset', capabilityFor('research.literature').requiresDataset, false);
+assertTrue('and it costs something, since composing the answer takes a model', capabilityFor('research.literature').units > 0);
+
 console.log('\nknowledge layer: merging and coverage');
 
 /*

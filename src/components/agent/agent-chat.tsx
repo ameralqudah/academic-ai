@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { ResultCard, type StatisticalResult } from '@/components/agent/result-card';
+import { SourceList, type RetrievedSource, type SourceCoverage } from '@/components/agent/source-list';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/cn';
@@ -520,6 +521,11 @@ function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
 
   if (kind === 'analysis' || kind === 'reliability') {
     return <ResultCard result={payload as StatisticalResult} />;
+  }
+
+  if (kind === 'literature') {
+    const found = payload as { sources: RetrievedSource[]; coverage: SourceCoverage };
+    return <SourceList sources={found.sources} coverage={found.coverage} />;
   }
 
   if (kind === 'profile') {

@@ -968,7 +968,8 @@
       "stats_logistic": "Logistic regression",
       "stats_nonparametric": "Non-parametric tests",
       "general_question": "General question",
-      "general_unclear": "Unclear request"
+      "general_unclear": "Unclear request",
+      "research_literature": "Find studies"
     },
     "unavailable": {
       "generic": "That is not available yet.",
@@ -1055,7 +1056,9 @@
     "noProject": "No project",
     "noProjectHint": "You can analyse and ask without one",
     "newProject": "Create a new project",
-    "projectContextOn": "The assistant can see this project"
+    "projectContextOn": "The assistant can see this project",
+    "step_searchLiterature": "Searching academic databases",
+    "step_summariseLiterature": "Summarising what I found"
   },
   "knowledge": {
     "coverage": {
@@ -1075,6 +1078,11 @@
       "openAccess": "free to read",
       "citations": "{count} citations",
       "viaProvider": "via {provider}"
-    }
+    },
+    "sourcesFound": "Found {count} sources",
+    "languageBreakdown": "{arabic} Arabic · {english} English",
+    "arabic": "Arabic",
+    "english": "English",
+    "openAccess": "free to read"
   }
 }

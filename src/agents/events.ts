@@ -84,7 +84,9 @@ export type AgentResultKind =
   | 'recommendation'
   | 'analysis'
   | 'reliability'
-  | 'correlationMatrix';
+  | 'correlationMatrix'
+  /** Academic sources returned by a real database search. */
+  | 'literature';
 
 export interface ResultEvent {
   type: 'result';

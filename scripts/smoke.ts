@@ -1015,6 +1015,37 @@ for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as c
 }
 
 /* Providers report which is usable without a key — the guarantee that a vendor cannot break the product. */
+
+/*
+ * A guard against the parameters that broke every Crossref search.
+ *
+ * `select` and `sort` were added as optimisations and made the provider fail
+ * completely: Crossref rejects a request whose `select` names a field it does
+ * not consider selectable, and `score` is one. The DOI lookup, which sends
+ * neither, kept working — which is how the cause was found.
+ *
+ * Reading the source rather than mocking a fetch, because what must not come
+ * back is the parameter itself.
+ */
+const crossrefSource = await readFile('src/server/knowledge/providers/crossref.ts', 'utf8');
+const searchBlock = crossrefSource.slice(
+  crossrefSource.indexOf('async search('),
+  crossrefSource.indexOf('private toSource('),
+);
+
+assertTrue(
+  'the Crossref search does not send `select` — it made every request fail',
+  !searchBlock.includes("searchParams.set('select'"),
+);
+assertTrue(
+  'nor `sort` — the default for a query search is already relevance',
+  !searchBlock.includes("searchParams.set('sort'"),
+);
+assertTrue(
+  'and a failed response is logged with its body, not just its status',
+  crossrefSource.includes('response.text()'),
+);
+
 check('Crossref works with nothing configured', new CrossrefProvider().isConfigured(), true);
 check('OpenAlex is used with or without a key', new OpenAlexProvider().isConfigured(), true);
 

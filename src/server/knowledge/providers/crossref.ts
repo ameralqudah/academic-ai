@@ -109,14 +109,22 @@ export class CrossrefProvider implements KnowledgeProvider {
     const url = new URL(BASE);
     url.searchParams.set('query', query.text);
     url.searchParams.set('rows', String(Math.min(query.limit ?? 10, 50)));
+
     /*
-     * Sorted by relevance explicitly. Crossref's default ordering is by score
-     * already, but stating it means a change in their default does not silently
-     * change what a researcher sees.
+     * No `select` and no `sort`.
+     *
+     * Both were here as optimisations — trim the payload, state the ordering
+     * explicitly — and both were wrong. Every search failed against the live
+     * API while the DOI lookup, which sends neither, succeeded. That contrast
+     * is what identified them: Crossref rejects the whole request with a 400
+     * when `select` names a field it does not consider selectable, and `score`
+     * is one such field.
+     *
+     * The lesson is worth keeping rather than just the fix. A parameter that
+     * only narrows a response is not worth a request that fails entirely, and
+     * the default ordering for a `query` search is already relevance. Both
+     * additions bought nothing and cost everything.
      */
-    url.searchParams.set('sort', 'relevance');
-    url.searchParams.set('select',
-      'DOI,title,container-title,author,abstract,URL,publisher,type,score,is-referenced-by-count,language,issued,published');
 
     if (query.fromYear) {
       url.searchParams.set('filter', `from-pub-date:${query.fromYear}-01-01`);
@@ -129,7 +137,19 @@ export class CrossrefProvider implements KnowledgeProvider {
       });
 
       if (!response.ok) {
-        return this.failure(startedAt, 'knowledge.error.providerFailed', `HTTP ${response.status}`);
+        /*
+         * The body, not just the status. Crossref explains a 400 in plain text
+         * — which field it rejected, which parameter was malformed — and
+         * logging only "HTTP 400" throws that away. Seven identical failures
+         * told us nothing except that something was wrong; one body would have
+         * named it.
+         */
+        const body = await response.text().catch(() => '');
+        return this.failure(
+          startedAt,
+          'knowledge.error.providerFailed',
+          `HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ''}`,
+        );
       }
 
       const data = (await response.json()) as CrossrefResponse;

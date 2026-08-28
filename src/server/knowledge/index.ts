@@ -128,12 +128,27 @@ export async function search(request: SearchRequest): Promise<SearchReport> {
     const outcome = result.value;
     collected.push(...outcome.sources);
 
+    if (outcome.error) {
+      /*
+       * Logged with the provider's own explanation attached. A failure that
+       * reports only a reason key is a failure nobody can diagnose without
+       * reproducing it — which is exactly what happened when every Crossref
+       * search returned "providerFailed" and nothing else.
+       */
+      logger.warn('knowledge.provider.failed', {
+        provider: outcome.provider,
+        reason: outcome.error.reasonKey,
+        detail: outcome.error.detail,
+        query: call.query.text.slice(0, 80),
+      });
+    }
+
     reports.push({
       name: outcome.provider,
       returned: outcome.sources.length,
       totalAvailable: outcome.totalAvailable,
       tookMs: outcome.tookMs,
-      ...(outcome.error ? { error: outcome.error.reasonKey } : {}),
+      ...(outcome.error ? { error: outcome.error.detail ?? outcome.error.reasonKey } : {}),
     });
   }
 

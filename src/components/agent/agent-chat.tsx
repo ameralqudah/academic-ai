@@ -25,6 +25,34 @@ import { cn } from '@/lib/cn';
  */
 
 /**
+ * Reads the human message out of an error envelope.
+ *
+ * The API sends both a fallback sentence and, where one exists, a `reasonKey`
+ * with its parameters. The key is what should be shown: the fallback is
+ * English-only, and for parse failures it is the key itself — which is how a
+ * user came to see the literal string "analysis.error.notAWorkbook" on screen
+ * after uploading a file with the wrong extension. The refusal was right and
+ * the message was a code.
+ */
+function errorMessage(
+  json: { error?: { message?: string; details?: { reasonKey?: string; params?: Record<string, string | number> } } },
+  fallback: (key: string) => string,
+  translate: (key: string, values?: Record<string, string | number>) => string,
+): string {
+  const reasonKey = json?.error?.details?.reasonKey;
+
+  if (reasonKey) {
+    try {
+      return translate(reasonKey, json.error?.details?.params ?? {});
+    } catch {
+      // An untranslated key must not replace the message with a crash.
+    }
+  }
+
+  return json?.error?.message ?? fallback('generic');
+}
+
+/**
  * Turns a code into a translation key.
  *
  * next-intl reads a dot as nesting, so a message key literally named
@@ -82,6 +110,7 @@ export function AgentChat({
 }) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
+  const ta = useTranslations();
 
   const [projectId, setProjectId] = useState<string | null>(
     initialProjectId && projects.some((project) => project.id === initialProjectId)
@@ -118,7 +147,7 @@ export function AgentChat({
       const json = await response.json();
 
       if (!response.ok || !json.ok) {
-        setError(json?.error?.message ?? te('generic'));
+        setError(errorMessage(json, te, ta));
         return;
       }
 

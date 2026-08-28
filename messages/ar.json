@@ -771,11 +771,93 @@
     },
     "notice": {
       "truncated": "الملف أكبر من الحد، وجرى تحليل أول {rows} صف فقط.",
-      "skippedRows": "جرى تجاهل {rows} صفًا فارغًا في الملف."
+      "skippedRows": "جرى تجاهل {rows} صفًا فارغًا في الملف.",
+      "interactiveWindow": "الملف يحتوي على {total} صف؛ التحليل التفاعلي يعمل على أول {rows} صف."
     },
     "error": {
       "generic": "تعذّرت معالجة الملف.",
-      "network": "تعذّر الاتصال بالخادم. تحقق من الإنترنت وأعد المحاولة."
+      "network": "تعذّر الاتصال بالخادم. تحقق من الإنترنت وأعد المحاولة.",
+      "emptyFile": "الملف فارغ.",
+      "noColumns": "لم يُعثر على أي أعمدة في الملف. تأكد أن الصف الأول يحتوي على أسماء الأعمدة.",
+      "noRows": "الملف لا يحتوي على بيانات — فيه أسماء الأعمدة فقط.",
+      "noSheets": "المصنّف لا يحتوي على أي ورقة عمل.",
+      "notAWorkbook": "تعذّرت قراءة الملف كمصنّف Excel. إن كان ملفك بصيغة CSV فاحفظه بامتداد ‎.csv‎، وإن كان Excel فأعد حفظه من داخل Excel بصيغة ‎.xlsx‎.",
+      "unreadableWorkbook": "تعذّرت قراءة المصنّف. قد يكون الملف تالفًا أو محميًا بكلمة مرور.",
+      "unsupportedType": "صيغة الملف غير مدعومة. المدعوم: CSV و TSV و XLSX.",
+      "tooLarge": "حجم الملف أكبر من الحد المسموح به (12 ميغابايت).",
+      "tooManyColumns": "عدد الأعمدة أكبر مما يمكن تحليله."
+    },
+    "ttest": {
+      "error": {
+        "tooFewValues": "عدد القيم غير كافٍ ({n})؛ الحد الأدنى {minimum}.",
+        "noVariance": "العمود \"{variable}\" لا يتغيّر — كل القيم متساوية، فلا يوجد ما يُقارَن.",
+        "groupTooSmall": "إحدى المجموعتين صغيرة جدًا ({smallest})؛ الحد الأدنى {minimum} لكل مجموعة.",
+        "unequalPairs": "عدد القياسين غير متساوٍ ({first} مقابل {second}).",
+        "tooFewPairs": "عدد الأزواج المكتملة غير كافٍ ({n})؛ الحد الأدنى {minimum}.",
+        "noVarianceInDifferences": "الفروق بين القياسين متطابقة تمامًا، فلا يوجد تباين لاختباره."
+      }
+    },
+    "anova": {
+      "error": {
+        "tooFewGroups": "تحليل التباين يحتاج مجموعتين على الأقل بحجم كافٍ (المتاح {groups}).",
+        "labelMismatch": "عدد المجموعات ({groups}) لا يطابق عدد التسميات ({labels}).",
+        "tooFewObservations": "عدد المشاهدات ({n}) غير كافٍ لعدد المجموعات ({groups}).",
+        "noVariance": "لا يوجد تباين في البيانات، فلا شيء يُقارَن.",
+        "noWithinVariance": "لا يوجد تباين داخل المجموعات."
+      }
+    },
+    "correlation": {
+      "error": {
+        "lengthMismatch": "طول المتغيّرين غير متساوٍ ({first} مقابل {second}).",
+        "tooFewPairs": "عدد الأزواج المكتملة غير كافٍ ({n})؛ الحد الأدنى {minimum}.",
+        "constantVariable": "العمود \"{variable}\" لا يتغيّر، فلا يمكن أن يرتبط بشيء.",
+        "undefined": "تعذّر حساب معامل الارتباط لهذه البيانات.",
+        "tooFewVariables": "مصفوفة الارتباط تحتاج متغيّرين على الأقل (المحدَّد {selected}).",
+        "duplicateVariable": "لا يمكن إدراج المتغيّر نفسه مرتين."
+      }
+    },
+    "chiSquare": {
+      "error": {
+        "lengthMismatch": "طول المتغيّرين غير متساوٍ ({first} مقابل {second}).",
+        "tooFewLevels": "المتغيّر \"{variable}\" فيه {levels} فئة فقط؛ الاختبار يحتاج فئتين على الأقل.",
+        "emptyTable": "الجدول فارغ — لا توجد حالات مكتملة.",
+        "emptyCategory": "الفئة \"{category}\" لا تحتوي على أي حالة.",
+        "tooFewCategories": "الاختبار يحتاج فئتين على الأقل (المتاح {categories}).",
+        "labelMismatch": "عدد الفئات ({categories}) لا يطابق عدد التسميات ({labels}).",
+        "expectedMismatch": "عدد النسب المتوقعة ({expected}) لا يطابق عدد الفئات ({categories}).",
+        "proportionsDoNotSumToOne": "مجموع النسب المتوقعة يجب أن يساوي 1 (المجموع الحالي {sum})."
+      }
+    },
+    "regression": {
+      "error": {
+        "noPredictors": "الانحدار يحتاج متغيّرًا مستقلًا واحدًا على الأقل.",
+        "duplicatePredictor": "لا يمكن إدراج المتغيّر المستقل نفسه مرتين.",
+        "outcomeAmongPredictors": "المتغيّر \"{variable}\" تابع ومستقل في آن واحد — لا يمكن أن يتنبّأ بنفسه.",
+        "lengthMismatch": "طول العمود \"{variable}\" ({actual}) لا يطابق بقية الأعمدة ({expected}).",
+        "tooFewCases": "عدد الحالات ({n}) غير كافٍ لـ{predictors} متغيّر مستقل؛ الحد الأدنى {minimum}.",
+        "constantOutcome": "المتغيّر التابع \"{variable}\" لا يتغيّر، فلا شيء يمكن تفسيره.",
+        "constantPredictor": "المتغيّر المستقل \"{variable}\" لا يتغيّر، فلا يمكن أن يفسّر شيئًا.",
+        "perfectCollinearity": "أحد المتغيّرات المستقلة تكرار تام لغيره (أو تركيبة خطية منه)، فلا يوجد حلّ وحيد. احذف المتغيّر المكرّر."
+      }
+    },
+    "reliability": {
+      "error": {
+        "tooFewItems": "حساب الثبات يحتاج بندين على الأقل (المحدَّد {selected}).",
+        "duplicateItem": "لا يمكن إدراج البند نفسه مرتين.",
+        "unknownColumn": "العمود \"{column}\" غير موجود في الملف.",
+        "emptyColumn": "العمود \"{column}\" فارغ.",
+        "notNumericColumn": "العمود \"{column}\" من نوع \"{type}\" ولا يصلح كبند في مقياس.",
+        "nominalColumn": "العمود \"{column}\" اسمي (فئوي)، ولا يصح جمعه ضمن درجة كلية.",
+        "noVariance": "لا يوجد تباين في الدرجة الكلية، فلا يمكن حساب الثبات.",
+        "tooFewRespondents": "عدد المستجيبين المكتملين ({usable} من {supplied}) غير كافٍ."
+      }
+    },
+    "matrix": {
+      "error": {
+        "shapeMismatch": "أبعاد المصفوفات غير متوافقة ({left} مع {right}).",
+        "singular": "المصفوفة غير قابلة للعكس — يوجد عمود مكرّر أو تركيبة خطية.",
+        "underdetermined": "عدد الصفوف ({rows}) أقل من عدد الأعمدة ({columns})."
+      }
     }
   },
   "agent": {

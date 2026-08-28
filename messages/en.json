@@ -771,11 +771,93 @@
     },
     "notice": {
       "truncated": "The file exceeds the limit; only the first {rows} rows were analysed.",
-      "skippedRows": "{rows} blank rows in the file were ignored."
+      "skippedRows": "{rows} blank rows in the file were ignored.",
+      "interactiveWindow": "The file has {total} rows; interactive analysis uses the first {rows}."
     },
     "error": {
       "generic": "The file could not be processed.",
-      "network": "Could not reach the server. Check your connection and try again."
+      "network": "Could not reach the server. Check your connection and try again.",
+      "emptyFile": "The file is empty.",
+      "noColumns": "No columns were found. Check that the first row holds the column names.",
+      "noRows": "The file has no data rows — only column names.",
+      "noSheets": "The workbook has no sheets.",
+      "notAWorkbook": "This could not be read as an Excel workbook. If it is a CSV, save it with a .csv extension; if it is Excel, re-save it from Excel as .xlsx.",
+      "unreadableWorkbook": "The workbook could not be read. It may be damaged or password-protected.",
+      "unsupportedType": "That file type is not supported. CSV, TSV and XLSX are.",
+      "tooLarge": "The file is larger than the 12 MB limit.",
+      "tooManyColumns": "The file has more columns than can be analysed."
+    },
+    "ttest": {
+      "error": {
+        "tooFewValues": "Too few values ({n}); at least {minimum} are needed.",
+        "noVariance": "The column \"{variable}\" does not vary — every value is the same, so there is nothing to test.",
+        "groupTooSmall": "One group is too small ({smallest}); at least {minimum} per group are needed.",
+        "unequalPairs": "The two measurements have different lengths ({first} vs {second}).",
+        "tooFewPairs": "Too few complete pairs ({n}); at least {minimum} are needed.",
+        "noVarianceInDifferences": "Every difference is identical, so there is no variance to test."
+      }
+    },
+    "anova": {
+      "error": {
+        "tooFewGroups": "ANOVA needs at least two groups of usable size (found {groups}).",
+        "labelMismatch": "The number of groups ({groups}) does not match the number of labels ({labels}).",
+        "tooFewObservations": "Too few observations ({n}) for {groups} groups.",
+        "noVariance": "There is no variance in the data, so there is nothing to compare.",
+        "noWithinVariance": "There is no variance within the groups."
+      }
+    },
+    "correlation": {
+      "error": {
+        "lengthMismatch": "The two variables have different lengths ({first} vs {second}).",
+        "tooFewPairs": "Too few complete pairs ({n}); at least {minimum} are needed.",
+        "constantVariable": "The column \"{variable}\" does not vary, so it cannot correlate with anything.",
+        "undefined": "The correlation could not be computed for this data.",
+        "tooFewVariables": "A correlation matrix needs at least two variables (selected {selected}).",
+        "duplicateVariable": "The same variable cannot be included twice."
+      }
+    },
+    "chiSquare": {
+      "error": {
+        "lengthMismatch": "The two variables have different lengths ({first} vs {second}).",
+        "tooFewLevels": "The variable \"{variable}\" has only {levels} category; at least two are needed.",
+        "emptyTable": "The table is empty — no complete cases.",
+        "emptyCategory": "The category \"{category}\" contains no cases.",
+        "tooFewCategories": "At least two categories are needed (found {categories}).",
+        "labelMismatch": "The number of categories ({categories}) does not match the number of labels ({labels}).",
+        "expectedMismatch": "The number of expected proportions ({expected}) does not match the categories ({categories}).",
+        "proportionsDoNotSumToOne": "Expected proportions must sum to 1 (they sum to {sum})."
+      }
+    },
+    "regression": {
+      "error": {
+        "noPredictors": "A regression needs at least one predictor.",
+        "duplicatePredictor": "The same predictor cannot be included twice.",
+        "outcomeAmongPredictors": "\"{variable}\" is both the outcome and a predictor — it cannot predict itself.",
+        "lengthMismatch": "The column \"{variable}\" has {actual} values but the others have {expected}.",
+        "tooFewCases": "Too few cases ({n}) for {predictors} predictors; at least {minimum} are needed.",
+        "constantOutcome": "The outcome \"{variable}\" does not vary, so there is nothing to explain.",
+        "constantPredictor": "The predictor \"{variable}\" does not vary, so it cannot explain anything.",
+        "perfectCollinearity": "One predictor is an exact duplicate of another (or a linear combination of them), so there is no unique solution. Remove the duplicate."
+      }
+    },
+    "reliability": {
+      "error": {
+        "tooFewItems": "Reliability needs at least two items (selected {selected}).",
+        "duplicateItem": "The same item cannot be included twice.",
+        "unknownColumn": "The column \"{column}\" is not in this file.",
+        "emptyColumn": "The column \"{column}\" is empty.",
+        "notNumericColumn": "The column \"{column}\" is of type \"{type}\" and cannot be a scale item.",
+        "nominalColumn": "The column \"{column}\" is categorical and cannot be summed into a total score.",
+        "noVariance": "The total score has no variance, so reliability cannot be computed.",
+        "tooFewRespondents": "Too few complete respondents ({usable} of {supplied})."
+      }
+    },
+    "matrix": {
+      "error": {
+        "shapeMismatch": "The matrix dimensions do not match ({left} with {right}).",
+        "singular": "The matrix cannot be inverted — there is a duplicate column or a linear combination.",
+        "underdetermined": "There are fewer rows ({rows}) than columns ({columns})."
+      }
     }
   },
   "agent": {

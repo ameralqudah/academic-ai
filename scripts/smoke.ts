@@ -729,5 +729,56 @@ assertTrue(
   alphaDescribed.includes('reverse-coded-item'),
 );
 
+/*
+ * Every reason key the analysis layer can raise must have a message in both
+ * languages.
+ *
+ * This exists because of a failure a user hit in production: uploading a file
+ * with the wrong extension produced the literal string
+ * "analysis.error.notAWorkbook" on screen. The refusal was correct and the
+ * message was a code — useless to a researcher, and worse than useless because
+ * it looks like a crash.
+ *
+ * Checking it turned out to matter more than the one case suggested: 54 of the
+ * 66 reason keys had no translation at all. Any of them would have surfaced the
+ * same way.
+ *
+ * The check reads the source rather than a list, so a reason key added tomorrow
+ * without a message fails here rather than in front of someone.
+ */
+const analysisSources = await Promise.all(
+  [
+    'src/analysis/parse.ts',
+    'src/analysis/parse-xlsx.ts',
+    'src/analysis/index.ts',
+    'src/analysis/reliability.ts',
+    'src/analysis/linear-algebra.ts',
+    'src/analysis/inference/t-test.ts',
+    'src/analysis/inference/anova.ts',
+    'src/analysis/inference/correlation.ts',
+    'src/analysis/inference/chi-square.ts',
+    'src/analysis/inference/regression.ts',
+    'src/server/services/dataset.service.ts',
+  ].map((path) => readFile(path, 'utf8')),
+);
+
+const reasonKeys = [
+  ...new Set(
+    analysisSources
+      .join('\n')
+      .match(/'analysis\.[a-zA-Z.]+'/g)
+      ?.map((match) => match.slice(1, -1)) ?? [],
+  ),
+].sort();
+
+assertTrue('reason keys were found in the source', reasonKeys.length > 30);
+
+for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as const) {
+  for (const key of reasonKeys) {
+    const message = lookup(messages as Record<string, unknown>, key);
+    assertTrue(`${language}: "${key}" has a message`, typeof message === 'string' && message.length > 0);
+  }
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

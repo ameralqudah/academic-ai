@@ -44,6 +44,60 @@ interface Rule {
 const RULES: Rule[] = [
   /* ------------------- named methods that are not built ------------------- */
 
+  /*
+   * Explanations and definitions, matched FIRST.
+   *
+   * The ordering here is the whole logic, and it took a failing test to get
+   * right. "اشرح لي الانحدار الخطي" contains "الانحدار", so a regression rule
+   * placed above this one claims it — and routes a request for teaching to an
+   * analysis that demands a file the user never had. "ما الفرق بين Pearson و
+   * Spearman" fails the same way.
+   *
+   * The distinguishing signal is the verb, not the noun: "اشرح" and "ما الفرق"
+   * ask to be taught, while "شغّل" and "احسب" ask for computation. Since the
+   * verb usually opens the sentence and the statistical term follows it, asking
+   * about the verb first is both simpler and more reliable than trying to
+   * exclude every term from every analysis rule.
+   */
+  {
+    intent: 'general.question',
+    patterns: [
+      /*
+       * No \b on the Arabic patterns.
+       *
+       * JavaScript's word boundary is defined against [A-Za-z0-9_], so every
+       * Arabic letter counts as a non-word character and \b matches in places
+       * that make no sense — and fails in the places that do. These rules
+       * anchor on the start of the string or on whitespace instead, which is
+       * what a word boundary actually means here.
+       *
+       * This cost a failing test to find: "اشرح لي الانحدار الخطي" was being
+       * routed to a regression analysis because the \b-anchored explanation
+       * pattern never matched and the statistics rule below did.
+       */
+      /(^|\s)(اشرح|وضّ?ح|فسّ?ر|عرّ?ف)(\s|$)/,
+      /*
+       * "ما هو التحليل الإحصائي المناسب" opens with "ما هو" and is not a
+       * request to be taught — it is a request to choose a test for the user's
+       * data, which needs their file. The negative lookahead keeps that phrasing
+       * with the recommender rather than letting the explanation rule claim it
+       * by virtue of coming first.
+       */
+      /(^|\s)ما(?!\s+(هو\s+)?(التحليل|الاختبار)(\s+\S+){0,2}\s+(المناسب|الأنسب))\s+(هو|هي|معنى|تعريف)(\s|$)/,
+      /(^|\s)ما\s+(هو\s+)?الفرق\s+بين(\s|$)/,
+      /(^|\s)متى\s+(أستخدم|نستخدم|يُستخدم)(\s|$)/,
+      /(^|\s)أيهما\s+(أفضل|أنسب)(\s|$)/,
+      /(^|\s)كيف\s+(أفسّ?ر|نفسّ?ر|أقرأ|نقرأ)(\s|$)/,
+      /(^|\s)لماذا(\s|$)/,
+      /^\s*(explain|define|describe|tell me about)\b/i,
+      /\bwhat\s+(is|are|does|do)\b/i,
+      /\bwhat('s| is)\s+the\s+difference\s+between\b/i,
+      /\bwhen\s+(should|do)\s+i\s+use\b/i,
+      /\bhow\s+do\s+i\s+(interpret|read)\b/i,
+      /\bwhy\s+(is|are|does|do)\b/i,
+    ],
+  },
+
   {
     intent: 'stats.plsSem',
     patterns: [
@@ -106,7 +160,7 @@ const RULES: Rule[] = [
     patterns: [
       /\b(multiple\s+|linear\s+)?regression\b/i,
       /الانحدار\s+(الخطي|المتعدد|البسيط)/,
-      /\bتنبؤ\b/,
+      /(^|\s)تنبؤ/,
       /تحليل\s+الانحدار/,
     ],
   },
@@ -127,7 +181,7 @@ const RULES: Rule[] = [
     patterns: [
       /\banova\b/i,
       /\bt[\s-]?test\b/i,
-      /اختبار\s?ت\b/,
+      /(^|\s)اختبار\s?ت(\s|$)/,
       /تحليل\s+التباين/,
       /الفروق\s+(بين|في)/,
       /مقارنة\s+(بين|المتوسطات)/,

@@ -29,6 +29,8 @@ import { recommendTest, type RoleAssignment } from '@/analysis';
 import { logger } from '@/lib/logger';
 import * as tasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
+import * as projectsRepo from '@/server/repositories/projects.repository';
+import { answerGeneralQuestion } from '@/server/services/ai.service';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 import {
   runAnalysis,
@@ -541,6 +543,36 @@ async function executeStep(input: {
           payload: outcome.result,
         },
       };
+    }
+
+    /*
+     * The general answer — the path every request falls to when no specialist
+     * handles it.
+     *
+     * Its absence was a real bug: `planFor` returned a `respond` step, this
+     * switch had no case for it, and the request fell through to `default`
+     * returning null. The agent understood the question, announced a plan, and
+     * then silently did nothing. Every specialist agent had been built and the
+     * one that answers when there is no specialist had not.
+     */
+    case 'respond': {
+      const projectTitle = request.projectId
+        ? (await projectsRepo.findOwned(request.projectId, request.userId))?.title ?? null
+        : null;
+
+      const answer = await answerGeneralQuestion({
+        userId: request.userId,
+        message: request.message,
+        locale,
+        projectId: request.projectId ?? null,
+        projectTitle,
+        history: (request.history ?? []).map((turn) => ({
+          role: turn.role,
+          content: turn.content,
+        })),
+      });
+
+      return { kind: 'event', event: { type: 'delta', text: answer.content } };
     }
 
     default:

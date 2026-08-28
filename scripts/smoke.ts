@@ -18,6 +18,7 @@ import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
 import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
+import { generalPrompt } from '@/ai/prompts/general';
 import {
   availableCapabilities,
   CAPABILITIES,
@@ -779,6 +780,99 @@ for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as c
     assertTrue(`${language}: "${key}" has a message`, typeof message === 'string' && message.length > 0);
   }
 }
+
+
+console.log('\ngeneral questions reach the model');
+
+/*
+ * These exist because of a bug a user hit: every general question — however
+ * plainly worded — produced nothing at all. The agent classified it, announced
+ * a plan, and then silently did no work, because `executeStep` had no case for
+ * the `respond` step that `planFor` returned.
+ *
+ * The routing half of the fix is checked here. The distinguishing signal is the
+ * verb rather than the noun: "اشرح الانحدار" asks to be taught and "شغّل
+ * الانحدار" asks for computation, and both contain the same statistical term.
+ */
+const generalCases: [string, string][] = [
+  ['ما هي عاصمة الأردن؟', 'general.question'],
+  ['اشرح لي الانحدار الخطي', 'general.question'],
+  ['ما الفرق بين Pearson و Spearman؟', 'general.question'],
+  ['متى أستخدم اختبار t؟', 'general.question'],
+  ['كيف أفسّر قيمة p؟', 'general.question'],
+  ['لماذا نستخدم ألفا كرونباخ؟', 'general.question'],
+  ['ما معنى حجم الأثر؟', 'general.question'],
+  ['explain linear regression', 'general.question'],
+  ['what is the difference between Pearson and Spearman?', 'general.question'],
+  ['when should I use a t-test?', 'general.question'],
+  ['how do I interpret R squared?', 'general.question'],
+];
+
+for (const [message, expected] of generalCases) {
+  check(`"${message.slice(0, 40)}" → ${expected}`, classifyByKeyword(message)?.intent, expected);
+}
+
+/*
+ * The other side of the same boundary: a request to *run* an analysis must not
+ * be captured by the explanation rule just because it names the same test.
+ */
+const computeCases: [string, string][] = [
+  ['شغّل تحليل الانحدار المتعدد', 'stats.predict'],
+  ['احسب ألفا كرونباخ', 'stats.reliability'],
+  ['قارن بين المجموعتين', 'stats.compare'],
+  ['اختبار ت للعينات المستقلة', 'stats.compare'],
+  ['أريد تنبؤًا بالدرجات', 'stats.predict'],
+  ['أريد تحليل PLS-SEM', 'stats.plsSem'],
+];
+
+for (const [message, expected] of computeCases) {
+  check(`"${message.slice(0, 40)}" stays a computation`, classifyByKeyword(message)?.intent, expected);
+}
+
+/*
+ * A guard for the specific defect that broke Arabic matching.
+ *
+ * JavaScript's \b is defined against [A-Za-z0-9_], so every Arabic letter reads
+ * as a non-word character and the boundary matches in the wrong places while
+ * failing in the right ones. "اشرح لي الانحدار الخطي" was routed to a
+ * regression analysis for exactly this reason. No Arabic pattern may use it.
+ */
+const keywordSource = await readFile('src/agents/keywords.ts', 'utf8');
+const arabicWithBoundary = keywordSource
+  .split('\n')
+  .filter((line) => line.includes('\\b') && /[\u0600-\u06FF]/.test(line));
+
+check('no Arabic pattern relies on a word boundary', arabicWithBoundary.length, 0);
+
+/* Ambiguity is still left to the model rather than guessed at. */
+check('a bare name is left to the model', classifyByKeyword('من هو د. عامر زيد القضاة؟'), null);
+check('an upload request is left to the model', classifyByKeyword('حلل هذا الملف'), null);
+
+/*
+ * The general prompt must keep every integrity rule while dropping the single
+ * instruction that made general questions impossible — the academic block opens
+ * by telling the model to decline anything unrelated to the user's research.
+ */
+const general = generalPrompt({ locale: 'ar' });
+assertTrue('the general prompt forbids inventing citations', general.includes('Never invent a reference'));
+assertTrue('and inventing statistics', general.includes('Never invent research findings'));
+assertTrue('and claiming to have run anything', general.includes('Never claim to have conducted'));
+assertTrue('and inventing facts about a person', general.includes('Never invent facts about a specific person'));
+assertTrue('it instructs the model to state its knowledge limits', general.includes('KNOWLEDGE LIMITS'));
+assertTrue('and to ask when a name is ambiguous', general.includes('ask which one'));
+assertTrue(
+  'but it does not refuse non-academic questions',
+  !general.includes('You are not a general-purpose chatbot'),
+);
+assertTrue('and it names what the product cannot do', general.includes('It cannot yet'));
+assertTrue('including PLS-SEM', general.includes('PLS-SEM'));
+
+check('the prompt follows the user into Arabic', generalPrompt({ locale: 'ar' }).includes('Answer in Arabic'), true);
+check('and into English', generalPrompt({ locale: 'en' }).includes('Answer in English'), true);
+assertTrue(
+  'a selected project is mentioned without taking over the question',
+  generalPrompt({ locale: 'ar', projectTitle: 'أثر التعلم التعاوني' }).includes('أثر التعلم التعاوني'),
+);
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

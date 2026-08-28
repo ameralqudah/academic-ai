@@ -10,6 +10,7 @@ import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
 import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
 import { buildResultsContext } from '@/ai/context/results';
+import { generalPrompt } from '@/ai/prompts/general';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
 import {
   titleComparisonPrompt,
@@ -401,6 +402,48 @@ export interface ChatStreamHandle {
  * Streams a reply as Server-Sent Events and persists both messages plus usage
  * once the stream closes. The client never sees a provider-shaped payload.
  */
+/**
+ * Answers a question that is not about a specific project.
+ *
+ * Deliberately separate from `streamChat`, which requires a project and loads
+ * its context. A researcher asking what separates Pearson from Spearman has no
+ * project to load, and requiring one would mean either refusing the question or
+ * inventing a container to hold it.
+ *
+ * It uses `generalPrompt` rather than the academic block — see that file for
+ * why. The short version: the academic prompt opens by instructing the model to
+ * decline anything unrelated to the user's research, which is correct for
+ * writing a chapter and wrong for answering a question.
+ */
+export async function answerGeneralQuestion(input: {
+  userId: string;
+  message: string;
+  locale: 'ar' | 'en';
+  projectId?: string | null;
+  projectTitle?: string | null;
+  history?: AIChatMessage[];
+}): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
+  await assertCanUseAI(input.userId, 400);
+
+  const provider = await resolveProvider();
+
+  const result = await runCompletion({
+    userId: input.userId,
+    // Usage is recorded against the project when one is selected, and against
+    // the user alone when none is — the column is nullable for exactly this.
+    projectId: input.projectId ?? '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system: generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null }),
+    messages: [...(input.history ?? []).slice(-6), { role: 'user', content: input.message }],
+    maxTokens: 2000,
+    temperature: 0.6,
+  });
+
+  return { content: result.text, usage: result.usage };
+}
+
 export async function streamChat(
   userId: string,
   projectId: string,

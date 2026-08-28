@@ -1056,5 +1056,25 @@
     "noProjectHint": "You can analyse and ask without one",
     "newProject": "Create a new project",
     "projectContextOn": "The assistant can see this project"
+  },
+  "knowledge": {
+    "coverage": {
+      "noArabicSources": "I found no Arabic-language studies on this topic in the available databases, so this draws on English sources. That does not mean none exist — most Arabic journals do not issue DOIs, so they never enter these indexes.",
+      "fewArabicSources": "I found only a few Arabic-language studies, so this also draws on English sources. Arabic coverage in the open databases is limited by design."
+    },
+    "error": {
+      "providerFailed": "One search source could not be reached. These results come from the sources that responded.",
+      "timeout": "One search source took too long and was skipped.",
+      "budgetExhausted": "One source has used its daily allowance. These results come from the others.",
+      "noResults": "I found no results for that search."
+    },
+    "source": {
+      "academic": "Study",
+      "web": "Web page",
+      "news": "News",
+      "openAccess": "free to read",
+      "citations": "{count} citations",
+      "viaProvider": "via {provider}"
+    }
   }
 }

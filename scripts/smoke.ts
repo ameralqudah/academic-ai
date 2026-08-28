@@ -19,6 +19,10 @@ import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
 import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
 import { generalPrompt } from '@/ai/prompts/general';
+import { mergeSources } from '@/server/knowledge/merge';
+import { CrossrefProvider } from '@/server/knowledge/providers/crossref';
+import { OpenAlexProvider } from '@/server/knowledge/providers/openalex';
+import { detectLanguage, normaliseDoi } from '@/server/knowledge/types';
 import {
   availableCapabilities,
   CAPABILITIES,
@@ -873,6 +877,146 @@ assertTrue(
   'a selected project is mentioned without taking over the question',
   generalPrompt({ locale: 'ar', projectTitle: 'أثر التعلم التعاوني' }).includes('أثر التعلم التعاوني'),
 );
+
+
+console.log('\nknowledge layer: merging and coverage');
+
+/*
+ * The parts that can be checked without a network. Live provider behaviour is
+ * exercised separately by `npm run test:knowledge`, which needs the internet;
+ * everything here is pure logic and runs on every commit.
+ */
+
+/* DOI normalisation is what makes cross-provider deduplication work at all. */
+check('a bare DOI passes through', normaliseDoi('10.1109/4235.585892'), '10.1109/4235.585892');
+check('a DOI URL is unwrapped', normaliseDoi('https://doi.org/10.1109/4235.585892'), '10.1109/4235.585892');
+check('the dx.doi.org form too', normaliseDoi('http://dx.doi.org/10.1109/4235.585892'), '10.1109/4235.585892');
+check('a doi: prefix is stripped', normaliseDoi('doi:10.1109/4235.585892'), '10.1109/4235.585892');
+check('case is normalised — the DOI standard is case-insensitive', normaliseDoi('10.1109/ABC.123'), '10.1109/abc.123');
+check('a non-DOI is rejected', normaliseDoi('not-a-doi'), undefined);
+check('an empty value is rejected', normaliseDoi(''), undefined);
+
+/*
+ * Language from the script, not from provider metadata. A published assessment
+ * found OpenAlex over-reports English, which would make Arabic sources
+ * invisible in exactly the place a bilingual product cares about.
+ */
+check('an Arabic title is detected', detectLanguage('التعلم التعاوني وأثره على التحصيل'), 'ar');
+check('an English title is detected', detectLanguage('Cooperative learning and achievement'), 'en');
+check('a mostly-Arabic title with Latin terms stays Arabic', detectLanguage('أثر الذكاء الاصطناعي AI على التعليم'), 'ar');
+check('an empty title is unknown', detectLanguage(''), 'unknown');
+check('digits alone are unknown', detectLanguage('12345'), 'unknown');
+
+/*
+ * The deduplication that justifies the layer. The same paper arrives from two
+ * providers described differently, with one identifier in common — and without
+ * this, a researcher asking for sources gets duplicates that look like
+ * independent corroboration.
+ */
+const now = new Date().toISOString();
+const fromCrossref = {
+  kind: 'academic' as const,
+  title: 'Cooperative Learning and Academic Achievement',
+  url: 'https://doi.org/10.1016/j.example.2020.01',
+  doi: '10.1016/j.example.2020.01',
+  language: 'en' as const,
+  provider: 'crossref',
+  year: 2020,
+  citationCount: 120,
+  retrievedAt: now,
+};
+const fromOpenAlex = {
+  kind: 'academic' as const,
+  // Same paper: different casing, different URL, and it carries the abstract.
+  title: 'Cooperative learning and academic achievement',
+  url: 'https://europepmc.org/article/example',
+  doi: 'https://doi.org/10.1016/J.EXAMPLE.2020.01',
+  snippet: 'This study examined the effect of cooperative learning…',
+  language: 'en' as const,
+  provider: 'openalex',
+  year: 2020,
+  openAccess: true,
+  retrievedAt: now,
+};
+
+const deduped = mergeSources({
+  sources: [fromCrossref, { ...fromOpenAlex, doi: normaliseDoi(fromOpenAlex.doi) }],
+  preferredLanguage: 'en',
+});
+
+check('the same paper from two providers becomes one', deduped.sources.length, 1);
+check('and the duplicate is counted', deduped.coverage.duplicatesRemoved, 1);
+assertTrue(
+  'the surviving record gains the abstract the other provider had',
+  Boolean(deduped.sources[0]?.snippet),
+);
+assertTrue(
+  'and switches to the open-access link, which the researcher can actually read',
+  Boolean(deduped.sources[0]?.url.includes("europepmc")),
+);
+
+/*
+ * Ranking must not use provider relevance scores: Crossref returned 18.5 and
+ * OpenAlex 6254.3 for comparable results in the responses we sampled, so mixing
+ * them would let OpenAlex win every time regardless of quality.
+ */
+const arabicSource = { ...fromCrossref, doi: '10.1/ar', url: 'https://x/ar', title: 'دراسة عربية', language: 'ar' as const, score: 1 };
+const englishSource = { ...fromCrossref, doi: '10.1/en', url: 'https://x/en', title: 'An English study', language: 'en' as const, score: 99999 };
+
+const arabicFirst = mergeSources({ sources: [englishSource, arabicSource], preferredLanguage: 'ar' });
+check('for an Arabic researcher, the Arabic source ranks first', arabicFirst.sources[0]?.language, 'ar');
+
+const englishFirst = mergeSources({ sources: [arabicSource, englishSource], preferredLanguage: 'en' });
+check('and for an English one, the English source does', englishFirst.sources[0]?.language, 'en');
+
+/*
+ * The coverage notice — a requirement rather than a nicety. Arabic scholarship
+ * is structurally under-indexed because most Arabic journals issue no DOIs, so
+ * an all-English result set says more about the index than about the
+ * literature. The condition is computed here and the wording is fixed, so it
+ * cannot be omitted when true or invented when false.
+ */
+const englishOnly = mergeSources({
+  sources: [englishSource, { ...englishSource, doi: '10.1/en2', url: 'https://x/en2' }],
+  preferredLanguage: 'ar',
+});
+check(
+  'an Arabic researcher getting only English results is told so',
+  englishOnly.coverage.arabicCoverageNoticeKey,
+  'knowledge.coverage.noArabicSources',
+);
+
+const thin = mergeSources({
+  sources: [arabicSource, englishSource, { ...englishSource, doi: '10.1/en3', url: 'https://x/en3' }],
+  preferredLanguage: 'ar',
+});
+check('and thin Arabic coverage is flagged too', thin.coverage.arabicCoverageNoticeKey, 'knowledge.coverage.fewArabicSources');
+
+check(
+  'an English researcher is not given an Arabic-coverage notice',
+  mergeSources({ sources: [englishSource], preferredLanguage: 'en' }).coverage.arabicCoverageNoticeKey,
+  null,
+);
+
+const plenty = mergeSources({
+  sources: [arabicSource, { ...arabicSource, doi: '10.1/ar2', url: 'https://x/ar2' }, englishSource],
+  preferredLanguage: 'ar',
+});
+check('and neither is a researcher who got Arabic sources', plenty.coverage.arabicCoverageNoticeKey, null);
+
+/* Both notice keys must exist in both languages — the guard that caught the raw-code bug. */
+for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as const) {
+  for (const key of ['knowledge.coverage.noArabicSources', 'knowledge.coverage.fewArabicSources']) {
+    assertTrue(
+      `${language}: "${key}" has a message`,
+      typeof lookup(messages as Record<string, unknown>, key) === 'string',
+    );
+  }
+}
+
+/* Providers report which is usable without a key — the guarantee that a vendor cannot break the product. */
+check('Crossref works with nothing configured', new CrossrefProvider().isConfigured(), true);
+check('OpenAlex is used with or without a key', new OpenAlexProvider().isConfigured(), true);
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

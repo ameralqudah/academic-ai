@@ -92,6 +92,16 @@ const serverSchema = z.object({
    * `s3` covers Cloudflare R2, AWS S3 and anything else speaking the same API.
    * Switching between them is these variables and nothing else.
    */
+  /*
+   * OpenAlex became key-required and metered in February 2026. The key is free
+   * and raises the daily allowance tenfold — but it is optional here on
+   * purpose: without one the provider still works on the smaller keyless
+   * budget, and when that runs out the search falls back to Crossref rather
+   * than failing. A vendor's pricing decision must not be able to break the
+   * product.
+   */
+  OPENALEX_API_KEY: z.string().optional(),
+
   STORAGE_PROVIDER: z.enum(['local', 's3']).default('local'),
   STORAGE_LOCAL_DIR: z.string().optional(),
   S3_ENDPOINT: z.string().optional(),

@@ -19,7 +19,8 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/server/db/seed.ts",
     "vercel-build": "npm run db:migrate && npm run db:seed && next build",
-    "test:analysis": "tsx scripts/analysis.ts"
+    "test:analysis": "tsx scripts/analysis.ts",
+    "test:knowledge": "tsx scripts/knowledge.ts"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",

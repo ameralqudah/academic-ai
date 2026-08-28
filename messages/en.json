@@ -388,7 +388,8 @@
     "generateTitles": "Generate research titles",
     "openWizard": "Open the research wizard",
     "openEditor": "Open the writing editor",
-    "deleteProject": "Delete project"
+    "deleteProject": "Delete project",
+    "openAssistant": "Open the assistant"
   },
   "tools": {
     "title": "AI research tools",
@@ -968,6 +969,10 @@
       "ratio": "ratio"
     },
     "step_gatherResults": "Gathering your analyses",
-    "step_writeResults": "Writing the results chapter"
+    "step_writeResults": "Writing the results chapter",
+    "noProject": "No project",
+    "noProjectHint": "You can analyse and ask without one",
+    "newProject": "Create a new project",
+    "projectContextOn": "The assistant can see this project"
   }
 }

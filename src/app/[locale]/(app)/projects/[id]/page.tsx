@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Check, Circle, PenLine, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Circle, MessagesSquare, PenLine, Sparkles } from 'lucide-react';
 import type { Metadata } from 'next';
 import { getTranslations } from 'next-intl/server';
 
@@ -141,6 +141,22 @@ export default async function ProjectPage({ params }: Props) {
                   <span className="flex items-center gap-2">
                     <PenLine className="size-4" aria-hidden />
                     {t('openEditor')}
+                  </span>
+                  <Arrow className="size-4 opacity-60" aria-hidden />
+                </Link>
+              </Button>
+              {/*
+                The assistant, opened already pointed at this project.
+                
+                A plain link, because the chat reads its project from the query
+                string. That was the point of putting the selection in the URL:
+                the shortcut costs one anchor tag rather than a second code path.
+              */}
+              <Button asChild variant="outline" className="justify-between">
+                <Link href={`/chat?project=${project.id}`}>
+                  <span className="flex items-center gap-2">
+                    <MessagesSquare className="size-4" aria-hidden />
+                    {t('openAssistant')}
                   </span>
                   <Arrow className="size-4 opacity-60" aria-hidden />
                 </Link>

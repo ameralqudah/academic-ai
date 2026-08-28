@@ -388,7 +388,8 @@
     "generateTitles": "ولّد عناوين البحث",
     "openWizard": "افتح معالج البحث",
     "openEditor": "افتح محرر الكتابة",
-    "deleteProject": "حذف المشروع"
+    "deleteProject": "حذف المشروع",
+    "openAssistant": "فتح المساعد"
   },
   "tools": {
     "title": "أدوات الذكاء الاصطناعي البحثية",
@@ -968,6 +969,10 @@
     "step_analyse": "تنفيذ التحليل",
     "step_respond": "إعداد الرد",
     "step_gatherResults": "جمع نتائج التحليل",
-    "step_writeResults": "كتابة فصل النتائج"
+    "step_writeResults": "كتابة فصل النتائج",
+    "noProject": "بدون مشروع",
+    "noProjectHint": "يمكنك التحليل والسؤال بلا مشروع",
+    "newProject": "إنشاء مشروع جديد",
+    "projectContextOn": "المساعد يرى محتوى هذا المشروع"
   }
 }

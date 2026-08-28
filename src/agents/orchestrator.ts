@@ -466,8 +466,8 @@ async function executeStep(input: {
           kind: 'question',
           question:
             locale === 'ar'
-              ? 'لأي مشروع تريد كتابة فصل النتائج؟ افتح المشروع أولًا ثم اطلب ذلك.'
-              : 'Which project should I write the results chapter for? Open the project first, then ask.',
+              ? 'لأي مشروع تريد كتابة فصل النتائج؟ اختر المشروع من القائمة أعلى المحادثة ثم أعد طلبك.'
+              : 'Which project should I write the results chapter for? Pick one from the menu at the top of this conversation, then ask again.',
         };
       }
 

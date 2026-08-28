@@ -4,6 +4,7 @@ import { ArrowUp, Check, FileSpreadsheet, Loader2, Paperclip, X } from 'lucide-r
 import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
+import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { ResultCard, type StatisticalResult } from '@/components/agent/result-card';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -63,10 +64,30 @@ interface AttachedFile {
   columns: number;
 }
 
-export function AgentChat({ locale }: { locale: 'ar' | 'en' }) {
+export function AgentChat({
+  locale,
+  projects,
+  initialProjectId,
+}: {
+  locale: 'ar' | 'en';
+  projects: ProjectOption[];
+  /**
+   * Pre-selected project, read from the URL by the page.
+   *
+   * This is what makes the planned shortcut from inside a project a link rather
+   * than a rebuild: `/ar/chat?project=abc` opens the assistant already pointed
+   * at that project, and nothing here needs to know where the link came from.
+   */
+  initialProjectId?: string | null;
+}) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
 
+  const [projectId, setProjectId] = useState<string | null>(
+    initialProjectId && projects.some((project) => project.id === initialProjectId)
+      ? initialProjectId
+      : null,
+  );
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
@@ -90,6 +111,8 @@ export function AgentChat({ locale }: { locale: 'ar' | 'en' }) {
     try {
       const form = new FormData();
       form.append('file', selected);
+      // A file uploaded while a project is selected belongs to that project.
+      if (projectId) form.append('projectId', projectId);
 
       const response = await fetch('/api/datasets', { method: 'POST', body: form });
       const json = await response.json();
@@ -160,6 +183,7 @@ export function AgentChat({ locale }: { locale: 'ar' | 'en' }) {
           message: trimmed,
           locale,
           datasetId: file?.datasetId,
+          projectId: projectId ?? undefined,
           history,
         }),
       });
@@ -286,6 +310,17 @@ export function AgentChat({ locale }: { locale: 'ar' | 'en' }) {
 
   return (
     <div className="flex h-full flex-col gap-4">
+      <div className="flex items-center gap-2">
+        <ProjectPicker
+          projects={projects}
+          value={projectId}
+          onChange={setProjectId}
+          locale={locale}
+          disabled={busy}
+        />
+        {projectId && <span className="text-xs text-muted">{t('projectContextOn')}</span>}
+      </div>
+
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {turns.length === 0 ? (
           <Welcome onPick={(text) => void send(text)} />

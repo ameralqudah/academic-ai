@@ -80,6 +80,26 @@ const serverSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
 
+  /*
+   * File storage for uploaded datasets.
+   *
+   * `local` writes to a directory, which on Render must be the mount path of a
+   * persistent disk. Without a disk the filesystem is ephemeral and every
+   * uploaded file disappears at the next deploy — so the directory is required
+   * configuration rather than a default, and the application warns at boot if
+   * production is running without one.
+   *
+   * `s3` covers Cloudflare R2, AWS S3 and anything else speaking the same API.
+   * Switching between them is these variables and nothing else.
+   */
+  STORAGE_PROVIDER: z.enum(['local', 's3']).default('local'),
+  STORAGE_LOCAL_DIR: z.string().optional(),
+  S3_ENDPOINT: z.string().optional(),
+  S3_BUCKET: z.string().optional(),
+  S3_REGION: z.string().default('auto'),
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+
   /** Public origin used to build links in emails. Falls back to AUTH_URL. */
   APP_URL: z.string().optional(),
 

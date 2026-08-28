@@ -9,6 +9,11 @@
  * CI ahead of the build.
  */
 
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
 import { estimateTokens } from '@/ai/provider';
@@ -16,6 +21,10 @@ import { AnthropicProvider } from '@/ai/providers/anthropic';
 import { inspectOutput, parseJsonOutput } from '@/ai/guardrails';
 import { sectionI18nKey } from '@/lib/sections';
 import { countWords, slugify, truncate } from '@/lib/text';
+import { assertSafeKey, datasetKey, datasetPrefix, keyBelongsTo } from '@/server/storage/keys';
+import { checksumOf, LocalStorageProvider } from '@/server/storage/local';
+import { StorageError } from '@/server/storage/provider';
+import { amzDates, signRequest } from '@/server/storage/s3';
 
 let failures = 0;
 
@@ -133,6 +142,180 @@ const buffer = await Packer.toBuffer(document);
 // A .docx is a zip archive: the first two bytes are always "PK".
 check('produces a valid docx container', buffer.subarray(0, 2).toString('latin1'), 'PK');
 check('docx is not empty', buffer.byteLength > 1000, true);
+
+/* -------------------------------------------------------------------------- */
+/*                                  Storage                                   */
+/* -------------------------------------------------------------------------- */
+
+console.log('\nstorage keys');
+
+/*
+ * Keys are built from server-generated ids only. The name the user chose is
+ * kept in the database, never in the path — so a file called `report.csv.exe`
+ * cannot produce a key ending in `.exe`, and a name containing `../` cannot
+ * produce a key at all.
+ */
+check(
+  'a dataset key is built from ids alone',
+  datasetKey({ userId: 'u-1', datasetId: 'd-2', kind: 'ORIGINAL', extension: 'csv' }),
+  'datasets/u-1/d-2/original.csv',
+);
+check(
+  'the cleaned copy is a separate object',
+  datasetKey({ userId: 'u-1', datasetId: 'd-2', kind: 'CLEANED', extension: 'csv' }),
+  'datasets/u-1/d-2/cleaned.csv',
+);
+check('a key carries its owner as the first segment', keyBelongsTo('datasets/u-1/d-2/original.csv', 'u-1'), true);
+check('and does not match another owner', keyBelongsTo('datasets/u-1/d-2/original.csv', 'u-9'), false);
+
+function rejectsKey(name: string, key: string) {
+  try {
+    assertSafeKey(key);
+    failures += 1;
+    console.log(`  FAIL ${name}: the key was accepted`);
+  } catch (error) {
+    check(name, error instanceof StorageError, true);
+  }
+}
+
+rejectsKey('traversal is rejected', 'datasets/u-1/../u-2/original.csv');
+rejectsKey('a bare parent segment is rejected', '../secrets.env');
+rejectsKey('an absolute path is rejected', '/etc/passwd');
+rejectsKey('a Windows drive letter is rejected', 'C:/Windows/system32');
+rejectsKey('a backslash is rejected', 'datasets\\u-1\\original.csv');
+rejectsKey('a null byte is rejected', 'datasets/u-1/original.csv\0.png');
+rejectsKey('a URL is rejected', 'https://example.com/file.csv');
+rejectsKey('an empty segment is rejected', 'datasets//original.csv');
+rejectsKey('a current-directory segment is rejected', 'datasets/./original.csv');
+rejectsKey('an empty key is rejected', '');
+rejectsKey('an over-long key is rejected', `datasets/${'a'.repeat(600)}/x.csv`);
+
+console.log('\nlocal storage');
+
+const storageRoot = await mkdtemp(join(tmpdir(), 'academic-ai-storage-'));
+const storage = new LocalStorageProvider(storageRoot);
+
+check('a configured provider reports itself ready', storage.isConfigured(), true);
+check('an unconfigured provider does not', new LocalStorageProvider('').isConfigured(), false);
+
+const sampleKey = datasetKey({ userId: 'u-1', datasetId: 'd-2', kind: 'ORIGINAL', extension: 'csv' });
+const sampleBytes = new TextEncoder().encode('name,score\nAli,42\nSara,37\n');
+
+const written = await storage.put(sampleKey, sampleBytes, 'text/csv');
+check('a stored object reports its size', written.byteSize, sampleBytes.byteLength);
+check('the object exists after writing', await storage.exists(sampleKey), true);
+
+const readBack = await storage.get(sampleKey);
+check(
+  'the bytes come back unchanged',
+  new TextDecoder().decode(readBack.bytes),
+  'name,score\nAli,42\nSara,37\n',
+);
+check('the checksum is stable', checksumOf(readBack.bytes), checksumOf(sampleBytes));
+
+const info = await storage.stat(sampleKey);
+check('stat reports the size', info?.byteSize, sampleBytes.byteLength);
+check('stat returns nothing for an absent key', await storage.stat('datasets/u-1/d-9/original.csv'), null);
+
+/*
+ * The escape check is a second defence behind key validation. It cannot be
+ * triggered through `datasetKey`, so it is tested directly — the point of
+ * having it is the case where something upstream has already gone wrong.
+ */
+let escaped = false;
+try {
+  await storage.get('../../etc/passwd');
+} catch (error) {
+  escaped = error instanceof StorageError;
+}
+check('a traversal attempt never reaches the filesystem', escaped, true);
+
+await storage.delete(sampleKey);
+check('the object is gone after deletion', await storage.exists(sampleKey), false);
+// Deleting twice must succeed, so a retried delete is not an error.
+await storage.delete(sampleKey);
+check('deleting an absent object is not an error', true, true);
+
+await storage.put(datasetKey({ userId: 'u-3', datasetId: 'd-4', kind: 'ORIGINAL', extension: 'csv' }), sampleBytes);
+await storage.put(datasetKey({ userId: 'u-3', datasetId: 'd-4', kind: 'CLEANED', extension: 'csv' }), sampleBytes);
+await storage.deletePrefix(datasetPrefix('u-3', 'd-4'));
+check(
+  'deleting a prefix removes both the original and the cleaned copy',
+  await storage.exists(datasetKey({ userId: 'u-3', datasetId: 'd-4', kind: 'CLEANED', extension: 'csv' })),
+  false,
+);
+
+await rm(storageRoot, { recursive: true, force: true });
+
+console.log('\nS3 request signing');
+
+/*
+ * Signature Version 4, checked against an independent implementation of the
+ * same published algorithm written in Python. The signing chain is arithmetic,
+ * so it can be verified without a bucket — but a live upload against the real
+ * endpoint is still required before switching a deployment to `s3`, and no
+ * assertion here can substitute for it.
+ */
+const sha256Of = (value: string) => createHash('sha256').update(value).digest('hex');
+
+const signed = signRequest({
+  method: 'PUT',
+  host: 'bucket.example.com',
+  path: '/mybucket/datasets/u1/d1/original.csv',
+  region: 'auto',
+  accessKeyId: 'AKIDEXAMPLE',
+  secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+  payloadHash: sha256Of('hello world'),
+  amzDate: '20260827T120000Z',
+  dateStamp: '20260827',
+  extraHeaders: { 'content-type': 'text/csv' },
+});
+
+check(
+  'a PUT signature matches the reference implementation',
+  signed.authorization?.split('Signature=')[1],
+  'e9b546d93aa8581140af1fb6455ae66e33f1c02f2638b0533e1e6d5a0a824fa6',
+);
+
+check(
+  'a GET signature matches',
+  signRequest({
+    method: 'GET',
+    host: 's3.eu-central-1.amazonaws.com',
+    path: '/b/k',
+    region: 'eu-central-1',
+    accessKeyId: 'AKID2',
+    secretAccessKey: 'SECRET2',
+    payloadHash: sha256Of(''),
+    amzDate: '20260101T000000Z',
+    dateStamp: '20260101',
+  }).authorization?.split('Signature=')[1],
+  'e75ba5a8bf2602f8ac8a1f9ca13507f357a642478fda0584d926009f2f8ceff5',
+);
+
+check(
+  'a DELETE signature matches',
+  signRequest({
+    method: 'DELETE',
+    host: 'x.r2.cloudflarestorage.com',
+    path: '/bk/datasets/abc/def/cleaned.csv',
+    region: 'auto',
+    accessKeyId: 'AK3',
+    secretAccessKey: 'SK3',
+    payloadHash: sha256Of(''),
+    amzDate: '20261231T235959Z',
+    dateStamp: '20261231',
+  }).authorization?.split('Signature=')[1],
+  '727790a1d48b72a9fdd923468be5c70a2e02ac330fdbe629b77fd9e2b055889b',
+);
+
+check(
+  'the signed headers are listed in sorted order',
+  signed.authorization?.includes('SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date'),
+  true,
+);
+check('the timestamp format is the one SigV4 expects', amzDates(new Date('2026-08-27T12:00:00.000Z')).amzDate, '20260827T120000Z');
+check('and the date stamp is derived from it', amzDates(new Date('2026-08-27T12:00:00.000Z')).dateStamp, '20260827');
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

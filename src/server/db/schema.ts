@@ -23,6 +23,7 @@ import {
   timestamp,
   uniqueIndex,
   varchar,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import type { AdapterAccountType } from 'next-auth/adapters';
 
@@ -210,6 +211,12 @@ export const subscriptionPlans = pgTable(
     isActive: boolean('is_active').default(true).notNull(),
     isDefault: boolean('is_default').default(false).notNull(),
     externalPriceId: text('external_price_id'),
+    /**
+     * Agent tasks allowed per month. Deliberately nullable: phase two measures
+     * task usage without enforcing it, and the limits are set from real numbers
+     * rather than guesses once there are some. Null means "not enforced".
+     */
+    maxAiTasks: integer('max_ai_tasks'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -500,6 +507,13 @@ export const aiConversations = pgTable(
     scope: conversationScopeEnum('scope').default('PROJECT').notNull(),
     sectionKey: varchar('section_key', { length: 64 }).$type<SectionKey | null>(),
     toolKey: varchar('tool_key', { length: 64 }).$type<ToolKey | null>(),
+    /**
+     * How the conversation is driven: the existing section and tool chats, or
+     * the agent. A typed varchar rather than a new value on `conversation_scope`
+     * — altering a PG enum is the riskiest thing a migration can do, and this
+     * vocabulary will keep growing.
+     */
+    mode: varchar('mode', { length: 32 }).$type<'CHAT' | 'AGENT' | null>(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -524,9 +538,187 @@ export const aiMessages = pgTable(
     tokensOut: integer('tokens_out').default(0).notNull(),
     /** Guardrail findings attached to this message (unverified citations, etc.). */
     flags: jsonb('flags').$type<string[]>().default([]).notNull(),
+    /**
+     * Structured content attached to a message — an analysis result, a plan, a
+     * table. Stored rather than rendered into the text so that reopening a
+     * conversation redraws the real table instead of a paragraph describing one.
+     */
+    payload: jsonb('payload').$type<Record<string, unknown> | null>(),
     createdAt: createdAt(),
   },
   (table) => [index('ai_messages_conversation_idx').on(table.conversationId, table.createdAt)],
+);
+
+/* -------------------------------------------------------------------------- */
+/*                                  Datasets                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * An uploaded data file, or a cleaned derivation of one.
+ *
+ * The bytes never live here. Only the description does: where the file is, how
+ * big it is, and the profile computed from it. A twelve-megabyte spreadsheet in
+ * a jsonb column would make every query that touches this table slow, and the
+ * rows are needed only when an analysis runs.
+ *
+ * Original and cleaned are separate rows linked by `parentDatasetId`, so the
+ * researcher's own data is never overwritten by the tool's tidying of it.
+ */
+export const datasets = pgTable(
+  'datasets',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** A file may belong to no project — one uploaded straight into a chat. */
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    conversationId: text('conversation_id').references(() => aiConversations.id, {
+      onDelete: 'set null',
+    }),
+    /** ORIGINAL is written once and never modified. CLEANED derives from it. */
+    kind: varchar('kind', { length: 16 }).$type<'ORIGINAL' | 'CLEANED'>().default('ORIGINAL').notNull(),
+    /**
+     * The original a cleaned copy came from.
+     *
+     * Cascading is the point rather than an incidental choice: "delete
+     * everything" must take the cleaned derivations with it. Without the
+     * constraint, removing an original leaves its tidied copies behind as
+     * orphans pointing at an id that no longer exists — files the user believes
+     * they deleted, still on disk, still holding their data.
+     */
+    parentDatasetId: text('parent_dataset_id').references((): AnyPgColumn => datasets.id, {
+      onDelete: 'cascade',
+    }),
+    originalName: text('original_name').notNull(),
+    /** Path in the storage provider. Never a URL, never public. */
+    storageKey: text('storage_key').notNull(),
+    mimeType: varchar('mime_type', { length: 128 }),
+    byteSize: integer('byte_size').default(0).notNull(),
+    /** SHA-256 of the stored bytes, to detect corruption and duplicate uploads. */
+    checksum: varchar('checksum', { length: 64 }),
+    rowCount: integer('row_count').default(0).notNull(),
+    columnCount: integer('column_count').default(0).notNull(),
+    /** Set when the file was longer than the interactive analysis window. */
+    truncatedTo: integer('truncated_to'),
+    /** The `DatasetProfile` computed at upload: column types, scales, issues. */
+    profile: jsonb('profile').$type<Record<string, unknown>>(),
+    /**
+     * Soft delete. "Delete the file" removes the bytes and sets this; the
+     * analyses computed from it survive, because a number already cited in a
+     * thesis should not vanish when its source file is tidied away. "Delete
+     * everything" removes the row and cascades to the runs.
+     */
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index('datasets_user_idx').on(table.userId, table.createdAt),
+    index('datasets_project_idx').on(table.projectId),
+    index('datasets_parent_idx').on(table.parentDatasetId),
+  ],
+);
+
+/**
+ * One statistical analysis, with everything needed to reproduce and cite it.
+ *
+ * `testKey` is a typed varchar rather than a PG enum, for the same reason
+ * `sectionKey` and `toolKey` are: adding a test must not require a migration,
+ * and this vocabulary will grow through every remaining phase.
+ *
+ * `projectId` and `sectionKey` are how a result finds its way into a thesis
+ * chapter later. They stay null for an analysis run in a chat that was never
+ * attached to a project.
+ */
+export const analysisRuns = pgTable(
+  'analysis_runs',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    datasetId: text('dataset_id')
+      .notNull()
+      .references(() => datasets.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    /** The section this result belongs to, once the researcher attaches it. */
+    sectionKey: varchar('section_key', { length: 64 }).$type<SectionKey | null>(),
+    conversationId: text('conversation_id').references(() => aiConversations.id, {
+      onDelete: 'set null',
+    }),
+    /** 't.independent', 'anova.oneWay', 'regression.ols', … */
+    testKey: varchar('test_key', { length: 64 }).notNull(),
+    /** Which columns, in which roles, with which options — enough to re-run it. */
+    spec: jsonb('spec').$type<Record<string, unknown>>().notNull(),
+    /** The full `InferentialResult`: statistic, p, effect, assumptions, warnings. */
+    result: jsonb('result').$type<Record<string, unknown>>().notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index('analysis_runs_user_idx').on(table.userId, table.createdAt),
+    index('analysis_runs_dataset_idx').on(table.datasetId),
+    index('analysis_runs_project_idx').on(table.projectId, table.sectionKey),
+  ],
+);
+
+/**
+ * One agent task, from the user's request to its completion.
+ *
+ * This exists so that a request which internally makes eight model calls is
+ * counted as one thing, which is how the user experiences it. Phase two records
+ * these and enforces nothing: the weights and quotas are set later from real
+ * measurements rather than from a guess made before anyone had used the feature.
+ *
+ * A separate table rather than a new value on the `usage_metric` enum. Altering
+ * a PostgreSQL enum is the riskiest operation a migration can perform, and a
+ * task carries structure — stages, timings, a declared ceiling — that a usage
+ * row has nowhere to put.
+ */
+export const agentTasks = pgTable(
+  'agent_tasks',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    conversationId: text('conversation_id').references(() => aiConversations.id, {
+      onDelete: 'set null',
+    }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    /** 'analysis.run', 'data.clean', 'research.plan', … */
+    kind: varchar('kind', { length: 64 }).notNull(),
+    /** The classified intent, kept to measure how often classification is right. */
+    intent: varchar('intent', { length: 64 }),
+    status: varchar('status', { length: 16 })
+      .$type<'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'>()
+      .default('RUNNING')
+      .notNull(),
+    /** `YYYY-MM`, matching the aggregation key `usage_tracking` already uses. */
+    periodKey: varchar('period_key', { length: 7 }).notNull(),
+    /** What the task was declared it could cost, and what it actually cost. */
+    declaredUnits: integer('declared_units').default(0).notNull(),
+    chargedUnits: integer('charged_units').default(0).notNull(),
+    /** Internals, for setting fair weights later. */
+    stagesPlanned: integer('stages_planned').default(0).notNull(),
+    stagesCompleted: integer('stages_completed').default(0).notNull(),
+    aiRequestCount: integer('ai_request_count').default(0).notNull(),
+    tokensIn: integer('tokens_in').default(0).notNull(),
+    tokensOut: integer('tokens_out').default(0).notNull(),
+    costMicroUsd: integer('cost_micro_usd').default(0).notNull(),
+    generatedWords: integer('generated_words').default(0).notNull(),
+    datasetRows: integer('dataset_rows'),
+    durationMs: integer('duration_ms'),
+    /** Per-stage timings and any failure reason. */
+    detail: jsonb('detail').$type<Record<string, unknown>>(),
+    startedAt: createdAt(),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    index('agent_tasks_user_period_idx').on(table.userId, table.periodKey),
+    index('agent_tasks_started_idx').on(table.startedAt),
+    index('agent_tasks_conversation_idx').on(table.conversationId),
+  ],
 );
 
 /* -------------------------------------------------------------------------- */
@@ -620,6 +812,31 @@ export const aiMessagesRelations = relations(aiMessages, ({ one }) => ({
   }),
 }));
 
+export const datasetsRelations = relations(datasets, ({ one, many }) => ({
+  user: one(users, { fields: [datasets.userId], references: [users.id] }),
+  project: one(researchProjects, {
+    fields: [datasets.projectId],
+    references: [researchProjects.id],
+  }),
+  runs: many(analysisRuns),
+}));
+
+export const analysisRunsRelations = relations(analysisRuns, ({ one }) => ({
+  dataset: one(datasets, { fields: [analysisRuns.datasetId], references: [datasets.id] }),
+  project: one(researchProjects, {
+    fields: [analysisRuns.projectId],
+    references: [researchProjects.id],
+  }),
+}));
+
+export const agentTasksRelations = relations(agentTasks, ({ one }) => ({
+  user: one(users, { fields: [agentTasks.userId], references: [users.id] }),
+  conversation: one(aiConversations, {
+    fields: [agentTasks.conversationId],
+    references: [aiConversations.id],
+  }),
+}));
+
 export const referencesRelations = relations(references, ({ one }) => ({
   project: one(researchProjects, {
     fields: [references.projectId],
@@ -648,3 +865,9 @@ export type TitleCandidate = typeof titleCandidates.$inferSelect;
 export type ReferenceRow = typeof references.$inferSelect;
 export type AIConversation = typeof aiConversations.$inferSelect;
 export type AIMessageRow = typeof aiMessages.$inferSelect;
+export type Dataset = typeof datasets.$inferSelect;
+export type NewDataset = typeof datasets.$inferInsert;
+export type AnalysisRun = typeof analysisRuns.$inferSelect;
+export type NewAnalysisRun = typeof analysisRuns.$inferInsert;
+export type AgentTask = typeof agentTasks.$inferSelect;
+export type NewAgentTask = typeof agentTasks.$inferInsert;

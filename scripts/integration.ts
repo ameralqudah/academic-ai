@@ -16,6 +16,10 @@
 
 import 'dotenv/config';
 
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import bcrypt from 'bcryptjs';
 import { eq, like } from 'drizzle-orm';
 
@@ -26,6 +30,8 @@ import { users } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
 import * as adminRepo from '@/server/repositories/admin.repository';
+import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
+import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
 import * as plansRepo from '@/server/repositories/plans.repository';
 import { periodKeyFor } from '@/server/repositories/usage.repository';
@@ -44,7 +50,23 @@ import {
 } from '@/server/services/project.service';
 import { addReference, listReferences, markVerified } from '@/server/services/reference.service';
 import { approveSection, listVersions, saveSection } from '@/server/services/section.service';
+import {
+  deleteEverything,
+  deleteFileOnly,
+  deletionImpact,
+  loadForAnalysis,
+  saveCleanedCopy,
+  saveUpload,
+} from '@/server/services/dataset.service';
+import {
+  attachRun,
+  detachRun,
+  getRun,
+  recommend,
+  runAnalysis,
+} from '@/server/services/statistics.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
+import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
 import {
   assertCanCreateProject,
@@ -682,6 +704,293 @@ async function main() {
     (await resolvePlanForUser(ownerId)).plan.code,
     'FREE',
   );
+
+  /* --------------------------------------------------------------- datasets */
+
+  section('datasets: storing, cleaning and the two kinds of delete');
+
+  const storageRoot = await mkdtemp(join(tmpdir(), 'academic-ai-datasets-'));
+  process.env.STORAGE_PROVIDER = 'local';
+  process.env.STORAGE_LOCAL_DIR = storageRoot;
+  resetEnvCache();
+  resetStorageCache();
+
+  const dataOwner = await newUser('data-owner');
+  const dataIntruder = await newUser('data-intruder');
+
+  const csvBody =
+    'gender,score,q1,q2\n' +
+    Array.from({ length: 40 }, (_, i) =>
+      [i % 2 === 0 ? 'male' : 'female', 60 + ((i * 7) % 30), (i % 5) + 1, ((i * 3) % 5) + 1].join(','),
+    ).join('\n') +
+    '\n';
+
+  const savedFile = await saveUpload({
+    userId: dataOwner,
+    file: { name: 'survey.csv', bytes: new TextEncoder().encode(csvBody).buffer as ArrayBuffer },
+  });
+
+  check('the upload is profiled on the way in', savedFile.profile.rowCount, 40);
+  check('and its columns counted', savedFile.profile.columnCount, 4);
+  check('it is stored as an original', savedFile.dataset.kind, 'ORIGINAL');
+  check('a checksum is recorded', savedFile.dataset.checksum?.length, 64);
+  assertTrue('the key is scoped to its owner', savedFile.dataset.storageKey.startsWith(`datasets/${dataOwner}/`));
+
+  /*
+   * The point of storing at all: the file is still there on a later request,
+   * which is what lets a conversation refer back to "this file".
+   */
+  const reloaded = await loadForAnalysis(savedFile.dataset.id, dataOwner);
+  check('the rows come back on a later request', reloaded.data.rows.length, 40);
+  check('and the profile agrees with the stored one', reloaded.profile.columnCount, 4);
+
+  /*
+   * The check that matters most in this whole phase. Knowing an id — or a
+   * storage key — must not be enough.
+   */
+  let crossUserBlocked = false;
+  try {
+    await loadForAnalysis(savedFile.dataset.id, dataIntruder);
+  } catch (error) {
+    crossUserBlocked = error instanceof AppError && error.code === 'NOT_FOUND';
+  }
+  assertTrue('another user cannot load the file by id', crossUserBlocked);
+
+  let crossUserDeleteBlocked = false;
+  try {
+    await deleteFileOnly(savedFile.dataset.id, dataIntruder);
+  } catch (error) {
+    crossUserDeleteBlocked = error instanceof AppError;
+  }
+  assertTrue('nor delete it', crossUserDeleteBlocked);
+  assertTrue(
+    'and the file is untouched afterwards',
+    (await loadForAnalysis(savedFile.dataset.id, dataOwner)).data.rows.length === 40,
+  );
+
+  /* Cleaning derives a new dataset and leaves the original exactly as it was. */
+  const cleaned = await saveCleanedCopy({
+    datasetId: savedFile.dataset.id,
+    userId: dataOwner,
+    actions: savedFile.proposals.slice(0, 1),
+  });
+  check('a cleaned copy is a separate dataset', cleaned.dataset.kind, 'CLEANED');
+  check('linked to its parent', cleaned.dataset.parentDatasetId, savedFile.dataset.id);
+  assertTrue(
+    'the original is untouched by cleaning',
+    (await loadForAnalysis(savedFile.dataset.id, dataOwner)).data.rows.length === 40,
+  );
+  assertTrue(
+    'and the two occupy different objects',
+    cleaned.dataset.storageKey !== savedFile.dataset.storageKey,
+  );
+
+  let doubleCleanBlocked = false;
+  try {
+    await saveCleanedCopy({ datasetId: cleaned.dataset.id, userId: dataOwner, actions: [] });
+  } catch (error) {
+    doubleCleanBlocked = error instanceof AppError;
+  }
+  assertTrue('a cleaned copy cannot itself be cleaned', doubleCleanBlocked);
+
+  /* Record an analysis, then check each deletion mode against it. */
+  await analysisRunsRepo.create({
+    userId: dataOwner,
+    datasetId: savedFile.dataset.id,
+    testKey: 't.independent',
+    spec: { columns: ['score', 'gender'] },
+    result: { pValue: 0.03 },
+  });
+
+  const impact = await deletionImpact(savedFile.dataset.id, dataOwner);
+  check('the confirmation knows how many analyses are at stake', impact.analyses, 1);
+  check('and how many cleaned copies', impact.cleanedCopies, 1);
+
+  /* Delete the file only: bytes gone, results kept. */
+  await deleteFileOnly(savedFile.dataset.id, dataOwner);
+  check(
+    'the analyses survive deleting the file',
+    (await analysisRunsRepo.listByDataset(savedFile.dataset.id, dataOwner)).length,
+    1,
+  );
+  let readAfterDelete = false;
+  try {
+    await loadForAnalysis(savedFile.dataset.id, dataOwner);
+  } catch {
+    readAfterDelete = true;
+  }
+  assertTrue('but the file itself can no longer be read', readAfterDelete);
+
+  /* Delete everything: confirmation required, then nothing is left. */
+  let unconfirmedBlocked = false;
+  try {
+    await deleteEverything(savedFile.dataset.id, dataOwner, false);
+  } catch (error) {
+    unconfirmedBlocked = error instanceof AppError && error.code === 'VALIDATION';
+  }
+  assertTrue('deleting everything requires confirmation', unconfirmedBlocked);
+
+  await deleteEverything(savedFile.dataset.id, dataOwner, true);
+  check(
+    'confirmed, the analyses go too',
+    (await analysisRunsRepo.listByDataset(savedFile.dataset.id, dataOwner)).length,
+    0,
+  );
+  check(
+    'and so does the cleaned copy',
+    (await datasetsRepo.findOwnedIncludingDeleted(cleaned.dataset.id, dataOwner)) === undefined,
+    true,
+  );
+
+  /* Nothing is left on disk either — the bytes, not just the rows. */
+  const leftovers = await readdir(join(storageRoot, 'datasets', dataOwner)).catch(() => []);
+  check('no objects are left behind on disk', leftovers.length, 0);
+
+  /* ------------------------------------------------ statistics on stored data */
+
+  section('statistics: running tests on a stored dataset and saving the results');
+
+  const statsOwner = await newUser('stats-owner');
+  const statsIntruder = await newUser('stats-intruder');
+
+  const statsCsv =
+    'gender,score,q1,q2,q3\n' +
+    [
+      ['male', 82, 4, 5, 4], ['female', 74, 3, 3, 3], ['male', 88, 5, 4, 5],
+      ['female', 70, 2, 2, 3], ['male', 85, 4, 4, 4], ['female', 76, 3, 4, 3],
+      ['male', 90, 5, 5, 5], ['female', 72, 2, 3, 2], ['male', 84, 4, 4, 5],
+      ['female', 78, 3, 3, 4], ['male', 86, 5, 4, 4], ['female', 73, 2, 2, 2],
+      ['male', 81, 4, 5, 4], ['female', 77, 3, 4, 3], ['male', 89, 5, 5, 5],
+      ['female', 71, 2, 2, 3], ['male', 83, 4, 4, 4], ['female', 75, 3, 3, 3],
+      ['male', 87, 5, 5, 4], ['female', 79, 3, 4, 4],
+    ]
+      .map((row) => row.join(','))
+      .join('\n') +
+    '\n';
+
+  const statsFile = await saveUpload({
+    userId: statsOwner,
+    file: { name: 'scores.csv', bytes: new TextEncoder().encode(statsCsv).buffer as ArrayBuffer },
+  });
+
+  /* The recommender decides which test fits, from the profiled scales. */
+  const recommended = await recommend({
+    datasetId: statsFile.dataset.id,
+    userId: statsOwner,
+    roles: [
+      { column: 'score', role: 'dependent' },
+      { column: 'gender', role: 'grouping' },
+    ],
+  });
+  check('two groups and a quantitative outcome suggest a t-test', recommended.recommendation.best?.test, 't.independent');
+
+  const tTest = await runAnalysis({
+    datasetId: statsFile.dataset.id,
+    userId: statsOwner,
+    test: 't.independent',
+    columns: { dependent: 'score', grouping: 'gender' },
+  });
+
+  check('the result is recorded against the dataset', tTest.run.datasetId, statsFile.dataset.id);
+  check('with the test it ran', tTest.run.testKey, 't.independent');
+  check('and Welch is the primary form', (tTest.result as { detail?: { primaryForm?: string } }).detail?.primaryForm, 'welch');
+  assertTrue(
+    'the p-value is real and significant',
+    (tTest.result as { pValue: number }).pValue < 0.001,
+  );
+  assertTrue(
+    'the spec records which columns were used, so the result can be reproduced',
+    JSON.stringify(tTest.run.spec).includes('gender'),
+  );
+
+  /* Cronbach's alpha on the three Likert items. */
+  const alphaRun = await runAnalysis({
+    datasetId: statsFile.dataset.id,
+    userId: statsOwner,
+    test: 'reliability.cronbachAlpha',
+    columns: { items: ['q1', 'q2', 'q3'] },
+  });
+  assertTrue(
+    'alpha is computed and stored',
+    typeof (alphaRun.result as { alpha?: number }).alpha === 'number',
+  );
+
+  /* A test that does not fit the data is refused rather than run. */
+  let wrongTestBlocked = false;
+  try {
+    await runAnalysis({
+      datasetId: statsFile.dataset.id,
+      userId: statsOwner,
+      test: 't.oneSample',
+      columns: { dependent: 'score' },
+    });
+  } catch (error) {
+    wrongTestBlocked = error instanceof AppError && error.code === 'VALIDATION';
+  }
+  assertTrue('a one-sample t-test without a comparison value is refused', wrongTestBlocked);
+
+  let missingColumnBlocked = false;
+  try {
+    await runAnalysis({
+      datasetId: statsFile.dataset.id,
+      userId: statsOwner,
+      test: 't.independent',
+      columns: { dependent: 'not_a_column', grouping: 'gender' },
+    });
+  } catch (error) {
+    missingColumnBlocked = error instanceof AppError;
+  }
+  assertTrue('a column that is not in the file is refused', missingColumnBlocked);
+
+  /* Ownership again, this time on the analysis path. */
+  let statsCrossUser = false;
+  try {
+    await runAnalysis({
+      datasetId: statsFile.dataset.id,
+      userId: statsIntruder,
+      test: 't.independent',
+      columns: { dependent: 'score', grouping: 'gender' },
+    });
+  } catch (error) {
+    statsCrossUser = error instanceof AppError && error.code === 'NOT_FOUND';
+  }
+  assertTrue('another user cannot analyse someone else\u2019s file', statsCrossUser);
+
+  let runCrossUser = false;
+  try {
+    await getRun(tTest.run.id, statsIntruder);
+  } catch (error) {
+    runCrossUser = error instanceof AppError && error.code === 'NOT_FOUND';
+  }
+  assertTrue('nor read the saved result', runCrossUser);
+
+  /* Attaching a result to a project section — the link to the results chapter. */
+  const statsProject = await createProject(statsOwner, projectInput);
+
+  const attached = await attachRun({
+    runId: tTest.run.id,
+    userId: statsOwner,
+    projectId: statsProject.id,
+    sectionKey: 'RESULTS',
+  });
+  check('a result can be attached to a section', attached.sectionKey, 'RESULTS');
+  check(
+    'and is then findable from the project',
+    (await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')).length,
+    1,
+  );
+
+  await detachRun(tTest.run.id, statsOwner);
+  check(
+    'detaching removes it from the section',
+    (await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')).length,
+    0,
+  );
+
+  await rm(storageRoot, { recursive: true, force: true });
+  delete process.env.STORAGE_LOCAL_DIR;
+  resetEnvCache();
+  resetStorageCache();
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

@@ -30,6 +30,20 @@ export {
   tSf,
   tTwoTailed,
 } from './distributions';
+export {
+  covariance,
+  kurtosis,
+  mean,
+  median,
+  pearson,
+  quantile,
+  rank,
+  skewness,
+  spearman,
+  standardDeviation,
+  toNumber,
+  variance,
+} from './stats-core';
 export { bandForAlpha, cronbachAlpha } from './reliability';
 export {
   backSubstitute,

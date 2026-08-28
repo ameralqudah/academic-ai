@@ -9,6 +9,7 @@ import { db } from '@/server/db';
 import { emailProvider } from '@/server/email';
 import * as plansRepo from '@/server/repositories/plans.repository';
 import { rateLimitStoreName } from '@/server/http/rate-limit';
+import { storageStatus } from '@/server/storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -77,6 +78,31 @@ export async function GET(): Promise<Response> {
     if (env.NODE_ENV === 'production' && mail.name === 'console') {
       healthy = false;
       problems.push('Email: no real provider configured — password resets will not be delivered.');
+    }
+
+    /*
+     * Storage is reported here because its failure mode is silent. A service
+     * without a mounted disk accepts every upload, serves it back correctly,
+     * and loses the lot at the next deploy — nothing looks broken until a user
+     * returns for data that is gone. A 503 at deploy time is how the operator
+     * finds out instead of the user.
+     */
+    const storage = storageStatus();
+    checks.storage = {
+      provider: storage.provider,
+      configured: storage.configured,
+      ...(storage.detail ? { detail: storage.detail } : {}),
+      ...(storage.provider === 'local'
+        ? { note: 'Files survive a restart only if the directory is a mounted persistent disk.' }
+        : {}),
+    };
+    if (!storage.configured) {
+      healthy = false;
+      problems.push(
+        storage.provider === 'local'
+          ? 'Storage: STORAGE_LOCAL_DIR is not set — uploads have nowhere to go.'
+          : 'Storage: S3 credentials are incomplete — uploads will fail.',
+      );
     }
 
     const billing = billingProvider();

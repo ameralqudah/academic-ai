@@ -83,7 +83,14 @@ const RULES: Rule[] = [
        * with the recommender rather than letting the explanation rule claim it
        * by virtue of coming first.
        */
-      /(^|\s)ما(?!\s+(هو\s+)?(التحليل|الاختبار)(\s+\S+){0,2}\s+(المناسب|الأنسب))\s+(هو|هي|معنى|تعريف)(\s|$)/,
+      /*
+       * Two exclusions, both learned from real phrasings rather than invented
+       * ones. "ما هو التحليل المناسب" asks the recommender to choose a test,
+       * and "ما هي الدراسات السابقة" asks a database for papers — neither is a
+       * request to be taught, and the explanation rule would claim both simply
+       * by coming first.
+       */
+      /(^|\s)ما(?!\s+(هو\s+)?(التحليل|الاختبار)(\s+\S+){0,2}\s+(المناسب|الأنسب))(?!\s+(هي\s+)?(ال)?(دراسات|أبحاث|بحوث|أدبيات))\s+(هو|هي|معنى|تعريف)(\s|$)/,
       /(^|\s)ما\s+(هو\s+)?الفرق\s+بين(\s|$)/,
       /(^|\s)متى\s+(أستخدم|نستخدم|يُستخدم)(\s|$)/,
       /(^|\s)أيهما\s+(أفضل|أنسب)(\s|$)/,
@@ -271,9 +278,28 @@ const RULES: Rule[] = [
   {
     intent: 'research.literature',
     patterns: [
-      /(^|\s)(دراسات|أبحاث|بحوث)\s+(سابقة|عربية|أجنبية|حول|عن|في)/,
-      /(^|\s)(ابحث|أبحث|اعثر)\s+.{0,15}(دراسات|أبحاث|مراجع|مصادر)/,
-      /(^|\s)مراجعة\s+(الأدبيات|أدبيات)/,
+      /*
+       * `ال` is optional and up to three words may sit between the noun and its
+       * qualifier.
+       *
+       * The original patterns required "دراسات" to be followed immediately by
+       * "سابقة" or a preposition, which matched the phrasing used to test them
+       * and almost nothing a researcher actually writes. "أريد الاطلاع على
+       * الدراسات والأبحاث السابقة المتعلقة بالتعلم التعاوني" failed on both
+       * counts — the definite article and the words in between — and fell
+       * through to the model, which classified it as a request to build a
+       * questionnaire.
+       *
+       * Arabic puts modifiers between a noun and what qualifies it far more
+       * often than the tidy phrasings a test author invents. The patterns have
+       * to allow for that.
+       */
+      /(^|\s)(ال)?(دراسات|أبحاث|بحوث)(\s+\S+){0,3}\s+(سابقة|السابقة|عربية|العربية|أجنبية|الأجنبية)/,
+      /(^|\s)(ال)?(دراسات|أبحاث|بحوث)(\s+\S+){0,3}\s+(حول|عن|في|المتعلقة|الخاصة|المرتبطة)/,
+      /(^|\s)الاطلاع\s+على(\s+\S+){0,3}\s+(ال)?(دراسات|أبحاث|بحوث|مراجع|أدبيات)/,
+      /(^|\s)(ابحث|أبحث|اعثر)\s+.{0,20}(دراسات|أبحاث|مراجع|مصادر|أدبيات)/,
+      /(^|\s)(الأدب|أدبيات|الأدبيات)\s+(النظري|السابق|المتعلق|حول|عن)/,
+      /(^|\s)مراجعة\s+(الأدبيات|أدبيات|الأدب)/,
       /(^|\s)الإطار\s+النظري\s+(عن|حول|في)/,
       /*
        * An adjective may sit between the noun and its preposition — "مراجع

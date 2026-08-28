@@ -901,6 +901,25 @@ const literatureCases: [string, string][] = [
   ['find studies on cooperative learning', 'research.literature'],
   ['literature review on AI in education', 'research.literature'],
   ['recent research on machine learning', 'research.literature'],
+
+  /*
+   * Phrasings a user actually typed, which the first version of these patterns
+   * missed entirely.
+   *
+   * "أريد الاطلاع على الدراسات والأبحاث السابقة المتعلقة بالتعلم التعاوني"
+   * failed on two counts — the definite article, and the three words between
+   * the noun and its qualifier — fell through to the model, and came back
+   * classified as a request to build a questionnaire. Arabic places modifiers
+   * between a noun and what qualifies it far more often than the tidy phrasings
+   * a test author invents, and the patterns have to allow for it.
+   */
+  ['تريد الاطلاع على الدراسات والأبحاث السابقة المتعلقة بالتعلم التعاوني', 'research.literature'],
+  ['أريد الاطلاع على الدراسات والأبحاث السابقة المتعلقة بالتعلم التعاوني', 'research.literature'],
+  ['الدراسات والأبحاث السابقة عن التعلم التعاوني', 'research.literature'],
+  ['ما هي الدراسات السابقة حول التحصيل الدراسي', 'research.literature'],
+  ['الأدبيات النظرية عن التعلم النشط', 'research.literature'],
+  ['أريد الاطلاع على أدبيات الموضوع', 'research.literature'],
+  ['ابحث لي عن أبحاث في الذكاء الاصطناعي', 'research.literature'],
 ];
 
 for (const [message, expected] of literatureCases) {
@@ -910,6 +929,9 @@ for (const [message, expected] of literatureCases) {
 /* Writing a plan is not searching for studies, though both mention research. */
 check('a request to write a plan stays with the research agent', classifyByKeyword('اكتب لي خطة بحث عن الذكاء الاصطناعي')?.intent, 'research.plan');
 check('and so does the English form', classifyByKeyword('write a research plan about AI')?.intent, 'research.plan');
+
+/* Nor is building a questionnaire — the intent the misrouted request landed on. */
+check('building a questionnaire is its own request', classifyByKeyword('أنشئ استبانة لهذا البحث')?.intent, 'research.survey');
 
 /* The capability is real, costs a model call, and needs no file. */
 check('literature search is available', capabilityFor('research.literature').status, 'available');

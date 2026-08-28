@@ -2,6 +2,7 @@
 
 import {
   BarChart3,
+  MessagesSquare,
   FolderKanban,
   GraduationCap,
   LayoutDashboard,
@@ -23,6 +24,7 @@ import { Link, usePathname } from '@/i18n/navigation';
 import { cn } from '@/lib/cn';
 
 const NAV = [
+  { href: '/chat', key: 'chat', icon: MessagesSquare },
   { href: '/dashboard', key: 'dashboard', icon: LayoutDashboard },
   { href: '/projects', key: 'projects', icon: FolderKanban },
   { href: '/tools', key: 'tools', icon: Sparkles },

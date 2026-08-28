@@ -23,6 +23,9 @@ import { join } from 'node:path';
 import bcrypt from 'bcryptjs';
 import { eq, like } from 'drizzle-orm';
 
+import type { AgentEvent } from '@/agents/events';
+import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
+import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
@@ -31,6 +34,7 @@ import { AppError } from '@/server/http/errors';
 import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
 import * as adminRepo from '@/server/repositories/admin.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
+import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
 import * as plansRepo from '@/server/repositories/plans.repository';
@@ -986,6 +990,149 @@ async function main() {
     (await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')).length,
     0,
   );
+
+  /* ------------------------------------------------------------ the agent */
+
+  section('agent: routing, refusals and measurement');
+
+  const agentOwner = await newUser('agent-owner');
+
+  const agentFile = await saveUpload({
+    userId: agentOwner,
+    file: { name: 'agent.csv', bytes: new TextEncoder().encode(statsCsv).buffer as ArrayBuffer },
+  });
+
+  /*
+   * The classifier is the one place a model decides anything, so it is stubbed
+   * here and the rest of the orchestrator is exercised for real: real dataset,
+   * real engines, real rows in `agent_tasks`. What is being tested is the
+   * routing and the refusals, not the model's reading comprehension.
+   */
+  async function drive(
+    intent: string,
+    extra: Partial<Parameters<typeof runAgent>[0]> = {},
+  ): Promise<AgentEvent[]> {
+    setIntentStubForTests({
+      intent: intent as Parameters<typeof setIntentStubForTests>[0]['intent'],
+      confidence: 0.95,
+      mentionedColumns: [],
+      restatement: intent,
+      clarifyingQuestion: null,
+      usage: { tokensIn: 0, tokensOut: 0 },
+    });
+
+    const events: AgentEvent[] = [];
+    for await (const event of runAgent({
+      userId: agentOwner,
+      message: 'test',
+      locale: 'ar',
+      datasetId: agentFile.dataset.id,
+      ...extra,
+    })) {
+      events.push(event);
+    }
+    return events;
+  }
+
+  const kinds = (events: AgentEvent[]) => events.map((event) => event.type);
+
+  /* A comparison, end to end: understand, plan, choose the test, compute. */
+  const comparison = await drive('stats.compare', {
+    roles: [
+      { column: 'score', role: 'dependent' },
+      { column: 'gender', role: 'grouping' },
+    ],
+  });
+
+  assertTrue('the agent reports what it understood', kinds(comparison).includes('understanding'));
+  assertTrue('and announces a plan before acting', kinds(comparison).includes('plan'));
+  assertTrue('and streams each stage', kinds(comparison).includes('step'));
+  assertTrue('and finishes', kinds(comparison).includes('done'));
+
+  const analysisEvent = comparison.find(
+    (event): event is Extract<AgentEvent, { type: 'result' }> =>
+      event.type === 'result' && event.kind === 'analysis',
+  );
+  assertTrue('a real analysis comes back', analysisEvent !== undefined);
+  assertTrue(
+    'and it was saved so it can be attached to a chapter',
+    Boolean(analysisEvent?.runId),
+  );
+  assertTrue(
+    'with a p-value from the engines, not from a model',
+    typeof (analysisEvent?.payload as { pValue?: number })?.pValue === 'number',
+  );
+
+  /*
+   * The announced cost of an analysis is zero, and this is not a courtesy: no
+   * model call produced any number in it. If this ever changes, something has
+   * started asking a model to do arithmetic.
+   */
+  const planEvent = comparison.find(
+    (event): event is Extract<AgentEvent, { type: 'plan' }> => event.type === 'plan',
+  );
+  check('statistical work is announced as free', planEvent?.estimatedUnits, 0);
+  const doneEvent = comparison.find(
+    (event): event is Extract<AgentEvent, { type: 'done' }> => event.type === 'done',
+  );
+  check('and charged as free', doneEvent?.units, 0);
+
+  /* The task was measured even though nothing was enforced. */
+  const measured = await agentTasksRepo.findOwned(doneEvent?.taskId as string, agentOwner);
+  check('the task is recorded', measured?.kind, 'stats.compare');
+  check('as completed', measured?.status, 'COMPLETED');
+  assertTrue('with its stages counted', (measured?.stagesCompleted ?? 0) > 0);
+  assertTrue('and its duration', (measured?.durationMs ?? -1) >= 0);
+
+  /*
+   * The refusal that matters most. PLS-SEM is understood, named, and declined —
+   * not quietly turned into a regression that would produce numbers.
+   */
+  const plsSem = await drive('stats.plsSem');
+  const unavailable = plsSem.find(
+    (event): event is Extract<AgentEvent, { type: 'unavailable' }> => event.type === 'unavailable',
+  );
+  assertTrue('PLS-SEM is declined rather than substituted', unavailable !== undefined);
+  check('by name', unavailable?.intent, 'stats.plsSem');
+  assertTrue('with a reason', Boolean(unavailable?.reasonKey));
+  assertTrue('and something else offered instead', (unavailable?.alternatives.length ?? 0) > 0);
+  assertTrue('and no analysis is produced', !kinds(plsSem).includes('result'));
+
+  check(
+    'logistic regression is declined the same way',
+    (await drive('stats.logistic')).some((event) => event.type === 'unavailable'),
+    true,
+  );
+
+  /* Without confirmed roles the agent asks rather than deciding for the researcher. */
+  const noRoles = await drive('stats.compare');
+  assertTrue('a comparison with no roles asks instead of guessing', kinds(noRoles).includes('question'));
+  assertTrue('and runs no analysis', !noRoles.some((event) => event.type === 'result' && event.kind === 'analysis'));
+
+  /* An unclear request becomes a question, never an action. */
+  const unclearRun = await drive('general.unclear');
+  assertTrue('an unclear request asks for clarification', kinds(unclearRun).includes('question'));
+  assertTrue('and does nothing else', !kinds(unclearRun).includes('result'));
+
+  /* A statistics request with no file asks for one. */
+  const noFile = await drive('stats.compare', { datasetId: null });
+  assertTrue('a request needing data asks for a file', kinds(noFile).includes('question'));
+
+  /* Reliability runs end to end on the Likert items. */
+  const reliabilityRun = await drive('stats.reliability', {
+    roles: [
+      { column: 'q1', role: 'independent' },
+      { column: 'q2', role: 'independent' },
+      { column: 'q3', role: 'independent' },
+    ],
+  });
+  const alphaEvent = reliabilityRun.find(
+    (event): event is Extract<AgentEvent, { type: 'result' }> =>
+      event.type === 'result' && event.kind === 'reliability',
+  );
+  assertTrue('reliability produces a coefficient', typeof (alphaEvent?.payload as { alpha?: number })?.alpha === 'number');
+
+  clearIntentStubForTests();
 
   await rm(storageRoot, { recursive: true, force: true });
   delete process.env.STORAGE_LOCAL_DIR;

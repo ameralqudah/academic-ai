@@ -16,6 +16,16 @@ import { join } from 'node:path';
 
 import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
+import {
+  availableCapabilities,
+  CAPABILITIES,
+  capabilityFor,
+  classifiableIntents,
+  INTENT_KEYS,
+  isAvailable,
+  isKnownIntent,
+  plannedCapabilities,
+} from '@/agents/registry';
 import { estimateTokens } from '@/ai/provider';
 import { AnthropicProvider } from '@/ai/providers/anthropic';
 import { inspectOutput, parseJsonOutput } from '@/ai/guardrails';
@@ -316,6 +326,88 @@ check(
 );
 check('the timestamp format is the one SigV4 expects', amzDates(new Date('2026-08-27T12:00:00.000Z')).amzDate, '20260827T120000Z');
 check('and the date stamp is derived from it', amzDates(new Date('2026-08-27T12:00:00.000Z')).dateStamp, '20260827');
+
+/* -------------------------------------------------------------------------- */
+/*                            Agent capabilities                              */
+/* -------------------------------------------------------------------------- */
+
+console.log('\nagent capability catalogue');
+
+/*
+ * The catalogue is what stops the agent from improvising. These assertions are
+ * about honesty rather than arithmetic: that everything claimed available has
+ * an engine behind it, and that everything unbuilt says so instead of being
+ * quietly routed somewhere that would run.
+ */
+
+check('every intent has an entry', INTENT_KEYS.length, Object.keys(CAPABILITIES).length);
+assertTrue('and every entry names its own intent', INTENT_KEYS.every((key) => CAPABILITIES[key].intent === key));
+
+/*
+ * The tests an available capability claims must exist in the analysis module.
+ * Without this check, renaming an engine would leave the agent advertising
+ * something it can no longer call — and finding out at runtime.
+ */
+const implementedTests = new Set<string>([
+  't.oneSample', 't.independent', 't.paired', 'anova.oneWay',
+  'correlation.pearson', 'correlation.spearman', 'correlation.matrix',
+  'chiSquare.independence', 'chiSquare.goodnessOfFit',
+  'regression.ols', 'reliability.cronbachAlpha',
+]);
+
+for (const capability of availableCapabilities()) {
+  for (const test of capability.tests ?? []) {
+    assertTrue(`${capability.intent} points at a real engine (${test})`, implementedTests.has(test));
+  }
+}
+
+/*
+ * Statistical work is free because it costs no model calls. If this assertion
+ * ever fails it means an analysis has started depending on a language model,
+ * which is the one thing this architecture exists to prevent.
+ */
+for (const capability of availableCapabilities()) {
+  if (capability.agent === 'statistics' || capability.agent === 'data') {
+    check(`${capability.intent} costs the user nothing`, capability.units, 0);
+    check(`${capability.intent} makes no model calls`, capability.estimatedCalls, 0);
+  }
+}
+
+/* Everything unbuilt must explain itself rather than failing silently. */
+for (const capability of plannedCapabilities()) {
+  assertTrue(`${capability.intent} says why it is unavailable`, Boolean(capability.unavailableReason));
+}
+
+/*
+ * The four the user asked about by name. Each is recognised — so the agent can
+ * decline it precisely — and none is available, so nothing improvises an answer.
+ */
+for (const intent of ['stats.plsSem', 'stats.cbSem', 'stats.logistic', 'stats.nonparametric'] as const) {
+  check(`${intent} is recognised`, isKnownIntent(intent), true);
+  check(`${intent} is not offered as available`, isAvailable(intent), false);
+  check(`${intent} is marked planned`, capabilityFor(intent).status, 'planned');
+}
+
+/* The classifier is given planned intents too: declining precisely beats misrouting. */
+const classifiable = classifiableIntents().map((entry) => entry.intent);
+assertTrue('the classifier can name PLS-SEM even though it cannot run it', classifiable.includes('stats.plsSem'));
+assertTrue('and logistic regression', classifiable.includes('stats.logistic'));
+check('the classifier sees every intent', classifiable.length, INTENT_KEYS.length);
+
+/* Anything invented by a model is rejected at the boundary. */
+check('an invented intent is rejected', isKnownIntent('stats.magic'), false);
+check('an empty intent is rejected', isKnownIntent(''), false);
+
+/* Statistics and data intents need a file; writing intents do not. */
+check('comparing groups needs a dataset', capabilityFor('stats.compare').requiresDataset, true);
+check('planning a study does not', capabilityFor('research.plan').requiresDataset, false);
+
+/*
+ * Writing the results chapter is held back deliberately. The prose is the easy
+ * part; the wiring that puts verified numbers into the model's context as facts
+ * is not, and without it this would mean writing results with no results.
+ */
+check('writing the results chapter is not offered yet', capabilityFor('research.results').status, 'planned');
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

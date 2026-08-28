@@ -10,7 +10,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -509,6 +509,81 @@ check('a bare question matches nothing', classifyByKeyword('what can you do?'), 
 /* Every intent a keyword rule can produce must exist in the catalogue. */
 for (const intent of KEYWORD_RULE_ORDER) {
   assertTrue(`the keyword rule for ${intent} names a real intent`, isKnownIntent(intent));
+}
+
+console.log('\ntranslation key resolution');
+
+/*
+ * A guard against a bug that reached production: message keys containing dots.
+ *
+ * next-intl reads a dot as nesting, so a key literally named "stats.reliability"
+ * can never be found — the lookup goes hunting for a `stats` object, finds
+ * nothing, and renders the raw key. A user asking for PLS-SEM got a correct,
+ * well-reasoned refusal followed by "agent.intent.stats.reliability" where the
+ * Arabic name of the alternative should have been.
+ *
+ * The codes themselves are dotted by design and should stay that way — they are
+ * identifiers, not display strings. What has to hold is that every one of them
+ * has a message under a key the resolver can actually reach, in both languages.
+ */
+const arMessages = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, never>;
+const enMessages = JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, never>;
+
+function lookup(messages: Record<string, unknown>, path: string): unknown {
+  return path.split('.').reduce<unknown>(
+    (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+    messages,
+  );
+}
+
+const flatten = (code: string) => code.replace(/\./g, '_');
+
+for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as const) {
+  const agent = (messages as Record<string, unknown>).agent as Record<string, unknown>;
+
+  /* Every intent needs a display name — this is the one that broke. */
+  for (const intent of INTENT_KEYS) {
+    assertTrue(
+      `${language}: the intent ${intent} has a resolvable name`,
+      typeof lookup(agent, `intent.${flatten(intent)}`) === 'string',
+    );
+  }
+
+  /* Every test the recommender can name, built or not. */
+  for (const test of [
+    't.oneSample', 't.independent', 't.paired', 'anova.oneWay',
+    'correlation.pearson', 'correlation.spearman', 'correlation.matrix',
+    'chiSquare.independence', 'chiSquare.goodnessOfFit', 'regression.ols',
+    'reliability.cronbachAlpha', 'nonparametric.mannWhitney',
+    'nonparametric.wilcoxon', 'nonparametric.kruskalWallis',
+  ]) {
+    assertTrue(
+      `${language}: the test ${test} has a resolvable name`,
+      typeof lookup(agent, `test.${flatten(test)}`) === 'string',
+    );
+  }
+
+  /* Every reason a capability gives for being unavailable. */
+  for (const capability of plannedCapabilities()) {
+    const stripped = (capability.unavailableReason ?? '').replace('agent.', '');
+    assertTrue(
+      `${language}: ${capability.intent} has a resolvable unavailable message`,
+      typeof lookup(agent, stripped) === 'string',
+    );
+  }
+
+  /*
+   * And nothing anywhere under `agent` may contain a dot in its own key, since
+   * such a key is unreachable however it is looked up.
+   */
+  function assertNoDottedKeys(node: unknown, path: string): void {
+    if (!node || typeof node !== 'object') return;
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      assertTrue(`${language}: the key "${path}${key}" has no dot in it`, !key.includes('.'));
+      assertNoDottedKeys(value, `${path}${key}.`);
+    }
+  }
+  assertNoDottedKeys(agent, '');
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

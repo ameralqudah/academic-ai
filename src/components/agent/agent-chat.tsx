@@ -23,6 +23,19 @@ import { cn } from '@/lib/cn';
  * `result` events alongside `delta`.
  */
 
+/**
+ * Turns a code into a translation key.
+ *
+ * next-intl reads a dot as nesting, so a message key literally named
+ * "stats.reliability" can never be resolved — the lookup goes looking for a
+ * `stats` object with a `reliability` inside it, finds nothing, and renders the
+ * raw key back to the user. Which is exactly what happened: a correct refusal
+ * arrived with "agent.intent.stats.reliability" where the Arabic name should
+ * have been. Underscores carry no meaning to the resolver, so the code is
+ * flattened before lookup and the message files match.
+ */
+const mkey = (code: string) => code.replace(/\./g, '_');
+
 type Role = 'user' | 'assistant';
 
 interface Stage {
@@ -382,7 +395,7 @@ function TurnView({ turn }: { turn: Turn }) {
               {stage.status === 'done' && <Check className="size-3.5 text-success" />}
               {stage.status === 'failed' && <X className="size-3.5 text-danger" />}
               <span className={stage.status === 'done' ? 'text-muted' : 'text-ink'}>
-                {t(stage.labelKey.replace('agent.', ''))}
+                {t(mkey(stage.labelKey.replace('agent.', '')))}
               </span>
             </div>
           ))}
@@ -402,11 +415,11 @@ function TurnView({ turn }: { turn: Turn }) {
       {turn.unavailable && (
         <Alert tone="warning">
           <div className="flex flex-col gap-2">
-            <span>{t(turn.unavailable.reasonKey.replace('agent.', ''))}</span>
+            <span>{t(unavailableKey(turn.unavailable.reasonKey))}</span>
             {turn.unavailable.alternatives.length > 0 && (
               <span className="text-xs">
                 {t('alternatives')}:{' '}
-                {turn.unavailable.alternatives.map((alt) => t(`intent.${alt}`)).join('، ')}
+                {turn.unavailable.alternatives.map((alt) => t(`intent.${mkey(alt)}`)).join('، ')}
               </span>
             )}
           </div>
@@ -422,6 +435,20 @@ function TurnView({ turn }: { turn: Turn }) {
       {turn.text && <p className="whitespace-pre-wrap text-sm text-ink">{turn.text}</p>}
     </div>
   );
+}
+
+/**
+ * `agent.unavailable.plsSem` is genuinely nested and resolves as it is.
+ * `agent.unavailable.test.nonparametric.mannWhitney` is not: everything after
+ * `test.` is one key naming a test, so only that tail is flattened.
+ */
+function unavailableKey(reasonKey: string): string {
+  const stripped = reasonKey.replace('agent.', '');
+  const marker = 'unavailable.test.';
+  if (stripped.startsWith(marker)) {
+    return `${marker}${mkey(stripped.slice(marker.length))}`;
+  }
+  return stripped;
 }
 
 function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
@@ -479,7 +506,7 @@ function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
         {recommendation.candidates.slice(0, 4).map((candidate) => (
           <div key={candidate.test} className="flex items-center gap-2 text-sm">
             <span className={candidate.available ? 'text-ink' : 'text-muted line-through'}>
-              {t(`test.${candidate.test}`)}
+              {t(`test.${mkey(candidate.test)}`)}
             </span>
             <span className="text-xs text-muted">{t(`confidence.${candidate.confidence}`)}</span>
             {!candidate.available && (

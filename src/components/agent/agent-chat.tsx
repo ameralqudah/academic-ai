@@ -1,15 +1,16 @@
 'use client';
 
-import { ArrowUp, Check, FileSpreadsheet, Loader2, Paperclip, X } from 'lucide-react';
+import { Check, FileSpreadsheet, Loader2, X } from 'lucide-react';
 import { useTranslations } from 'next-intl';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { ResultCard, type StatisticalResult } from '@/components/agent/result-card';
 import { SourceList, type RetrievedSource, type SourceCoverage } from '@/components/agent/source-list';
 import { Markdown } from '@/components/chat/markdown';
 import { Alert } from '@/components/ui/alert';
-import { Button } from '@/components/ui/button';
+import { useRouter } from '@/i18n/navigation';
 import { cn } from '@/lib/cn';
 
 /**
@@ -144,13 +145,72 @@ export function AgentChat({
   const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState<AttachedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<ModeKey>('chat');
+  const [modelId, setModelId] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<{
+    modes: ModeOption[];
+    models: ModelOption[];
+    showModelSelector: boolean;
+  }>({ modes: [], models: [], showModelSelector: false });
 
+  /*
+   * Held so the stop button can actually stop something. Without a controller
+   * the only way out of a long response is reloading the page, and the request
+   * carries on server-side regardless.
+   */
+  const abortRef = useRef<AbortController | null>(null);
+
+  const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [turns]);
+
+  /*
+   * Modes and permitted models come from the server, because which models a
+   * user may pick is a fact about their plan and not something the client can
+   * work out. The same endpoint is the one that enforces it.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetch('/api/agent')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((json) => {
+        if (cancelled || !json?.ok) return;
+        setCapabilities({
+          modes: json.data.modes ?? [],
+          models: json.data.models ?? [],
+          showModelSelector: Boolean(json.data.showModelSelector),
+        });
+        setModelId(json.data.models?.find((m: ModelOption) => m.isDefault)?.id ?? null);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /* Ctrl/⌘+K starts a new conversation, the one shortcut worth a global handler. */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        /*
+         * A client navigation rather than a location assignment: a full page
+         * load would discard the React tree and re-fetch everything to reach a
+         * route the router already knows about.
+         */
+        router.push('/chat');
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [router]);
 
   /* ------------------------------- upload -------------------------------- */
 
@@ -232,8 +292,12 @@ export function AgentChat({
       .map((turn) => ({ role: turn.role, content: turn.text as string }));
 
     try {
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       const response = await fetch('/api/agent', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           message: trimmed,
@@ -241,6 +305,8 @@ export function AgentChat({
           datasetId: file?.datasetId,
           projectId: projectId ?? undefined,
           conversationId: conversationId ?? undefined,
+          mode,
+          modelId: modelId ?? undefined,
           history,
         }),
       });
@@ -370,16 +436,25 @@ export function AgentChat({
           }
         }
       }
-    } catch {
-      setError(te('network'));
+    } catch (caught) {
+      /*
+       * An abort is the user pressing stop, not a failure. Reporting it as a
+       * network error would tell them something went wrong when they were the
+       * one who ended it.
+       */
+      if (!(caught instanceof DOMException && caught.name === 'AbortError')) {
+        setError(te('network'));
+      }
     } finally {
+      abortRef.current = null;
       setBusy(false);
     }
   }
 
-  function onSubmit(submission: FormEvent) {
-    submission.preventDefault();
-    void send(draft);
+  function stop() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setBusy(false);
   }
 
   /* -------------------------------- render ------------------------------- */
@@ -429,47 +504,22 @@ export function AgentChat({
         </div>
       )}
 
-      <form onSubmit={onSubmit} className="flex items-end gap-2">
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".csv,.tsv,.xlsx"
-          className="hidden"
-          onChange={(change) => {
-            const selected = change.target.files?.[0];
-            if (selected) void upload(selected);
-          }}
-        />
-
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={() => fileRef.current?.click()}
-          disabled={uploading || busy}
-          aria-label={t('attachFile')}
-        >
-          {uploading ? <Loader2 className="size-4 animate-spin" /> : <Paperclip className="size-4" />}
-        </Button>
-
-        <textarea
-          value={draft}
-          onChange={(change) => setDraft(change.target.value)}
-          onKeyDown={(key) => {
-            if (key.key === 'Enter' && !key.shiftKey) {
-              key.preventDefault();
-              void send(draft);
-            }
-          }}
-          rows={1}
-          placeholder={t('placeholder')}
-          disabled={busy}
-          className="min-h-11 flex-1 resize-none rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus:border-accent disabled:opacity-60"
-        />
-
-        <Button type="submit" disabled={busy || draft.trim().length === 0}>
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-        </Button>
-      </form>
+      <Composer
+        value={draft}
+        onChange={setDraft}
+        onSend={(text) => void send(text)}
+        onStop={stop}
+        onAttach={(selected) => void upload(selected)}
+        busy={busy}
+        uploading={uploading}
+        modes={capabilities.modes}
+        mode={mode}
+        onModeChange={setMode}
+        models={capabilities.models}
+        modelId={modelId}
+        onModelChange={setModelId}
+        showModelSelector={capabilities.showModelSelector}
+      />
     </div>
   );
 }

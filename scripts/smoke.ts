@@ -1064,6 +1064,53 @@ assertTrue(
   agentRouteSource.includes('resolveRequestedModel('),
 );
 
+
+/*
+ * Composer behaviours that a type checker cannot see.
+ *
+ * Stop must be a real cancellation rather than a spinner that hides. Without an
+ * AbortController the only escape from a long response is reloading the page,
+ * which used to lose the conversation and still leaves the request running on
+ * the server.
+ */
+const composerSource = await readFile('src/components/agent/composer.tsx', 'utf8');
+const chatClientSource = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+
+assertTrue(
+  'the request can actually be aborted',
+  chatClientSource.includes('AbortController') && chatClientSource.includes('signal: controller.signal'),
+);
+assertTrue(
+  'and pressing stop is not reported as a network error',
+  chatClientSource.includes('AbortError'),
+);
+assertTrue(
+  'the mode travels with the request',
+  chatClientSource.includes('mode,'),
+);
+assertTrue(
+  'and so does the chosen model, for the server to check',
+  chatClientSource.includes('modelId: modelId ?? undefined'),
+);
+
+/* Unavailable modes must not be focusable controls that imply they can be entered. */
+assertTrue(
+  'an unavailable mode is rendered as text, not a button',
+  composerSource.includes('option.available ? (') && composerSource.includes('<span'),
+);
+assertTrue(
+  'Enter sends and Shift+Enter breaks the line',
+  composerSource.includes("event.key === 'Enter' && !event.shiftKey"),
+);
+assertTrue(
+  'files can be dropped anywhere on the composer',
+  composerSource.includes('onDrop') && composerSource.includes('dataTransfer.files'),
+);
+assertTrue(
+  'and the drag highlight counts depth so it does not flicker over children',
+  composerSource.includes('dragDepth'),
+);
+
 console.log('\nmaths detection');
 
 /*

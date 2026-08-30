@@ -1060,7 +1060,13 @@
     "step_searchLiterature": "Searching academic databases",
     "step_summariseLiterature": "Summarising what I found",
     "academicSearchPrompt": "Find studies about ",
-    "literatureReviewPrompt": "I want a literature review on "
+    "literatureReviewPrompt": "I want a literature review on ",
+    "dropToAttach": "Drop the file here",
+    "stop": "Stop",
+    "send": "Send",
+    "model": "Model",
+    "needsFile": "needs a file",
+    "soon": "Soon"
   },
   "knowledge": {
     "coverage": {

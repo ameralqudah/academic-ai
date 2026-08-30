@@ -1060,7 +1060,13 @@
     "step_searchLiterature": "البحث في قواعد البيانات العلمية",
     "step_summariseLiterature": "تلخيص ما وجدته",
     "academicSearchPrompt": "ابحث لي عن دراسات حول ",
-    "literatureReviewPrompt": "أريد مراجعة أدبيات عن "
+    "literatureReviewPrompt": "أريد مراجعة أدبيات عن ",
+    "dropToAttach": "أفلت الملف هنا",
+    "stop": "إيقاف",
+    "send": "إرسال",
+    "model": "النموذج",
+    "needsFile": "يحتاج ملفًا",
+    "soon": "قريبًا"
   },
   "knowledge": {
     "coverage": {

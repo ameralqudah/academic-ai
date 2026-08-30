@@ -514,12 +514,34 @@ export const aiConversations = pgTable(
      * vocabulary will keep growing.
      */
     mode: varchar('mode', { length: 32 }).$type<'CHAT' | 'AGENT' | null>(),
+    /**
+     * When the last message arrived.
+     *
+     * Derived from the messages and stored anyway, because the sidebar orders
+     * conversations by recency on every page load. Computing it as a join
+     * against `ai_messages` would mean aggregating the whole message table to
+     * render a list of twenty titles — the classic query that is fine with a
+     * hundred conversations and unusable with ten thousand.
+     */
+    lastMessageAt: timestamp('last_message_at', { withTimezone: true, mode: 'date' }),
+    /**
+     * Soft delete.
+     *
+     * "Delete this conversation" hides it and keeps the messages, for the same
+     * reason deleting a dataset keeps its analyses: a researcher who deletes a
+     * thread and then realises the answer mattered should not have lost it, and
+     * an accidental click should not be irreversible. A permanent purge is a
+     * separate, deliberate action.
+     */
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'date' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (table) => [
     index('ai_conversations_project_idx').on(table.projectId, table.updatedAt),
     index('ai_conversations_user_idx').on(table.userId),
+    /* The sidebar query: this user's live conversations, newest first. */
+    index('ai_conversations_recent_idx').on(table.userId, table.lastMessageAt),
   ],
 );
 
@@ -544,9 +566,41 @@ export const aiMessages = pgTable(
      * conversation redraws the real table instead of a paragraph describing one.
      */
     payload: jsonb('payload').$type<Record<string, unknown> | null>(),
+    /**
+     * The message this one replies to. Null for the first message in a thread.
+     *
+     * This turns the conversation from a list into a tree, and the tree is what
+     * makes editing and regeneration work properly rather than destructively.
+     *
+     * Editing a message does not overwrite it. A new message is created with
+     * the same parent, so the parent now has two children and one of them is
+     * marked active. The conversation the user sees is the active path from the
+     * root to the newest leaf; the other branch still exists and can be
+     * returned to.
+     *
+     * Built now rather than later on purpose. Adding branching on top of a flat
+     * list means backfilling every existing message and rewriting every query
+     * that reads a conversation. Adding it now costs three nullable columns.
+     */
+    parentMessageId: text('parent_message_id'),
+    /**
+     * Whether this message is on the path currently being shown.
+     *
+     * With no branches every message is active and this changes nothing. With
+     * branches, exactly one child of any parent is active at a time, and
+     * switching branches is an update to this column rather than a deletion.
+     */
+    isActive: boolean('is_active').default(true).notNull(),
+    /** Set when a user rewrote their message, so the interface can mark it. */
+    editedAt: timestamp('edited_at', { withTimezone: true, mode: 'date' }),
     createdAt: createdAt(),
   },
-  (table) => [index('ai_messages_conversation_idx').on(table.conversationId, table.createdAt)],
+  (table) => [
+    index('ai_messages_conversation_idx').on(table.conversationId, table.createdAt),
+    /* Walking the tree: the children of a message, and the active path. */
+    index('ai_messages_parent_idx').on(table.parentMessageId),
+    index('ai_messages_active_idx').on(table.conversationId, table.isActive, table.createdAt),
+  ],
 );
 
 /* -------------------------------------------------------------------------- */
@@ -864,7 +918,9 @@ export type SectionVersion = typeof sectionVersions.$inferSelect;
 export type TitleCandidate = typeof titleCandidates.$inferSelect;
 export type ReferenceRow = typeof references.$inferSelect;
 export type AIConversation = typeof aiConversations.$inferSelect;
+export type NewAIConversation = typeof aiConversations.$inferInsert;
 export type AIMessageRow = typeof aiMessages.$inferSelect;
+export type NewAIMessage = typeof aiMessages.$inferInsert;
 export type Dataset = typeof datasets.$inferSelect;
 export type NewDataset = typeof datasets.$inferInsert;
 export type AnalysisRun = typeof analysisRuns.$inferSelect;

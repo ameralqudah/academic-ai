@@ -36,6 +36,7 @@ import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
 import * as adminRepo from '@/server/repositories/admin.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
+import * as chatRepo from '@/server/repositories/chat.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
 import * as plansRepo from '@/server/repositories/plans.repository';
@@ -70,6 +71,16 @@ import {
   recommend,
   runAnalysis,
 } from '@/server/services/statistics.service';
+import {
+  deleteConversation,
+  editMessage,
+  getThread,
+  listRecent,
+  recordTurn,
+  renameConversation,
+  startConversation,
+  switchToBranch,
+} from '@/server/services/chat.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -1207,6 +1218,152 @@ async function main() {
   delete process.env.STORAGE_LOCAL_DIR;
   resetEnvCache();
   resetStorageCache();
+
+  /* ------------------------------------------- conversation persistence */
+
+  section('conversations: persistence, branching and deletion');
+
+  const chatOwner = await newUser('chat-owner');
+  const chatIntruder = await newUser('chat-intruder');
+
+  const thread = await startConversation({
+    userId: chatOwner,
+    firstMessage: 'ما الفرق بين اختبار t وتحليل التباين؟',
+  });
+
+  /* The title comes from the first message — no model call, and no "New chat". */
+  assertTrue('a conversation is titled from its first message', (thread.title ?? '').includes('اختبار t'));
+
+  await recordTurn({
+    conversationId: thread.id,
+    userId: chatOwner,
+    userMessage: 'ما الفرق بين اختبار t وتحليل التباين؟',
+    assistantMessage: 'اختبار t يقارن مجموعتين، وتحليل التباين ثلاثًا فأكثر.',
+  });
+
+  const firstView = await getThread(thread.id, chatOwner);
+  check('the turn is saved', firstView.messages.length, 2);
+  check('the question comes first', firstView.messages[0]?.role, 'USER');
+  check('and the answer replies to it', firstView.messages[1]?.parentMessageId, firstView.messages[0]?.id);
+  check('an unedited thread has no forks', firstView.branchPoints.length, 0);
+
+  await recordTurn({
+    conversationId: thread.id,
+    userId: chatOwner,
+    userMessage: 'ومتى أستخدم Welch؟',
+    assistantMessage: 'حين لا تتساوى التباينات.',
+  });
+
+  const fourMessages = await getThread(thread.id, chatOwner);
+  check('a second turn extends the same thread', fourMessages.messages.length, 4);
+  assertTrue(
+    'and each message hangs off the one before it',
+    fourMessages.messages[3]?.parentMessageId === fourMessages.messages[2]?.id,
+  );
+
+  /*
+   * The operation the tree exists for. Editing the second question must not
+   * destroy the answer that followed it — that answer is still there on an
+   * inactive branch, and a user who preferred it can go back.
+   */
+  const edited = await editMessage({
+    conversationId: thread.id,
+    userId: chatOwner,
+    messageId: fourMessages.messages[2]?.id as string,
+    content: 'ومتى أستخدم مان-ويتني؟',
+  });
+
+  const afterEdit = await getThread(thread.id, chatOwner);
+  check('the edited thread shows the new question', afterEdit.messages.length, 3);
+  check('and it is the new text', afterEdit.messages[2]?.content, 'ومتى أستخدم مان-ويتني؟');
+  assertTrue('marked as edited', afterEdit.messages[2]?.editedAt !== null);
+  check('the edit hangs off the same parent as the original', edited.parentMessageId, afterEdit.messages[1]?.id);
+
+  /*
+   * Nothing was deleted. Five messages exist; three are on the active path.
+   * This is the difference between editing a message and losing the
+   * conversation that came after it.
+   */
+  const everything = await chatRepo.allMessages(thread.id);
+  check('the original question and its answer still exist', everything.length, 5);
+  check('but two of them are off the active path', everything.filter((m) => !m.isActive).length, 2);
+
+  check('the fork is reported to the interface', afterEdit.branchPoints.length, 1);
+
+  /* And the user can go back to what they had. */
+  const restoredThread = await switchToBranch(
+    thread.id,
+    chatOwner,
+    fourMessages.messages[2]?.id as string,
+  );
+  check('switching back restores the original question', restoredThread.messages[2]?.content, 'ومتى أستخدم Welch؟');
+
+  /* Only the user's own messages. An assistant reply is a record of what was said. */
+  let editAssistantBlocked = false;
+  try {
+    await editMessage({
+      conversationId: thread.id,
+      userId: chatOwner,
+      messageId: firstView.messages[1]?.id as string,
+      content: 'something else',
+    });
+  } catch (error) {
+    editAssistantBlocked = error instanceof AppError && error.code === 'VALIDATION';
+  }
+  assertTrue('an assistant reply cannot be rewritten', editAssistantBlocked);
+
+  /* Ownership, on every path into a conversation. */
+  let threadCrossUser = false;
+  try {
+    await getThread(thread.id, chatIntruder);
+  } catch (error) {
+    threadCrossUser = error instanceof AppError && error.code === 'NOT_FOUND';
+  }
+  assertTrue('another user cannot read the thread', threadCrossUser);
+
+  let renameCrossUser = false;
+  try {
+    await renameConversation(thread.id, chatIntruder, 'mine now');
+  } catch (error) {
+    renameCrossUser = error instanceof AppError;
+  }
+  assertTrue('nor rename it', renameCrossUser);
+
+  /* The sidebar list. */
+  const second = await startConversation({ userId: chatOwner, firstMessage: 'سؤال آخر' });
+  await recordTurn({
+    conversationId: second.id,
+    userId: chatOwner,
+    userMessage: 'سؤال آخر',
+    assistantMessage: 'جواب.',
+  });
+
+  const recent = await listRecent(chatOwner);
+  check('both conversations appear in the sidebar', recent.length, 2);
+  check('newest first', recent[0]?.id, second.id);
+  check('and another user sees none of them', (await listRecent(chatIntruder)).length, 0);
+
+  await renameConversation(thread.id, chatOwner, 'مقارنة الاختبارات');
+  check(
+    'renaming works',
+    (await listRecent(chatOwner)).find((c) => c.id === thread.id)?.title,
+    'مقارنة الاختبارات',
+  );
+
+  /* Deleting hides without destroying, and can be undone. */
+  await deleteConversation(second.id, chatOwner);
+  check('a deleted conversation leaves the list', (await listRecent(chatOwner)).length, 1);
+  check(
+    'but its messages are still there',
+    (await chatRepo.allMessages(second.id)).length,
+    2,
+  );
+  await chatRepo.unarchive(second.id, chatOwner);
+  check('and it can be restored', (await listRecent(chatOwner)).length, 2);
+
+  /* A permanent purge is a separate, deliberate act. */
+  await deleteConversation(second.id, chatOwner, true);
+  check('purging removes the messages too', (await chatRepo.allMessages(second.id)).length, 0);
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

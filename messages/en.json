@@ -1116,5 +1116,16 @@
     "copy": "Copy",
     "copied": "Copied",
     "copyCode": "Copy code"
+  },
+  "mode": {
+    "chat": "Chat",
+    "academic": "Academic",
+    "webSearch": "Web search",
+    "deepResearch": "Deep research",
+    "dataAnalysis": "Data analysis",
+    "unavailable": {
+      "webSearch": "Web search is not available yet — we are connecting it to a real search provider.",
+      "deepResearch": "Deep research is not available yet."
+    }
   }
 }

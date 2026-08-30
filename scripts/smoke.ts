@@ -19,6 +19,14 @@ import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
 import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
 import { generalPrompt } from '@/ai/prompts/general';
+import {
+  canUseModel,
+  MODE_KEYS,
+  MODES,
+  modelsFor,
+  parseModelId,
+  shouldOfferModelChoice,
+} from '@/agents/modes';
 import { containsMath } from '@/components/chat/markdown';
 import { mergeSources } from '@/server/knowledge/merge';
 import { CrossrefProvider } from '@/server/knowledge/providers/crossref';
@@ -964,6 +972,96 @@ const chatPageSource = await readFile('src/app/[locale]/(app)/chat/page.tsx', 'u
 assertTrue(
   'the chat is keyed by conversation so switching threads remounts it',
   chatPageSource.includes('key={thread?.conversation.id'),
+);
+
+
+console.log('\nmodes and model access');
+
+/*
+ * One configuration table for every mode, so adding one is an entry rather than
+ * a branch in the orchestrator, a case in the route and a condition in the
+ * composer. The requirement was explicit: do not duplicate the backend logic per
+ * mode.
+ */
+check('every mode has an entry', MODE_KEYS.length, Object.keys(MODES).length);
+assertTrue('and each entry names itself', MODE_KEYS.every((key) => MODES[key].key === key));
+
+check('chat is available', MODES.chat.available, true);
+check('academic is available', MODES.academic.available, true);
+check('data analysis is available', MODES.dataAnalysis.available, true);
+
+/*
+ * Shown and disabled, like the sidebar. Hiding an unbuilt mode leaves a user
+ * unable to tell a missing feature from one they failed to find; offering it as
+ * working is a lie.
+ */
+check('web search is not available yet', MODES.webSearch.available, false);
+check('deep research is not available yet', MODES.deepResearch.available, false);
+assertTrue('and both say why', Boolean(MODES.webSearch.unavailableReason && MODES.deepResearch.unavailableReason));
+
+check('data analysis needs a file', MODES.dataAnalysis.requiresDataset, true);
+check('chat does not', MODES.chat.requiresDataset, false);
+
+/* Every intent a mode points at must exist in the capability catalogue. */
+for (const key of MODE_KEYS) {
+  for (const intent of MODES[key].intents) {
+    assertTrue(`mode ${key} points at a real intent (${intent})`, isKnownIntent(intent));
+  }
+}
+
+/* Model ids carry their provider, so the same model name from two vendors is unambiguous. */
+check('a model id parses into provider and model', parseModelId('google:gemini-2.5-pro')?.provider, 'google');
+check('and keeps the model name intact', parseModelId('google:gemini-2.5-pro')?.model, 'gemini-2.5-pro');
+check('a model name containing a colon survives', parseModelId('openai:gpt-4.1:preview')?.model, 'gpt-4.1:preview');
+check('an unknown provider is rejected', parseModelId('mistral:large'), null);
+check('a bare model name is rejected', parseModelId('gpt-4.1'), null);
+check('an empty model is rejected', parseModelId('openai:'), null);
+
+/*
+ * The access rules. Free gets the default and nothing else — a free account
+ * choosing the most expensive model available is a bill the product pays and the
+ * user does not.
+ */
+const freeModels = modelsFor('free');
+const paidModels = modelsFor('paid');
+const adminModels = modelsFor('admin');
+
+assertTrue('free is limited to one model', freeModels.length <= 1);
+assertTrue('paid gets at least what free gets', paidModels.length >= freeModels.length);
+check('admin and paid see the same set', adminModels.length, paidModels.length);
+
+if (freeModels.length === 1) {
+  const free = freeModels[0] as { id: string };
+  check('a free user may use their own model', canUseModel('free', free.id), true);
+}
+
+/*
+ * The check that matters. A model outside the caller's plan must be refused
+ * whatever the interface offered, because the request is a POST body and a POST
+ * body can say anything.
+ */
+check('an unconfigured model is refused for everyone', canUseModel('free', 'openai:gpt-5-turbo'), false);
+check('and for paid users too', canUseModel('paid', 'openai:gpt-5-turbo'), false);
+check('and for admins — the list is what is configured, not what is imagined', canUseModel('admin', 'openai:gpt-5-turbo'), false);
+check('a malformed id is refused', canUseModel('paid', 'not-a-model'), false);
+
+/*
+ * A dropdown holding one option is furniture that implies a decision the user
+ * does not have. The selector appears on its own the day a second provider key
+ * is configured, with no code change.
+ */
+check(
+  'the selector is offered only when there is a real choice',
+  shouldOfferModelChoice('paid'),
+  paidModels.length > 1,
+);
+assertTrue('and never to a free user, who has one model', !shouldOfferModelChoice('free') || freeModels.length > 1);
+
+/* The route must ask the server, not trust the body. */
+const agentRouteSource = await readFile('src/app/api/agent/route.ts', 'utf8');
+assertTrue(
+  'the agent route validates the requested model server-side',
+  agentRouteSource.includes('resolveRequestedModel('),
 );
 
 console.log('\nmaths detection');

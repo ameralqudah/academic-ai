@@ -1,156 +1,93 @@
 'use client';
 
-import {
-  BarChart3,
-  MessagesSquare,
-  FolderKanban,
-  GraduationCap,
-  LayoutDashboard,
-  LogOut,
-  Menu,
-  Settings,
-  Shield,
-  Sparkles,
-  Wallet,
-  X,
-} from 'lucide-react';
-import { signOut } from 'next-auth/react';
-import { useLocale, useTranslations } from 'next-intl';
-import { useState, type ReactNode } from 'react';
+import { Menu, Sparkles, X } from 'lucide-react';
+import { useTranslations } from 'next-intl';
+import { useEffect, useState, type ReactNode } from 'react';
 
+import { Sidebar, type ConversationSummary } from '@/components/app/sidebar';
 import { LocaleSwitcher } from '@/components/locale-switcher';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { Link, usePathname } from '@/i18n/navigation';
-import { cn } from '@/lib/cn';
+import { Link } from '@/i18n/navigation';
 
-const NAV = [
-  { href: '/chat', key: 'chat', icon: MessagesSquare },
-  { href: '/dashboard', key: 'dashboard', icon: LayoutDashboard },
-  { href: '/projects', key: 'projects', icon: FolderKanban },
-  { href: '/tools', key: 'tools', icon: Sparkles },
-  { href: '/analysis', key: 'analysis', icon: BarChart3 },
-  { href: '/billing', key: 'billing', icon: Wallet },
-  { href: '/settings', key: 'settings', icon: Settings },
-] as const;
-
+/**
+ * The application frame.
+ *
+ * A sidebar and a content area, which is the arrangement it always had. What
+ * changed is that navigation moved into its own component with sections and a
+ * list of recent conversations, and the frame kept only the job of placing it —
+ * permanently at desktop widths, behind a button as a drawer on a phone.
+ *
+ * The drawer closes on Escape and on tapping outside, because those are the two
+ * ways anyone dismisses an overlay, and one that only closes by its own X feels
+ * broken.
+ */
 export function AppShell({
   children,
   userName,
   userEmail,
   isAdmin,
+  conversations = [],
   aside,
 }: {
   children: ReactNode;
   userName: string;
   userEmail: string;
   isAdmin: boolean;
+  /**
+   * Recent conversations, loaded by the server layout and passed down.
+   *
+   * Not fetched here: this is a client component, and a client component
+   * reaching for data directly is the coupling that the
+   * app → API → service → repository layering exists to prevent.
+   */
+  conversations?: ConversationSummary[];
   aside?: ReactNode;
 }) {
   const t = useTranslations('nav');
-  const tc = useTranslations('common');
-  const locale = useLocale();
-  const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
-  const nav = (
-    <nav className="flex flex-col gap-1" aria-label={t('dashboard')}>
-      {NAV.map(({ href, key, icon: Icon }) => {
-        const active = pathname === href || pathname.startsWith(`${href}/`);
-        return (
-          <Link
-            key={href}
-            href={href}
-            onClick={() => setOpen(false)}
-            aria-current={active ? 'page' : undefined}
-            className={cn(
-              'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors',
-              active
-                ? 'bg-primary-soft font-medium text-primary'
-                : 'text-ink-soft hover:bg-surface-2 hover:text-ink',
-            )}
-          >
-            <Icon className="size-4.5 shrink-0" aria-hidden />
-            {t(key)}
-          </Link>
-        );
-      })}
+  useEffect(() => {
+    if (!open) return;
 
-      {isAdmin ? (
-        <Link
-          href="/admin"
-          onClick={() => setOpen(false)}
-          className={cn(
-            'mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors',
-            pathname.startsWith('/admin')
-              ? 'bg-upgrade-soft font-medium text-upgrade'
-              : 'text-ink-soft hover:bg-surface-2 hover:text-ink',
-          )}
-        >
-          <Shield className="size-4.5 shrink-0" aria-hidden />
-          {t('admin')}
-        </Link>
-      ) : null}
-    </nav>
-  );
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false);
+    }
 
-  const sidebarBody = (
-    <div className="flex h-full flex-col gap-6 p-4">
-      <Link href="/dashboard" className="flex items-center gap-2.5 px-1 font-semibold text-ink">
-        <span className="grid size-9 place-items-center rounded-lg bg-primary text-on-primary">
-          <GraduationCap className="size-5" aria-hidden />
-        </span>
-        {tc('appName')}
-      </Link>
+    document.addEventListener('keydown', onKeyDown);
+    /* The page behind a drawer should not scroll under it. */
+    document.body.style.overflow = 'hidden';
 
-      {nav}
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = '';
+    };
+  }, [open]);
 
-      <div className="mt-auto flex flex-col gap-3">
-        {aside}
-
-        <div className="flex items-center gap-2">
-          <ThemeToggle />
-          <LocaleSwitcher />
-        </div>
-
-        <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface px-3 py-2.5">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-ink">{userName}</p>
-            <p dir="ltr" className="truncate text-xs text-muted">
-              {userEmail}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => signOut({ callbackUrl: `/${locale}` })}
-            aria-label={t('logout')}
-            title={t('logout')}
-            className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-danger"
-          >
-            <LogOut className="size-4" aria-hidden />
-          </button>
-        </div>
-      </div>
-    </div>
+  const sidebar = (
+    <Sidebar
+      conversations={conversations}
+      userName={userName}
+      userEmail={userEmail}
+      isAdmin={isAdmin}
+      onNavigate={() => setOpen(false)}
+    />
   );
 
   return (
-    <div className="min-h-dvh lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
-      <aside className="sticky top-0 hidden h-dvh border-e border-line bg-ground lg:block">
-        {sidebarBody}
-      </aside>
+    <div className="flex min-h-dvh">
+      <aside className="sticky top-0 hidden h-dvh shrink-0 lg:block">{sidebar}</aside>
 
-      <div className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-line bg-ground/90 px-4 backdrop-blur-md lg:hidden">
-          <Link href="/dashboard" className="flex items-center gap-2 font-semibold text-ink">
-            <span className="grid size-8 place-items-center rounded-lg bg-primary text-on-primary">
-              <GraduationCap className="size-4" aria-hidden />
-            </span>
-            {tc('appName')}
+          <Link href="/chat" className="flex items-center gap-2 font-semibold text-ink">
+            <Sparkles className="size-4 text-accent" aria-hidden />
+            Academic AI
           </Link>
           <button
             type="button"
             onClick={() => setOpen(true)}
             aria-label={t('openMenu')}
+            aria-expanded={open}
             className="rounded-lg border border-line p-2 text-ink-soft"
           >
             <Menu className="size-5" aria-hidden />
@@ -158,9 +95,20 @@ export function AppShell({
         </header>
 
         <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
+
+        {/*
+          Theme and language sit at the foot of the content rather than in the
+          sidebar. They are settings — used once and forgotten — and permanent
+          space above the conversation list would crowd out what people came for.
+        */}
+        <div className="flex items-center gap-2 px-4 pb-4 sm:px-6 lg:px-8">
+          <ThemeToggle />
+          <LocaleSwitcher />
+          {aside}
+        </div>
       </div>
 
-      {open ? (
+      {open && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <button
             type="button"
@@ -168,19 +116,19 @@ export function AppShell({
             onClick={() => setOpen(false)}
             className="absolute inset-0 bg-ink/40"
           />
-          <div className="absolute inset-y-0 start-0 w-72 max-w-[85vw] border-e border-line bg-ground shadow-xl">
+          <div className="absolute inset-y-0 start-0 max-w-[85vw] shadow-xl">
             <button
               type="button"
               onClick={() => setOpen(false)}
               aria-label={t('closeMenu')}
-              className="absolute top-3 end-3 rounded-md p-1.5 text-muted hover:text-ink"
+              className="absolute top-3 end-3 z-10 rounded-md p-1.5 text-muted hover:text-ink"
             >
               <X className="size-5" aria-hidden />
             </button>
-            {sidebarBody}
+            {sidebar}
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

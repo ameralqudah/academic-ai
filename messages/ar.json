@@ -1058,7 +1058,9 @@
     "newProject": "إنشاء مشروع جديد",
     "projectContextOn": "المساعد يرى محتوى هذا المشروع",
     "step_searchLiterature": "البحث في قواعد البيانات العلمية",
-    "step_summariseLiterature": "تلخيص ما وجدته"
+    "step_summariseLiterature": "تلخيص ما وجدته",
+    "academicSearchPrompt": "ابحث لي عن دراسات حول ",
+    "literatureReviewPrompt": "أريد مراجعة أدبيات عن "
   },
   "knowledge": {
     "coverage": {
@@ -1084,5 +1086,30 @@
     "arabic": "عربي",
     "english": "إنجليزي",
     "openAccess": "متاح مجانًا"
+  },
+  "sidebar": {
+    "newChat": "محادثة جديدة",
+    "recent": "المحادثات الأخيرة",
+    "untitled": "محادثة بلا عنوان",
+    "collapse": "طيّ الشريط",
+    "expand": "توسيع الشريط",
+    "soon": "قريبًا",
+    "section": {
+      "workspace": "مساحة العمل",
+      "research": "البحث",
+      "account": "الحساب"
+    },
+    "item": {
+      "projects": "المشاريع",
+      "library": "الملفات",
+      "dataAnalysis": "تحليل البيانات",
+      "academicSearch": "البحث الأكاديمي",
+      "literatureReview": "مراجعة الأدبيات",
+      "webSearch": "البحث في الويب",
+      "deepResearch": "البحث المعمّق",
+      "billing": "الاشتراك",
+      "settings": "الإعدادات",
+      "admin": "الإدارة"
+    }
   }
 }

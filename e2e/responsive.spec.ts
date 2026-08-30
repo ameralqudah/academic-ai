@@ -36,9 +36,39 @@ test.describe('mobile layout', () => {
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
 
     await page.getByRole('button', { name: 'Open menu' }).click();
-    await expect(page.getByRole('link', { name: 'AI Tools' })).toBeVisible();
-    await page.getByRole('link', { name: 'AI Tools' }).click();
-    await expect(page).toHaveURL(/\/en\/tools$/);
+    await expect(page.getByRole('link', { name: 'Projects' })).toBeVisible();
+    await page.getByRole('link', { name: 'Projects' }).click();
+    await expect(page).toHaveURL(/\/en\/projects$/);
+  });
+
+  test('the drawer closes on Escape', async ({ page }) => {
+    await registerAndLogin(page, 'mobile-escape');
+
+    await page.getByRole('button', { name: 'Open menu' }).click();
+    await expect(page.getByRole('link', { name: 'Projects' })).toBeVisible();
+
+    /*
+     * Escape and an outside tap are how people dismiss an overlay. A drawer
+     * that only closes by its own X reads as stuck.
+     */
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('link', { name: 'Projects' })).toBeHidden();
+  });
+
+  test('the chat workspace fits a phone', async ({ page }) => {
+    await registerAndLogin(page, 'mobile-chat');
+    await page.goto('/en/chat');
+
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
+    await expect(page.getByRole('textbox')).toBeVisible();
+  });
+
+  test('the Arabic chat workspace does not scroll sideways', async ({ page }) => {
+    await registerAndLogin(page, 'mobile-chat-ar');
+    await page.goto('/ar/chat');
+
+    await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
   });
 
   test('dark mode applies and survives a reload', async ({ page }) => {

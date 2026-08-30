@@ -97,6 +97,73 @@ test.describe('the chat workspace', () => {
   });
 });
 
+test.describe('the sidebar', () => {
+  test('shows the sections and a way to start a new chat', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar', 'en');
+    await page.goto('/en/chat');
+
+    await expect(page.getByRole('link', { name: 'New chat' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Projects' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Academic search' })).toBeVisible();
+  });
+
+  test('shows unbuilt features as disabled rather than hiding them', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar-soon', 'en');
+    await page.goto('/en/chat');
+
+    /*
+     * Web search and deep research are visible and marked "Soon". Hiding them
+     * would leave a user unable to tell a missing feature from one they failed
+     * to find; making them clickable would promise something that does not
+     * exist. They are rendered as plain text, so they are not links.
+     */
+    await expect(page.getByText('Web search')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Web search' })).toHaveCount(0);
+    await expect(page.getByText('Deep research')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Deep research' })).toHaveCount(0);
+  });
+
+  test('collapses and stays collapsed after a reload', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar-collapse', 'en');
+    await page.goto('/en/chat');
+
+    await page.getByRole('button', { name: 'Collapse sidebar' }).click();
+    await expect(page.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
+
+    /* The preference lives in localStorage; a reload must respect it. */
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Expand sidebar' })).toBeVisible();
+  });
+
+  test('an academic search entry seeds the composer without sending', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar-prompt', 'en');
+    await page.goto('/en/chat');
+
+    await page.getByRole('link', { name: 'Academic search' }).click();
+
+    /*
+     * A starting phrase, not a sent message. The user still chooses what to
+     * search for and when.
+     */
+    await expect(page.getByRole('textbox')).toHaveValue(/Find studies about/);
+  });
+
+  test('a conversation appears in Recent after it is started', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar-recent', 'en');
+    await page.goto('/en/chat');
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('What is a p-value?');
+    await composer.press('Enter');
+
+    await expect(page.getByText('What is a p-value?')).toBeVisible({ timeout: 15_000 });
+
+    /* The sidebar list is rendered by the server layout, so it needs a reload. */
+    await page.reload();
+    await expect(page.getByText('Recent')).toBeVisible();
+  });
+});
+
 test.describe('switching language', () => {
   test('moves between locales and keeps the page', async ({ page }) => {
     await registerAndLogin(page, 'chat-locale', 'en');

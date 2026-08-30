@@ -1058,7 +1058,9 @@
     "newProject": "Create a new project",
     "projectContextOn": "The assistant can see this project",
     "step_searchLiterature": "Searching academic databases",
-    "step_summariseLiterature": "Summarising what I found"
+    "step_summariseLiterature": "Summarising what I found",
+    "academicSearchPrompt": "Find studies about ",
+    "literatureReviewPrompt": "I want a literature review on "
   },
   "knowledge": {
     "coverage": {
@@ -1084,5 +1086,30 @@
     "arabic": "Arabic",
     "english": "English",
     "openAccess": "free to read"
+  },
+  "sidebar": {
+    "newChat": "New chat",
+    "recent": "Recent",
+    "untitled": "Untitled conversation",
+    "collapse": "Collapse sidebar",
+    "expand": "Expand sidebar",
+    "soon": "Soon",
+    "section": {
+      "workspace": "Workspace",
+      "research": "Research",
+      "account": "Account"
+    },
+    "item": {
+      "projects": "Projects",
+      "library": "Library",
+      "dataAnalysis": "Data analysis",
+      "academicSearch": "Academic search",
+      "literatureReview": "Literature review",
+      "webSearch": "Web search",
+      "deepResearch": "Deep research",
+      "billing": "Billing",
+      "settings": "Settings",
+      "admin": "Admin"
+    }
   }
 }

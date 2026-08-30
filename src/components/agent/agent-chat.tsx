@@ -97,6 +97,7 @@ export function AgentChat({
   locale,
   projects,
   initialProjectId,
+  initialDraft,
 }: {
   locale: 'ar' | 'en';
   projects: ProjectOption[];
@@ -108,6 +109,8 @@ export function AgentChat({
    * at that project, and nothing here needs to know where the link came from.
    */
   initialProjectId?: string | null;
+  /** Seeded from a sidebar entry — a phrase to start from, not a sent message. */
+  initialDraft?: string;
 }) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
@@ -119,7 +122,7 @@ export function AgentChat({
       : null,
   );
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(initialDraft ?? '');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState<AttachedFile | null>(null);

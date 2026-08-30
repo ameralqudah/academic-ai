@@ -35,11 +35,11 @@ export default async function ChatPage({
   searchParams,
 }: {
   params: Promise<{ locale: string }>;
-  searchParams: Promise<{ project?: string }>;
+  searchParams: Promise<{ project?: string; prompt?: string; c?: string }>;
 }) {
   const { locale } = await params;
   const user = await requirePageUser(locale);
-  const { project } = await searchParams;
+  const { project, prompt } = await searchParams;
   const t = await getTranslations({ locale, namespace: 'agent' });
 
   const projects = await projectsRepo.listByUser(user.id, 50);
@@ -54,6 +54,17 @@ export default async function ChatPage({
         locale={locale === 'en' ? 'en' : 'ar'}
         projects={projects.map((entry) => ({ id: entry.id, title: entry.title }))}
         initialProjectId={project ?? null}
+        /*
+         * A starting phrase, when the user arrived from a sidebar entry like
+         * "Academic search". The key is resolved to text here rather than
+         * passed through the URL, so a crafted link cannot put arbitrary
+         * content into someone's composer.
+         */
+        initialDraft={
+          prompt === 'academicSearchPrompt' || prompt === 'literatureReviewPrompt'
+            ? t(prompt)
+            : undefined
+        }
       />
     </div>
   );

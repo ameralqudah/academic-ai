@@ -935,6 +935,37 @@ assertTrue(
   (await readFile('src/app/[locale]/(app)/chat/page.tsx', 'utf8')).includes('getThread('),
 );
 
+
+/*
+ * Two defects that made a recent conversation unopenable, both invisible to a
+ * type checker and to every test that did not click the link.
+ *
+ * The first: next-intl's Link treats a string href as one whole pathname and
+ * percent-encodes any `?` inside it, so `/chat?c=abc` became `/chat%3Fc%3Dabc`
+ * — a URL matching no route. Query parameters have to be passed as an object.
+ *
+ * The second: `useState(initialTurns)` reads its argument once. Moving from one
+ * conversation to another changed the URL and the props while leaving the first
+ * conversation on screen. A React key on the conversation id forces the remount
+ * that makes it a different chat.
+ */
+const sidebarSource = await readFile('src/components/app/sidebar.tsx', 'utf8');
+
+assertTrue(
+  'sidebar links pass query parameters as an object, not inside the path',
+  !/href={`[^`]*\?/.test(sidebarSource),
+);
+assertTrue(
+  'and a recent conversation links to /chat with a c parameter',
+  sidebarSource.includes("pathname: '/chat'") && sidebarSource.includes('query: { c:'),
+);
+
+const chatPageSource = await readFile('src/app/[locale]/(app)/chat/page.tsx', 'utf8');
+assertTrue(
+  'the chat is keyed by conversation so switching threads remounts it',
+  chatPageSource.includes('key={thread?.conversation.id'),
+);
+
 console.log('\nmaths detection');
 
 /*

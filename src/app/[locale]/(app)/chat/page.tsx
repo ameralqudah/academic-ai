@@ -95,7 +95,18 @@ export default async function ChatPage({
         <h1 className="text-xl font-semibold text-ink">{t('title')}</h1>
         <p className="text-sm text-muted">{t('subtitle')}</p>
       </div>
+      {/*
+        Keyed by the conversation, which forces a fresh component when the user
+        moves between threads.
+        
+        Without it, `useState(initialTurns)` reads its value once and keeps it:
+        clicking a second conversation in the sidebar changes the URL and the
+        props, and leaves the first conversation on screen. Remounting is the
+        correct answer rather than syncing props into state — a chat is
+        genuinely a different thing when it is a different conversation.
+      */}
       <AgentChat
+        key={thread?.conversation.id ?? 'new'}
         locale={locale === 'en' ? 'en' : 'ar'}
         projects={projects.map((entry) => ({ id: entry.id, title: entry.title }))}
         initialProjectId={project ?? thread?.conversation.projectId ?? null}

@@ -212,7 +212,16 @@ export function Sidebar({
             {conversations.map((conversation) => (
               <Link
                 key={conversation.id}
-                href={`/chat?c=${conversation.id}`}
+                /*
+                 * An object, not a template string.
+                 *
+                 * next-intl's Link treats a string href as a whole pathname and
+                 * percent-encodes the `?` inside it, producing
+                 * `/en/chat%3Fc%3D…` — a URL that resolves to nothing, which is
+                 * why clicking a recent conversation did not open it. Passing
+                 * pathname and query separately lets it build the link properly.
+                 */
+                href={{ pathname: '/chat', query: { c: conversation.id } }}
                 onClick={onNavigate}
                 className={cn(
                   'group flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm',
@@ -332,7 +341,11 @@ function NavLink({
 
   return (
     <Link
-      href={item.prompt ? `${item.href}?prompt=${item.prompt}` : item.href}
+      href={
+        item.prompt
+          ? { pathname: item.href, query: { prompt: item.prompt } }
+          : item.href
+      }
       onClick={onNavigate}
       className={cn(
         shared,

@@ -174,9 +174,42 @@ export async function readUpload(file: {
   // Every .xlsx is a zip, and every zip starts "PK".
   const looksLikeWorkbook = bytes[0] === 0x50 && bytes[1] === 0x4b;
 
+  /*
+   * The old binary .xls format, which is not a zip and not a spreadsheet this
+   * parser reads. Detected by its compound-document signature so the refusal
+   * can name the real problem — "this is the old format, re-save it" — rather
+   * than the useless "this is not a workbook".
+   */
+  const looksLikeLegacyXls =
+    bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
+
   if (name.endsWith('.xlsx') || name.endsWith('.xlsm') || looksLikeWorkbook) {
-    if (!looksLikeWorkbook) throw new DataParseError('analysis.error.notAWorkbook');
-    return parseXlsx(file.bytes, file.name);
+    if (looksLikeWorkbook) return parseXlsx(file.bytes, file.name);
+    if (looksLikeLegacyXls) throw new DataParseError('analysis.error.legacyXls');
+
+    /*
+     * Named .xlsx and holding something else. Before rejecting it, check
+     * whether it is actually delimited text: a spreadsheet exported as CSV and
+     * then renamed — or renamed by an email client — is a common enough
+     * accident that reading it is far better service than refusing it.
+     *
+     * The test is deliberately narrow. The first line must decode as text and
+     * contain a delimiter, which a binary file will fail. Guessing wrong here
+     * would mean showing a wall of binary as "data", so the check errs toward
+     * refusing.
+     */
+    const head = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 4096));
+    const firstLine = head.split(/\r?\n/)[0] ?? '';
+    const looksDelimited =
+      firstLine.length > 0 &&
+      /[,;\t]/.test(firstLine) &&
+      !/[\u0000-\u0008\u000e-\u001f]/.test(firstLine);
+
+    if (looksDelimited) {
+      return parseCsv(new TextDecoder('utf-8').decode(bytes), file.name);
+    }
+
+    throw new DataParseError('analysis.error.notAWorkbook');
   }
 
   if (!ACCEPTED_EXTENSIONS.some((extension) => name.endsWith(extension))) {

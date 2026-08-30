@@ -28,6 +28,7 @@ import {
   shouldOfferModelChoice,
 } from '@/agents/modes';
 import { containsMath } from '@/components/chat/markdown';
+import { resolveReason } from '@/server/http/reasons';
 import { mergeSources } from '@/server/knowledge/merge';
 import { CrossrefProvider } from '@/server/knowledge/providers/crossref';
 import { OpenAlexProvider } from '@/server/knowledge/providers/openalex';
@@ -1110,6 +1111,55 @@ assertTrue(
   'and the drag highlight counts depth so it does not flicker over children',
   composerSource.includes('dragDepth'),
 );
+
+
+console.log('\nreason keys resolve to sentences');
+
+/*
+ * The check that would have caught what a user hit: uploading a file with the
+ * wrong extension put the literal string `analysis.error.notAWorkbook` on
+ * screen.
+ *
+ * An earlier test asserted the message *existed* in both files, and it did. What
+ * was broken was the resolution — the browser looked the key up, got the key
+ * back instead of an error, and displayed it. So this exercises the resolver
+ * itself rather than the message files, and asserts the output is not the input.
+ */
+for (const key of reasonKeys) {
+  const resolved = resolveReason(key);
+  assertTrue(`"${key}" resolves to English text, not the key`, resolved.en !== key && resolved.en.length > 0);
+  assertTrue(`"${key}" resolves to Arabic text, not the key`, resolved.ar !== key && resolved.ar.length > 0);
+}
+
+/* The specific message from the report, in both languages. */
+const workbook = resolveReason('analysis.error.notAWorkbook');
+assertTrue('the workbook message explains what to do', workbook.en.includes('.csv'));
+assertTrue('and does so in Arabic too', workbook.ar.includes('CSV'));
+
+/* Placeholders are filled from the params the engine raised. */
+const withParams = resolveReason('analysis.ttest.error.tooFewValues', { n: 3, minimum: 5 });
+assertTrue('numbers are substituted into the message', withParams.en.includes('3') && withParams.en.includes('5'));
+assertTrue('in Arabic as well', withParams.ar.includes('3'));
+assertTrue('and no placeholder is left behind', !withParams.en.includes('{n}'));
+
+/* A missing value stays visible rather than leaving a gap in a sentence. */
+assertTrue(
+  'an unsupplied placeholder is left as written, so a mismatch is visible',
+  resolveReason('analysis.ttest.error.tooFewValues', { n: 3 }).en.includes('{minimum}'),
+);
+
+/* An unknown key falls back to itself — greppable rather than blank. */
+check('an unknown key returns itself', resolveReason('analysis.error.doesNotExist').en, 'analysis.error.doesNotExist');
+
+/*
+ * And both services must use the resolver rather than each keeping a table. One
+ * had a hand-written map, the other had nothing and passed the key straight
+ * through, which is how the two behaved differently for the same failure.
+ */
+for (const path of ['src/server/services/dataset.service.ts', 'src/server/services/analysis.service.ts']) {
+  const source = await readFile(path, 'utf8');
+  assertTrue(`${path} resolves reason keys on the server`, source.includes('resolveReason('));
+}
 
 console.log('\nmaths detection');
 

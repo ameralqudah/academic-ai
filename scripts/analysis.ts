@@ -13,6 +13,7 @@
 import ExcelJS from 'exceljs';
 
 import { applyCleaning, planCleaning } from '@/analysis/clean';
+import { readUpload } from '@/analysis';
 import { detectDelimiter, parseCsv } from '@/analysis/parse';
 import { parseXlsx } from '@/analysis/parse-xlsx';
 import { profileDataset } from '@/analysis/profile';
@@ -1899,7 +1900,73 @@ async function main() {
     'analysis.reliability.error.noVariance',
   );
 
-  console.log(
+  
+
+/** Asserts a read fails with a particular reason key. */
+async function expectReason(
+  label: string,
+  expected: string,
+  run: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await run();
+    check(label, 'no error', expected);
+  } catch (error) {
+    check(label, (error as { reasonKey?: string }).reasonKey, expected);
+  }
+}
+
+
+console.log('\nuploads: reading files that are not quite what they claim');
+
+/*
+ * A user uploaded a file, watched it upload, and was told it was not a workbook.
+ * The message was right — it was not one — but the file was a spreadsheet
+ * exported as CSV and renamed, which is an accident common enough that reading
+ * it is better service than refusing it.
+ */
+const csvBytes = () => new TextEncoder().encode('gender,score\nmale,80\nfemale,75\n').buffer as ArrayBuffer;
+
+const properCsv = await readUpload({ name: 'data.csv', bytes: csvBytes() });
+check('a plain CSV reads', properCsv.rows.length, 2);
+
+const mislabelled = await readUpload({ name: 'data.xlsx', bytes: csvBytes() });
+check('a CSV named .xlsx reads rather than being refused', mislabelled.rows.length, 2);
+check('and its columns survive', mislabelled.columns.length, 2);
+
+/*
+ * The old binary .xls is genuinely unsupported, and saying so by name is worth
+ * more than "not a workbook" — the user needs to know to re-save it, and that
+ * instruction only makes sense once the format is identified.
+ */
+await expectReason(
+  'the old .xls format is named rather than called "not a workbook"',
+  'analysis.error.legacyXls',
+  () => readUpload({ name: 'data.xlsx', bytes: new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 1, 2]).buffer as ArrayBuffer }),
+);
+
+/*
+ * Actual binary is still refused. The detection has to err this way: guessing
+ * wrong would show a wall of bytes as "data", which is worse than a refusal.
+ */
+await expectReason(
+  'binary content is still refused',
+  'analysis.error.notAWorkbook',
+  () => readUpload({ name: 'data.xlsx', bytes: new Uint8Array([0, 1, 2, 3, 4]).buffer as ArrayBuffer }),
+);
+
+await expectReason(
+  'a truncated workbook is reported as unreadable, not as the wrong type',
+  'analysis.error.unreadableWorkbook',
+  () => readUpload({ name: 'data.xlsx', bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0]).buffer as ArrayBuffer }),
+);
+
+await expectReason('an empty file is refused', 'analysis.error.emptyFile', () =>
+  readUpload({ name: 'data.csv', bytes: new ArrayBuffer(0) }),
+);
+
+
+console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`
       : `\n✗ ${failed} failing, ${passed} passing\n`,

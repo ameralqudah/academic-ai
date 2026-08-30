@@ -13,6 +13,7 @@ import {
 } from '@/analysis';
 import { logger } from '@/lib/logger';
 import { AppError } from '@/server/http/errors';
+import { resolveReason } from '@/server/http/reasons';
 
 /**
  * The application's view of the data layer.
@@ -108,57 +109,24 @@ export async function cleanUpload(
  * written as sentences a researcher can act on rather than as error codes. A
  * key with no entry still produces a usable message rather than a blank.
  */
-const PARSE_MESSAGES: Record<string, { en: string; ar: string }> = {
-  'analysis.error.emptyFile': {
-    en: 'The file is empty.',
-    ar: 'الملف فارغ.',
-  },
-  'analysis.error.noColumns': {
-    en: 'The first row must contain column names.',
-    ar: 'الصف الأول يجب أن يحتوي على أسماء الأعمدة.',
-  },
-  'analysis.error.noRows': {
-    en: 'The file has column names but no data rows.',
-    ar: 'الملف يحتوي على أسماء الأعمدة فقط دون أي بيانات.',
-  },
-  'analysis.error.tooManyColumns': {
-    en: 'This file has more columns than the analyser accepts.',
-    ar: 'عدد الأعمدة في هذا الملف أكبر مما يقبله المحلِّل.',
-  },
-  'analysis.error.tooLarge': {
-    en: 'The file is larger than the upload limit.',
-    ar: 'حجم الملف أكبر من الحد المسموح به.',
-  },
-  'analysis.error.unsupportedType': {
-    en: 'Upload a CSV or an Excel workbook (.xlsx).',
-    ar: 'ارفع ملف CSV أو مصنّف Excel بصيغة ‎.xlsx‎.',
-  },
-  'analysis.error.notAWorkbook': {
-    en: 'This file is named like a spreadsheet but is not one.',
-    ar: 'امتداد الملف يشير إلى جدول بيانات لكن محتواه ليس كذلك.',
-  },
-  'analysis.error.unreadableWorkbook': {
-    en: 'The workbook could not be opened. Re-save it as .xlsx and try again.',
-    ar: 'تعذّر فتح المصنّف. احفظه من جديد بصيغة ‎.xlsx‎ ثم أعد المحاولة.',
-  },
-  'analysis.error.noSheets': {
-    en: 'The workbook has no sheets with data.',
-    ar: 'لا يحتوي المصنّف على أي ورقة فيها بيانات.',
-  },
-};
 
 async function read(file: { name: string; bytes: ArrayBuffer }): Promise<Dataset> {
   try {
     return await readUpload(file);
   } catch (error) {
     if (error instanceof DataParseError) {
-      const message = PARSE_MESSAGES[error.reasonKey] ?? {
-        en: 'The file could not be read.',
-        ar: 'تعذّرت قراءة الملف.',
-      };
+      /*
+       * Resolved from the message files rather than a table local to this
+       * service. There were two copies of this mapping — a hand-written one
+       * here and none at all in the newer dataset service, which passed the raw
+       * key through and put `analysis.error.notAWorkbook` on a user's screen.
+       * One source, read by both.
+       */
+      const message = resolveReason(error.reasonKey, error.params);
+
       throw new AppError('VALIDATION', message.en, message.ar, {
-        reason: error.reasonKey,
-        ...error.params,
+        reasonKey: error.reasonKey,
+        params: error.params,
       });
     }
     throw error;

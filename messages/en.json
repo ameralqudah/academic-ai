@@ -785,7 +785,8 @@
       "unreadableWorkbook": "The workbook could not be read. It may be damaged or password-protected.",
       "unsupportedType": "That file type is not supported. CSV, TSV and XLSX are.",
       "tooLarge": "The file is larger than the 12 MB limit.",
-      "tooManyColumns": "The file has more columns than can be analysed."
+      "tooManyColumns": "The file has more columns than can be analysed.",
+      "legacyXls": "This is the older Excel format (.xls), which is not supported. Open it in Excel and save it as .xlsx or .csv, then upload it again."
     },
     "ttest": {
       "error": {

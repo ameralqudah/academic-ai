@@ -45,6 +45,7 @@ import {
 import { logger } from '@/lib/logger';
 import type { Dataset as DatasetRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { resolveReason } from '@/server/http/reasons';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import {
   checksumOf,
@@ -494,7 +495,21 @@ async function parse(file: { name: string; bytes: ArrayBuffer }): Promise<Parsed
     return await readUpload(file);
   } catch (error) {
     if (error instanceof DataParseError) {
-      throw new AppError('VALIDATION', error.reasonKey, error.reasonKey, {
+      /*
+       * Resolved to sentences here rather than passed on as a code.
+       *
+       * The reason key used to be sent as both messages and translated in the
+       * browser, and a user saw `analysis.error.notAWorkbook` on screen when
+       * that lookup silently returned the key. The words are settled on the
+       * server, where the message files are read directly and a missing key
+       * fails a test rather than reaching anyone.
+       *
+       * The key still travels in `details` — it is what logs and metrics group
+       * on, and the interface may still want it.
+       */
+      const message = resolveReason(error.reasonKey, error.params);
+
+      throw new AppError('VALIDATION', message.en, message.ar, {
         reasonKey: error.reasonKey,
         params: error.params,
       });

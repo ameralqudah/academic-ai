@@ -21,6 +21,14 @@ import type { InferentialResult } from '@/analysis';
 import type { IntentKey } from './registry';
 
 export type AgentEventType =
+  /**
+   * The conversation this turn belongs to.
+   *
+   * Sent first, before any work begins, because the client needs it to update
+   * the URL — so a refresh in the middle of a long answer returns to the right
+   * thread rather than to an empty one.
+   */
+  | 'conversation'
   /** The agent's reading of the request, before it acts. */
   | 'understanding'
   /** The stages it intends to run, with the estimated cost. */
@@ -38,6 +46,11 @@ export type AgentEventType =
   /** The task finished, with what it actually cost. */
   | 'done'
   | 'error';
+
+export interface ConversationEvent {
+  type: 'conversation';
+  conversationId: string;
+}
 
 export interface UnderstandingEvent {
   type: 'understanding';
@@ -142,6 +155,7 @@ export interface ErrorEvent {
 }
 
 export type AgentEvent =
+  | ConversationEvent
   | UnderstandingEvent
   | PlanEvent
   | StepEvent

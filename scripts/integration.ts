@@ -1145,6 +1145,72 @@ async function main() {
   );
   assertTrue('reliability produces a coefficient', typeof (alphaEvent?.payload as { alpha?: number })?.alpha === 'number');
 
+  /*
+   * The join that was missing: running the agent must leave a conversation
+   * behind. Every layer of persistence passed its own tests while nothing
+   * called it, and a refresh emptied the chat — so this drives the orchestrator
+   * end to end and then reads the database.
+   */
+  const persistedEvents = await drive('general.question');
+  const conversationEvent = persistedEvents.find(
+    (event): event is Extract<AgentEvent, { type: 'conversation' }> =>
+      event.type === 'conversation',
+  );
+
+  assertTrue('the agent reports which conversation this is', conversationEvent !== undefined);
+
+  const savedThread = await getThread(conversationEvent?.conversationId as string, agentOwner);
+  assertTrue('and the turn is actually stored', savedThread.messages.length >= 1);
+  check('with the user\'s message first', savedThread.messages[0]?.role, 'USER');
+  check('and the message text as sent', savedThread.messages[0]?.content, 'test');
+  assertTrue(
+    'the conversation appears in the sidebar list',
+    (await listRecent(agentOwner)).some((c) => c.id === conversationEvent?.conversationId),
+  );
+
+  /* A second message joins the same thread rather than starting another. */
+  const sameThread = await drive('general.question', {
+    conversationId: conversationEvent?.conversationId,
+  });
+  const secondEvent = sameThread.find(
+    (event): event is Extract<AgentEvent, { type: 'conversation' }> =>
+      event.type === 'conversation',
+  );
+  check(
+    'a follow-up stays in the same conversation',
+    secondEvent?.conversationId,
+    conversationEvent?.conversationId,
+  );
+
+  const grown = await getThread(conversationEvent?.conversationId as string, agentOwner);
+  assertTrue('and the thread grows rather than restarting', grown.messages.length > savedThread.messages.length);
+
+  /*
+   * A structured result — an analysis, a refusal — is stored alongside the
+   * prose, so reopening the conversation redraws the real table rather than a
+   * description of one.
+   */
+  const withResult = await drive('stats.reliability', {
+    roles: [
+      { column: 'q1', role: 'independent' },
+      { column: 'q2', role: 'independent' },
+      { column: 'q3', role: 'independent' },
+    ],
+  });
+  const resultConversation = withResult.find(
+    (event): event is Extract<AgentEvent, { type: 'conversation' }> =>
+      event.type === 'conversation',
+  );
+  const storedWithPayload = await getThread(
+    resultConversation?.conversationId as string,
+    agentOwner,
+  );
+  const assistantMessage = storedWithPayload.messages.find((message) => message.role === 'ASSISTANT');
+  assertTrue(
+    'a structured result is stored with the message',
+    Boolean((assistantMessage?.payload as { results?: unknown[] } | null)?.results?.length),
+  );
+
   clearIntentStubForTests();
 
   /* ------------------------------------------- results from real analyses */

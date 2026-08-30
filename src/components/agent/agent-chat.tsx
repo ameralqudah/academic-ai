@@ -79,6 +79,8 @@ interface Turn {
   id: string;
   role: Role;
   text?: string;
+  /** The request this answers, so a restatement of it can be suppressed. */
+  userMessage?: string;
   understanding?: { intent: string; restatement: string; confidence: number };
   stages?: Stage[];
   results?: { kind: string; runId?: string; payload: unknown }[];
@@ -99,6 +101,8 @@ export function AgentChat({
   projects,
   initialProjectId,
   initialDraft,
+  conversationId: initialConversationId,
+  initialTurns,
 }: {
   locale: 'ar' | 'en';
   projects: ProjectOption[];
@@ -112,6 +116,10 @@ export function AgentChat({
   initialProjectId?: string | null;
   /** Seeded from a sidebar entry — a phrase to start from, not a sent message. */
   initialDraft?: string;
+  /** An existing conversation, loaded by the page from `?c=`. */
+  conversationId?: string | null;
+  /** Its saved turns, so a refresh returns to the thread rather than an empty page. */
+  initialTurns?: Turn[];
 }) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
@@ -122,7 +130,15 @@ export function AgentChat({
       ? initialProjectId
       : null,
   );
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [turns, setTurns] = useState<Turn[]>(initialTurns ?? []);
+  /*
+   * Null until the first message, when the server creates the conversation and
+   * sends its id back. Held here so every later turn in this session joins the
+   * same thread instead of starting a new one.
+   */
+  const [conversationId, setConversationId] = useState<string | null>(
+    initialConversationId ?? null,
+  );
   const [draft, setDraft] = useState(initialDraft ?? '');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -200,7 +216,13 @@ export function AgentChat({
     setBusy(true);
 
     const userTurn: Turn = { id: crypto.randomUUID(), role: 'user', text: trimmed };
-    const agentTurn: Turn = { id: crypto.randomUUID(), role: 'assistant', stages: [], results: [] };
+    const agentTurn: Turn = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      stages: [],
+      results: [],
+      userMessage: trimmed,
+    };
     setTurns((current) => [...current, userTurn, agentTurn]);
 
     /* Only the last few turns travel, and only their text. */
@@ -218,6 +240,7 @@ export function AgentChat({
           locale,
           datasetId: file?.datasetId,
           projectId: projectId ?? undefined,
+          conversationId: conversationId ?? undefined,
           history,
         }),
       });
@@ -253,6 +276,25 @@ export function AgentChat({
           }
 
           switch (event.type) {
+            case 'conversation': {
+              const id = event.conversationId as string;
+              setConversationId(id);
+              /*
+               * The URL follows the conversation, so a refresh mid-answer
+               * returns here rather than to a blank page — and the address bar
+               * becomes something the user can bookmark or share with
+               * themselves. `replaceState` rather than a router push: this is
+               * the same page, and a history entry per message would make the
+               * back button useless.
+               */
+              if (typeof window !== 'undefined' && !conversationId) {
+                const url = new URL(window.location.href);
+                url.searchParams.set('c', id);
+                window.history.replaceState(null, '', url.toString());
+              }
+              break;
+            }
+
             case 'understanding':
               patch((turn) => ({
                 ...turn,
@@ -436,6 +478,37 @@ export function AgentChat({
 /*                                  Pieces                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Whether a restatement says anything the request did not.
+ *
+ * Compared on normalised words rather than exact text, because "I want studies
+ * on cooperative learning" and "You want studies about cooperative learning"
+ * are the same sentence with the pronouns turned around. Anything sharing most
+ * of its words with the request is treated as an echo.
+ */
+function addsMeaning(restatement: string, userMessage?: string): boolean {
+  if (!restatement.trim()) return false;
+  if (!userMessage) return true;
+
+  const normalise = (text: string) =>
+    new Set(
+      text
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .split(/\s+/)
+        .filter((word) => word.length > 2),
+    );
+
+  const said = normalise(userMessage);
+  const restated = normalise(restatement);
+  if (restated.size === 0) return false;
+
+  let shared = 0;
+  for (const word of restated) if (said.has(word)) shared += 1;
+
+  return shared / restated.size < 0.7;
+}
+
 function TurnView({ turn }: { turn: Turn }) {
   const t = useTranslations('agent');
 
@@ -451,7 +524,16 @@ function TurnView({ turn }: { turn: Turn }) {
 
   return (
     <div className="flex flex-col gap-3">
-      {turn.understanding && (
+      {/*
+        The agent's reading of the request, shown only when it adds something.
+        
+        For a plain question the restatement is the question again, and printing
+        it puts the user's own words on screen twice — once in their bubble and
+        once as the assistant apparently repeating them. It earns its place when
+        the agent interpreted something: picked columns, narrowed a topic,
+        resolved an ambiguity.
+      */}
+      {turn.understanding && addsMeaning(turn.understanding.restatement, turn.userMessage) && (
         <p className="text-sm text-muted">{turn.understanding.restatement}</p>
       )}
 

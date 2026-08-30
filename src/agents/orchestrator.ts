@@ -31,6 +31,7 @@ import * as tasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { answerGeneralQuestion, summariseSources } from '@/server/services/ai.service';
+import { recordTurn, startConversation } from '@/server/services/chat.service';
 import { search as searchKnowledge, type CoverageReport, type Source } from '@/server/knowledge';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 import {
@@ -84,7 +85,39 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
   let aiRequests = 0;
   let stepsDone = 0;
 
+  /*
+   * The conversation this turn belongs to.
+   *
+   * Created on the first message rather than when the page opens, so a user who
+   * lands on /chat and leaves does not litter the sidebar with empty threads.
+   * The id is sent to the client immediately so a refresh mid-answer still
+   * lands on the right conversation.
+   */
+  let conversationId = request.conversationId ?? null;
+  let assistantText = '';
+  /*
+   * Results, refusals and questions, kept alongside the prose.
+   *
+   * Saved as the message's `payload` so that reopening a conversation redraws
+   * the real analysis table rather than a paragraph describing one — which is
+   * the reason results travel as objects rather than rendered text in the first
+   * place.
+   */
+  const structuredResults: Record<string, unknown>[] = [];
+
   try {
+    if (!conversationId) {
+      const started = await startConversation({
+        userId: request.userId,
+        projectId: request.projectId ?? null,
+        firstMessage: request.message,
+        mode: 'AGENT',
+      });
+      conversationId = started.id;
+    }
+
+    yield { type: 'conversation', conversationId };
+
     /* ------------------------------ understand --------------------------- */
 
     const profile = request.datasetId
@@ -129,6 +162,13 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
         type: 'question',
         question: intent.clarifyingQuestion ?? intent.restatement,
       };
+      await persist({
+        conversationId,
+        userId: request.userId,
+        userMessage: request.message,
+        assistantText,
+        structured: structuredResults,
+      });
       await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: 0 });
       yield done(taskId, 0, aiRequests, startedAt);
       return;
@@ -149,6 +189,13 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
         reasonKey: capability.unavailableReason ?? 'agent.unavailable.generic',
         alternatives: alternativesFor(intent.intent),
       };
+      await persist({
+        conversationId,
+        userId: request.userId,
+        userMessage: request.message,
+        assistantText,
+        structured: structuredResults,
+      });
       await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: 0 });
       yield done(taskId, 0, aiRequests, startedAt);
       return;
@@ -164,6 +211,13 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
             ? 'هذا الطلب يحتاج ملف بيانات. ارفع ملف CSV أو Excel لأبدأ.'
             : 'That needs a data file. Upload a CSV or Excel file and I will begin.',
       };
+      await persist({
+        conversationId,
+        userId: request.userId,
+        userMessage: request.message,
+        assistantText,
+        structured: structuredResults,
+      });
       await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: 0 });
       yield done(taskId, 0, aiRequests, startedAt);
       return;
@@ -223,14 +277,61 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
       }
 
       yield { type: 'step', id: step.id, status: 'done', labelKey: step.labelKey };
-      if (outcome.event) yield outcome.event;
+      if (outcome.event) {
+        /*
+         * Accumulated as it streams so the finished answer can be saved. The
+         * client assembles the same text from the same events; keeping a copy
+         * here means the stored record is exactly what the user saw rather than
+         * a second generation of it.
+         */
+        if (outcome.event.type === 'delta') assistantText += outcome.event.text;
+        if (outcome.event.type === 'result') {
+          structuredResults.push({
+            kind: outcome.event.kind,
+            runId: outcome.event.runId,
+            datasetId: outcome.event.datasetId,
+            payload: outcome.event.payload,
+          });
+        }
+        yield outcome.event;
+      }
       stepsDone += 1;
     }
+
+    await persist({
+      conversationId,
+      userId: request.userId,
+      userMessage: request.message,
+      assistantText,
+      structured: structuredResults,
+    });
 
     await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: capability.units });
     yield done(taskId, capability.units, aiRequests, startedAt);
   } catch (error) {
     logger.error('agent.failed', { error: String(error) });
+
+    /*
+     * Save what happened even though it failed.
+     *
+     * The user's question is theirs, and losing it because the model provider
+     * was unreachable makes them retype it — after a wait, with no idea whether
+     * anything was recorded. The failure is stored as the reply, so reopening
+     * the conversation shows the question and what became of it rather than an
+     * empty thread.
+     *
+     * Found by a test that ran the agent without a provider key: the
+     * conversation was created and then stayed empty, which is precisely the
+     * situation a user hits when an API key expires.
+     */
+    await persist({
+      conversationId,
+      userId: request.userId,
+      userMessage: request.message,
+      assistantText: assistantText || '',
+      structured: structuredResults,
+      failed: true,
+    }).catch(() => undefined);
 
     if (taskId) {
       await finish(taskId, 'FAILED', { aiRequests, stepsDone, startedAt, units: 0 }).catch(
@@ -243,6 +344,48 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
       messageKey: 'agent.error.failed',
       message: error instanceof Error ? error.message : 'Something went wrong.',
     };
+  }
+}
+
+/**
+ * Writes the turn to the conversation.
+ *
+ * Deliberately swallows its own failures. A turn that answered the user and
+ * then failed to save is a storage problem, not a reason to replace the answer
+ * on screen with an error — they read it, it was correct, and losing it would
+ * be a second failure on top of the first. The loss is logged instead.
+ *
+ * A turn with no assistant text is still recorded: a question the agent asked,
+ * or a capability it declined, is part of the conversation and should survive a
+ * refresh like anything else.
+ */
+async function persist(input: {
+  conversationId: string | null;
+  userId: string;
+  userMessage: string;
+  assistantText: string;
+  structured: Record<string, unknown>[];
+  /** Marks a turn that ended in an error, so the thread shows what happened. */
+  failed?: boolean;
+}): Promise<void> {
+  if (!input.conversationId) return;
+
+  try {
+    await recordTurn({
+      conversationId: input.conversationId,
+      userId: input.userId,
+      userMessage: input.userMessage,
+      assistantMessage: input.assistantText,
+      payload:
+        input.structured.length > 0 || input.failed
+          ? { ...(input.structured.length > 0 ? { results: input.structured } : {}), ...(input.failed ? { failed: true } : {}) }
+          : null,
+    });
+  } catch (error) {
+    logger.error('agent.persistFailed', {
+      conversationId: input.conversationId,
+      error: String(error),
+    });
   }
 }
 

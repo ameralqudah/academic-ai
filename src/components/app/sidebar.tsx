@@ -147,7 +147,19 @@ export function Sidebar({
   return (
     <div
       className={cn(
-        'flex h-full flex-col gap-4 border-e border-line bg-surface transition-[width] duration-200',
+        /*
+         * `h-dvh` and `overflow-hidden` on the frame, with a single scrolling
+         * region inside it.
+         *
+         * `h-full` was wrong: without a height on the parent it collapses to
+         * the content, the whole sidebar grows past the viewport, and the page
+         * scroll takes the brand and the New chat button off the top — which is
+         * exactly what a user saw on a shorter screen. Fixing the frame to the
+         * viewport keeps the header and the account block in place and lets
+         * only the middle move.
+         */
+        'flex h-dvh flex-col gap-4 overflow-hidden border-e border-line bg-surface',
+        'transition-[width] duration-200',
         collapsed ? 'w-16 px-2 py-4' : 'w-64 px-3 py-4',
       )}
     >

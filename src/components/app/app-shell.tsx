@@ -7,7 +7,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Sidebar, type ConversationSummary } from '@/components/app/sidebar';
 import { LocaleSwitcher } from '@/components/locale-switcher';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { Link } from '@/i18n/navigation';
+import { Link, usePathname } from '@/i18n/navigation';
 
 /**
  * The application frame.
@@ -44,7 +44,11 @@ export function AppShell({
   aside?: ReactNode;
 }) {
   const t = useTranslations('nav');
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
+
+  /* The chat manages its own full-height layout down to the composer. */
+  const isChat = pathname === '/chat' || pathname.startsWith('/chat/');
 
   useEffect(() => {
     if (!open) return;
@@ -94,18 +98,26 @@ export function AppShell({
           </button>
         </header>
 
-        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
+        <main className="flex min-h-0 flex-1 flex-col px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+          {children}
+        </main>
 
         {/*
-          Theme and language sit at the foot of the content rather than in the
-          sidebar. They are settings — used once and forgotten — and permanent
-          space above the conversation list would crowd out what people came for.
+          Theme, language and the usage meter.
+          
+          Hidden on the chat page. The composer is pinned to the bottom of the
+          viewport there, and a footer underneath it sat on top of the input —
+          the user could see "USAGE THIS MONTH" overlapping the box they were
+          trying to type in. These are settings and a status readout; the
+          composer is the reason the page exists, and it wins the space.
         */}
-        <div className="flex items-center gap-2 px-4 pb-4 sm:px-6 lg:px-8">
-          <ThemeToggle />
-          <LocaleSwitcher />
-          {aside}
-        </div>
+        {!isChat && (
+          <div className="flex items-center gap-2 px-4 pb-4 sm:px-6 lg:px-8">
+            <ThemeToggle />
+            <LocaleSwitcher />
+            {aside}
+          </div>
+        )}
       </div>
 
       {open && (

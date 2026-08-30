@@ -882,6 +882,59 @@ assertTrue(
 
 
 
+
+console.log('\nthe agent is wired to persistence');
+
+/*
+ * A guard for a gap that reached production: every layer of conversation
+ * persistence was built and tested — migration, repository, service, routes,
+ * twenty-six passing integration assertions — and the agent never called any of
+ * it. Refreshing the page emptied the conversation.
+ *
+ * The integration tests could not catch it because they invoked `recordTurn`
+ * themselves and proved it worked. What was missing was not the part but the
+ * join between two parts, and a unit test on either side sees nothing wrong.
+ *
+ * So this reads the orchestrator and asserts the call exists. A crude check,
+ * and crude is the point: it fails the moment someone removes the wiring, which
+ * is the failure that actually happened.
+ */
+const orchestratorSource = await readFile('src/agents/orchestrator.ts', 'utf8');
+
+assertTrue(
+  'the agent creates a conversation when there is none',
+  orchestratorSource.includes('startConversation('),
+);
+assertTrue(
+  'and records each turn',
+  orchestratorSource.includes('recordTurn('),
+);
+assertTrue(
+  'and tells the client which conversation this is',
+  orchestratorSource.includes("type: 'conversation'"),
+);
+
+/*
+ * Saving must not be able to replace an answer with an error. A turn that was
+ * delivered and then failed to store is a storage problem; showing the user a
+ * failure would lose them an answer they had already read.
+ */
+assertTrue(
+  'a failed save is logged rather than thrown',
+  orchestratorSource.includes('agent.persistFailed'),
+);
+
+/* And the client has to send the id back, or every turn starts a new thread. */
+const chatSource = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+assertTrue(
+  'the client sends the conversation id with each message',
+  chatSource.includes('conversationId: conversationId ?? undefined'),
+);
+assertTrue(
+  'and the page loads a saved thread when the URL names one',
+  (await readFile('src/app/[locale]/(app)/chat/page.tsx', 'utf8')).includes('getThread('),
+);
+
 console.log('\nmaths detection');
 
 /*

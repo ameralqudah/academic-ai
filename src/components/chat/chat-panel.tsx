@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { Alert } from '@/components/ui/alert';
+import { Markdown } from '@/components/chat/markdown';
 import { Button } from '@/components/ui/button';
 import type { SectionKey } from '@/config/research';
 import { cn } from '@/lib/cn';
@@ -191,13 +192,23 @@ export function ChatPanel({
                 </span>
                 <div
                   className={cn(
-                    'rounded-lg px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap',
+                    'rounded-lg px-3.5 py-2.5 text-sm leading-relaxed',
                     message.role === 'USER'
-                      ? 'bg-primary-soft text-ink'
+                      ? 'bg-primary-soft text-ink whitespace-pre-wrap'
                       : 'border border-line bg-surface text-ink-soft',
                   )}
                 >
-                  {message.content}
+                  {/*
+                    The user's own text is shown as typed; only the assistant's
+                    is parsed as markdown. Rendering a user's message would let
+                    an underscore in a variable name turn half their sentence
+                    italic, and they did not ask for formatting.
+                  */}
+                  {message.role === 'USER' ? (
+                    message.content
+                  ) : (
+                    <Markdown content={message.content} compact />
+                  )}
                 </div>
                 {message.role === 'ASSISTANT' && onInsert ? (
                   <Button
@@ -216,8 +227,14 @@ export function ChatPanel({
             {pendingText ? (
               <li className="flex flex-col gap-1.5">
                 <span className="text-xs font-medium text-accent">{t('assistant')}</span>
-                <div className="rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap text-ink-soft">
-                  {pendingText}
+                <div className="rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm leading-relaxed text-ink-soft">
+                  {/*
+                    Rendered while streaming too. Half-finished markdown — an
+                    unclosed fence, a table with one row so far — degrades to
+                    plain text rather than breaking, so the alternative of
+                    waiting for the end would only add a jump when it arrives.
+                  */}
+                  <Markdown content={pendingText} compact />
                 </div>
               </li>
             ) : null}

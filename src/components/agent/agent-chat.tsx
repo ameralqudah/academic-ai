@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { ResultCard, type StatisticalResult } from '@/components/agent/result-card';
 import { SourceList, type RetrievedSource, type SourceCoverage } from '@/components/agent/source-list';
+import { Markdown } from '@/components/chat/markdown';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/cn';
@@ -500,7 +501,7 @@ function TurnView({ turn }: { turn: Turn }) {
         </div>
       )}
 
-      {turn.text && <p className="whitespace-pre-wrap text-sm text-ink">{turn.text}</p>}
+      {turn.text && <Markdown content={turn.text} compact />}
     </div>
   );
 }

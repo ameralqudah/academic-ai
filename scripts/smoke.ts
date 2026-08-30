@@ -19,6 +19,7 @@ import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
 import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
 import { generalPrompt } from '@/ai/prompts/general';
+import { containsMath } from '@/components/chat/markdown';
 import { mergeSources } from '@/server/knowledge/merge';
 import { CrossrefProvider } from '@/server/knowledge/providers/crossref';
 import { OpenAlexProvider } from '@/server/knowledge/providers/openalex';
@@ -879,6 +880,63 @@ assertTrue(
 );
 
 
+
+
+console.log('\nmaths detection');
+
+/*
+ * This predicate decides whether a quarter of a megabyte of KaTeX is
+ * downloaded, so both kinds of mistake cost something real: a miss renders an
+ * equation as literal dollar signs, and a false positive loads the engine for a
+ * sentence about money.
+ *
+ * The money case is the one a naive check gets wrong. "$50" and "between $5 and
+ * $10" are prices, and treating the dollars as delimiters would both load
+ * KaTeX and render the text between two prices as an equation.
+ */
+const mathCases: [string, boolean][] = [
+  ['The value is $x$ in the model.', true],
+  ['We use $\\alpha = 0.05$ as the threshold.', true],
+  ['$$\\sum_{i=1}^{n} x_i$$', true],
+  ['Inline $E = mc^2$ and text after.', true],
+  ['بالعربية أيضًا $\\beta$ تعمل.', true],
+
+  ['The licence costs $50 per month.', false],
+  ['Prices range between $5 and $10.', false],
+  ['No maths here at all.', false],
+  ['A code block with `const price = $5;` inside.', false],
+  ['', false],
+  ['Just a lone $ sign.', false],
+];
+
+for (const [content, expected] of mathCases) {
+  check(
+    `${expected ? 'maths' : 'no maths'}: "${content.slice(0, 40)}"`,
+    containsMath(content),
+    expected,
+  );
+}
+
+/*
+ * The two renderers must stay interchangeable. If the maths chunk ever styled
+ * tables or code differently from the plain one, a message would change
+ * appearance purely because it happened to contain an equation.
+ */
+const markdownSource = await readFile('src/components/chat/markdown-math.tsx', 'utf8');
+assertTrue(
+  'the maths renderer shares the plain one\'s components rather than duplicating them',
+  markdownSource.includes('markdownComponents') && markdownSource.includes('proseClass'),
+);
+assertTrue(
+  'and KaTeX styles are imported inside the lazy chunk, not globally',
+  markdownSource.includes("import 'katex/dist/katex.min.css'"),
+);
+
+const globalStyles = await readFile('src/app/globals.css', 'utf8');
+assertTrue(
+  'the global stylesheet does not pull in KaTeX for everyone',
+  !globalStyles.includes('katex'),
+);
 
 console.log('\nliterature search routing');
 

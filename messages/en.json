@@ -1111,5 +1111,10 @@
       "settings": "Settings",
       "admin": "Admin"
     }
+  },
+  "chat": {
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyCode": "Copy code"
   }
 }

@@ -4,8 +4,18 @@ test.describe('locale negotiation', () => {
   test.describe('an Arabic-speaking visitor', () => {
     test.use({ locale: 'ar-JO' });
 
-    test('lands on the Arabic site, rendered right-to-left', async ({ page }) => {
+    test('lands on the English site by default, and can reach Arabic', async ({ page }) => {
+      /*
+       * English is now the default for a visitor with no stated preference,
+       * including one whose browser asks for Arabic. The preference is honoured
+       * once it is expressed — through the switcher or a direct /ar link — but
+       * an Accept-Language header is a guess about a person, not a choice they
+       * made.
+       */
       await page.goto('/');
+      await expect(page).toHaveURL(/\/en$/);
+
+      await page.goto('/ar');
       await expect(page).toHaveURL(/\/ar$/);
 
       const html = page.locator('html');

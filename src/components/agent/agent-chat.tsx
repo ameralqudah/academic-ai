@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
+import { MessageActions, MessageEditor } from '@/components/agent/message-actions';
 import {
   RolePicker,
   type ColumnSummary,
@@ -160,6 +161,8 @@ export function AgentChat({
    */
   const [rolePrompt, setRolePrompt] = useState<{ message: string } | null>(null);
   const [roles, setRoles] = useState<RoleAssignment[]>([]);
+  /** The message being rewritten, if any. */
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [modelId, setModelId] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<{
     modes: ModeOption[];
@@ -520,6 +523,81 @@ export function AgentChat({
     }
   }
 
+  /**
+   * Rewrites a message and asks again from that point.
+   *
+   * The server creates a sibling rather than overwriting, so the original and
+   * everything after it survive on an inactive branch. What the user sees is
+   * the thread rebuilt from the edit onward.
+   */
+  async function editMessage(messageId: string, content: string) {
+    if (!conversationId) return;
+    setEditingId(null);
+
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'editMessage', messageId, content }),
+      });
+
+      const json = await response.json();
+      if (!response.ok || !json.ok) {
+        setError(json?.error?.message ?? te('generic'));
+        return;
+      }
+
+      /*
+       * Everything from the edited message onward is dropped locally before the
+       * new request goes out. Those turns answered a question that is no longer
+       * being asked, and leaving them on screen while a new answer streams in
+       * below would show two conversations at once.
+       */
+      setTurns((current) => {
+        const index = current.findIndex((turn) => turn.id === messageId);
+        return index >= 0 ? current.slice(0, index) : current;
+      });
+
+      void send(content);
+    } catch {
+      setError(te('network'));
+    }
+  }
+
+  /**
+   * Asks the same question again.
+   *
+   * The route detaches the old answer and hands back the question; sending it
+   * through the ordinary path means a regenerated reply goes through exactly
+   * the same agent as any other and cannot drift from it.
+   */
+  async function regenerate(messageId: string) {
+    if (!conversationId) return;
+
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'regenerate', messageId }),
+      });
+
+      const json = await response.json();
+      if (!response.ok || !json.ok) {
+        setError(json?.error?.message ?? te('generic'));
+        return;
+      }
+
+      setTurns((current) => {
+        const index = current.findIndex((turn) => turn.id === messageId);
+        return index >= 0 ? current.slice(0, index) : current;
+      });
+
+      void send(json.data.prompt as string);
+    } catch {
+      setError(te('network'));
+    }
+  }
+
   function stop() {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -547,7 +625,15 @@ export function AgentChat({
         ) : (
           <div className="flex flex-col gap-6 pb-4">
             {turns.map((turn) => (
-              <TurnView key={turn.id} turn={turn} />
+              <TurnView
+                key={turn.id}
+                turn={turn}
+                editing={editingId === turn.id}
+                onStartEdit={() => setEditingId(turn.id)}
+                onCancelEdit={() => setEditingId(null)}
+                onSubmitEdit={(value) => void editMessage(turn.id, value)}
+                onRegenerate={() => void regenerate(turn.id)}
+              />
             ))}
           </div>
         )}
@@ -653,21 +739,51 @@ function addsMeaning(restatement: string, userMessage?: string): boolean {
   return shared / restated.size < 0.7;
 }
 
-function TurnView({ turn }: { turn: Turn }) {
+function TurnView({
+  turn,
+  editing,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+  onRegenerate,
+}: {
+  turn: Turn;
+  editing: boolean;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSubmitEdit: (value: string) => void;
+  onRegenerate: () => void;
+}) {
   const t = useTranslations('agent');
 
   if (turn.role === 'user') {
+    /* Editing takes over the bubble, so the thread around it stays readable. */
+    if (editing) {
+      return (
+        <div className="flex justify-end">
+          <div className="w-full max-w-[85%]">
+            <MessageEditor
+              initialValue={turn.text ?? ''}
+              onCancel={onCancelEdit}
+              onSubmit={onSubmitEdit}
+            />
+          </div>
+        </div>
+      );
+    }
+
     return (
-      <div className="flex justify-end">
+      <div className="group flex flex-col items-end gap-1">
         <div className="max-w-[85%] rounded-2xl bg-accent px-4 py-2.5 text-sm text-on-accent">
           {turn.text}
         </div>
+        <MessageActions role="user" content={turn.text ?? ''} onEdit={onStartEdit} />
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="group flex flex-col gap-3">
       {/*
         The agent's reading of the request, shown only when it adds something.
         
@@ -728,6 +844,14 @@ function TurnView({ turn }: { turn: Turn }) {
       )}
 
       {turn.text && <Markdown content={turn.text} compact />}
+
+      {/*
+        Only once the reply is complete. Offering "regenerate" mid-stream would
+        invite a click that races the answer still arriving.
+      */}
+      {turn.text && !turn.stages?.some((stage) => stage.status === 'running') && (
+        <MessageActions role="assistant" content={turn.text} onRegenerate={onRegenerate} />
+      )}
     </div>
   );
 }

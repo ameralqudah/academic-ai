@@ -1223,6 +1223,64 @@ assertTrue(
   orchestrator.includes('أي متغيّر هو التابع'),
 );
 
+
+console.log('\nmessage actions');
+
+/*
+ * Copy is a convenience. Edit and regenerate are the interface to the branching
+ * that has been in the database since conversations were first persisted — every
+ * message has a parent and exactly one child of each parent is active, and until
+ * now nothing had ever created a second child.
+ *
+ * The property that makes both safe: neither destroys anything. The original
+ * and everything after it stay on an inactive branch, so a user who preferred
+ * what they had can go back.
+ */
+const actionsSource = await readFile('src/components/agent/message-actions.tsx', 'utf8');
+const conversationRoute = await readFile('src/app/api/conversations/[id]/route.ts', 'utf8');
+const chatSource3 = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+
+assertTrue(
+  'only a user message offers edit',
+  actionsSource.includes("role === 'user' && onEdit"),
+);
+assertTrue(
+  'and only an assistant reply offers regenerate',
+  actionsSource.includes("role === 'assistant' && onRegenerate"),
+);
+assertTrue(
+  'branch navigation appears when a message has siblings',
+  actionsSource.includes('branch.total > 1'),
+);
+
+assertTrue(
+  'the route exposes regeneration',
+  conversationRoute.includes("z.literal('regenerate')") && conversationRoute.includes('prepareRegeneration('),
+);
+assertTrue(
+  'and it returns the prompt rather than a new answer, since a JSON route cannot stream',
+  conversationRoute.includes('prompt: prepared.prompt'),
+);
+
+assertTrue(
+  'editing goes through the branching endpoint rather than overwriting',
+  chatSource3.includes("action: 'editMessage'"),
+);
+assertTrue(
+  'and a regenerated answer is produced by the same agent as any other message',
+  chatSource3.includes('void send(json.data.prompt as string)'),
+);
+assertTrue(
+  'turns after the edited message are dropped before the new answer arrives',
+  chatSource3.includes('current.slice(0, index)'),
+);
+
+/* Regenerating mid-stream would race the answer still arriving. */
+assertTrue(
+  'regenerate is offered only once the reply is complete',
+  chatSource3.includes("!turn.stages?.some((stage) => stage.status === 'running')"),
+);
+
 console.log('\nmaths detection');
 
 /*

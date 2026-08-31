@@ -1123,7 +1123,13 @@
   "chat": {
     "copy": "نسخ",
     "copied": "تم النسخ",
-    "copyCode": "نسخ الشيفرة"
+    "copyCode": "نسخ الشيفرة",
+    "edit": "تعديل",
+    "regenerate": "إعادة التوليد",
+    "saveAndResend": "حفظ وإعادة الإرسال",
+    "editHint": "Enter للإرسال · Esc للإلغاء",
+    "previousVersion": "النسخة السابقة",
+    "nextVersion": "النسخة التالية"
   },
   "mode": {
     "chat": "محادثة",

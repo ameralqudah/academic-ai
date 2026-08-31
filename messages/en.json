@@ -1123,7 +1123,13 @@
   "chat": {
     "copy": "Copy",
     "copied": "Copied",
-    "copyCode": "Copy code"
+    "copyCode": "Copy code",
+    "edit": "Edit",
+    "regenerate": "Regenerate",
+    "saveAndResend": "Save and resend",
+    "editHint": "Enter to send · Esc to cancel",
+    "previousVersion": "Previous version",
+    "nextVersion": "Next version"
   },
   "mode": {
     "chat": "Chat",

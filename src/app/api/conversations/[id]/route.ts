@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ok, withApi } from '@/server/http/api';
 import {
   deleteConversation,
+  prepareRegeneration,
   editMessage,
   getThread,
   renameConversation,
@@ -33,6 +34,13 @@ const patchSchema = z.discriminatedUnion('action', [
     content: z.string().min(1).max(8000),
   }),
   z.object({ action: z.literal('switchBranch'), messageId: z.string() }),
+  /*
+   * Regeneration takes the answer off the active path and returns the question
+   * it replied to, ready to be asked again. The old answer stays as an inactive
+   * branch — a user who preferred it can go back, which is why this is not a
+   * deletion.
+   */
+  z.object({ action: z.literal('regenerate'), messageId: z.string() }),
 ]);
 
 type PatchBody = z.infer<typeof patchSchema>;
@@ -56,6 +64,23 @@ export const PATCH = withApi<PatchBody, Params>(
 
       case 'switchBranch':
         return ok(await switchToBranch(params.id, user.id, body.messageId));
+
+      case 'regenerate': {
+        const prepared = await prepareRegeneration({
+          conversationId: params.id,
+          userId: user.id,
+          messageId: body.messageId,
+        });
+
+        /*
+         * The prompt is returned rather than the answer. Producing a new reply
+         * means running the agent, which streams — and a JSON route cannot
+         * stream. The client takes this and sends it back through /api/agent,
+         * so regeneration goes down exactly the same path as an ordinary
+         * message and cannot drift from it.
+         */
+        return ok({ prompt: prepared.prompt, thread: await getThread(params.id, user.id) });
+      }
     }
   },
 );

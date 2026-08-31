@@ -80,8 +80,14 @@ const SECTIONS: NavSection[] = [
        */
       { href: '/chat', key: 'academicSearch', icon: GraduationCap, prompt: 'academicSearchPrompt' },
       { href: '/chat', key: 'literatureReview', icon: BookOpen, prompt: 'literatureReviewPrompt' },
-      { href: '#', key: 'webSearch', icon: Search, soon: true },
-      { href: '#', key: 'deepResearch', icon: Telescope, soon: true },
+      /*
+       * Built. Whether they are reachable depends on a search provider key, and
+       * that is decided by the server rather than hard-coded here — a `soon`
+       * flag left in place after the feature shipped is the failure this
+       * replaces.
+       */
+      { href: '/chat', key: 'webSearch', icon: Search, prompt: 'webSearchPrompt' },
+      { href: '/chat', key: 'deepResearch', icon: Telescope, prompt: 'deepResearchPrompt' },
     ],
   },
   {

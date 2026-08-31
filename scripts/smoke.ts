@@ -27,6 +27,8 @@ import {
   parseModelId,
   shouldOfferModelChoice,
 } from '@/agents/modes';
+import { isPublicUrl } from '@/server/knowledge/fetch-content';
+import { SerperProvider } from '@/server/knowledge/providers/serper';
 import { containsMath } from '@/components/chat/markdown';
 import {
   buildDraftFromStructure,
@@ -1355,6 +1357,137 @@ assertTrue(
   schemaSource.includes('export function modelToDraft'),
 );
 
+
+
+console.log('\nweb search');
+
+/*
+ * The provider follows the same contract as Crossref and OpenAlex, so the
+ * merging and failure isolation that already exist apply to web results
+ * without a second implementation.
+ */
+const serper = new SerperProvider();
+
+check('the provider declares itself', serper.name, 'serper');
+assertTrue('and handles web sources', serper.kinds.includes('web'));
+
+/*
+ * Unconfigured is a normal outcome, not a crash. `getEnv()` throws when the
+ * database URL is missing, and reading it eagerly is what broke the knowledge
+ * providers and the production build before it was caught there — this is the
+ * fourth place that coupling would have bitten.
+ */
+check('an unconfigured provider reports so rather than throwing', serper.isConfigured(), false);
+
+const unconfigured = await serper.search({ text: 'anything', language: 'en' });
+check('and its search returns an outcome', unconfigured.sources.length, 0);
+check('with a reason', unconfigured.error?.reasonKey, 'knowledge.error.notConfigured');
+check('and no thrown error', typeof unconfigured.provider, 'string');
+
+/*
+ * URL filtering. Search results are attacker-influenced — a page can be indexed
+ * on purpose — so a server that fetches whatever it is handed can be aimed at
+ * internal services.
+ */
+check('a public URL is allowed', isPublicUrl('https://example.com/article'), true);
+check('localhost is refused', isPublicUrl('http://localhost:3000/admin'), false);
+check('the loopback address is refused', isPublicUrl('http://127.0.0.1/'), false);
+check('private 10.x is refused', isPublicUrl('http://10.0.0.5/internal'), false);
+check('private 192.168.x is refused', isPublicUrl('http://192.168.1.1/'), false);
+check('private 172.16-31.x is refused', isPublicUrl('http://172.20.0.1/'), false);
+check('but 172.32.x is public', isPublicUrl('http://172.32.0.1/'), true);
+check('cloud metadata is refused', isPublicUrl('http://169.254.169.254/latest/meta-data/'), false);
+check('Google metadata by name is refused', isPublicUrl('http://metadata.google.internal/'), false);
+check('a file URL is refused', isPublicUrl('file:///etc/passwd'), false);
+check('a malformed URL is refused', isPublicUrl('not a url'), false);
+
+/*
+ * The mode is available when a key is configured and not before. Hard-coding
+ * either way is wrong: `true` offers a mode that fails on first use, `false`
+ * hides it after someone configured it.
+ */
+check('web search is unavailable without a key', MODES.webSearch.available, false);
+check('and says why', MODES.webSearch.unavailableReason, 'mode.unavailable.webSearchKey');
+check('deep research follows the same key', MODES.deepResearch.available, false);
+
+/* Both modes point at real intents now, rather than at nothing. */
+assertTrue('web search has an intent', MODES.webSearch.intents.includes('research.web'));
+assertTrue('deep research has one', MODES.deepResearch.intents.includes('research.deep'));
+check('and both are in the catalogue', capabilityFor('research.web').status, 'available');
+check('including deep research', capabilityFor('research.deep').status, 'available');
+
+/*
+ * Deep research is priced above a single search because it runs many. A figure
+ * equal to one search would let a workflow costing eight model calls be metered
+ * as one.
+ */
+assertTrue(
+  'deep research costs more than a single search',
+  capabilityFor('research.deep').units > capabilityFor('research.web').units,
+);
+
+/* The sidebar must not still say "Soon" for a feature that ships. */
+const sidebarAfter = await readFile('src/components/app/sidebar.tsx', 'utf8');
+assertTrue(
+  'the sidebar no longer marks web search as coming soon',
+  !/key: 'webSearch'[^}]*soon: true/.test(sidebarAfter),
+);
+assertTrue(
+  'nor deep research',
+  !/key: 'deepResearch'[^}]*soon: true/.test(sidebarAfter),
+);
+
+/* The key must never reach the client bundle. */
+const webRoute = await readFile('src/app/api/web-search/route.ts', 'utf8');
+assertTrue('the route is server-side', !webRoute.includes("'use client'"));
+assertTrue(
+  'and the provider reads the key from the server environment only',
+  (await readFile('src/server/knowledge/providers/serper.ts', 'utf8')).includes('getEnv().SERPER_API_KEY'),
+);
+assertTrue(
+  'the search service is never imported by a client component',
+  !(await readFile('src/components/agent/agent-chat.tsx', 'utf8')).includes('web-search.service'),
+);
+
+/*
+ * Provider failures map to distinct reasons, because the three cases need
+ * different responses: rate-limited means wait, unauthorised means the key is
+ * wrong, a timeout means retry.
+ */
+const serperSource = await readFile('src/server/knowledge/providers/serper.ts', 'utf8');
+assertTrue('a rate limit is distinguished', serperSource.includes('knowledge.error.rateLimited'));
+assertTrue('an auth failure is distinguished', serperSource.includes('knowledge.error.unauthorised'));
+assertTrue('a timeout is distinguished', serperSource.includes('knowledge.error.timeout'));
+assertTrue(
+  'and the response body is logged, not just the status',
+  serperSource.includes('body: body.slice'),
+);
+
+/*
+ * Google's answer box is deliberately not returned: it is Google's own summary
+ * rather than a source anyone can cite, and including it would put an
+ * unattributable claim into a set presented as evidence.
+ */
+assertTrue(
+  'the answer box is excluded from sources',
+  serperSource.includes('answer box and knowledge graph are deliberately ignored') ||
+    !serperSource.includes('payload.answerBox?.snippet'),
+);
+
+/* The answer must be grounded and must say what these sources are. */
+const aiSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+assertTrue(
+  'the answering prompt demands citations',
+  aiSource.includes('Cite the source number after each claim'),
+);
+assertTrue(
+  'forbids adding anything outside the sources',
+  aiSource.includes('Never state anything that is not in the sources'),
+);
+assertTrue(
+  'and says web sources are not peer-reviewed references',
+  aiSource.includes('rather than peer-reviewed references'),
+);
 
 console.log('\nPLS conversational extraction');
 

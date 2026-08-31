@@ -1151,7 +1151,9 @@
       "stats_nonparametric": "Non-parametric tests",
       "general_question": "General question",
       "general_unclear": "Unclear request",
-      "research_literature": "Find studies"
+      "research_literature": "Find studies",
+      "research_web": "Web search",
+      "research_deep": "Deep research"
     },
     "unavailable": {
       "generic": "That is not available yet.",
@@ -1255,7 +1257,9 @@
     "model": "Model",
     "needsFile": "needs a file",
     "soon": "Soon",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "webSearchPrompt": "Search the web for ",
+    "deepResearchPrompt": "Do deep research on "
   },
   "knowledge": {
     "coverage": {
@@ -1266,7 +1270,10 @@
       "providerFailed": "One search source could not be reached. These results come from the sources that responded.",
       "timeout": "One search source took too long and was skipped.",
       "budgetExhausted": "One source has used its daily allowance. These results come from the others.",
-      "noResults": "I found no results for that search."
+      "noResults": "I found no results for that search.",
+      "notConfigured": "Web search is not configured on this deployment; it needs a search provider key.",
+      "rateLimited": "The search provider's rate limit was reached. Wait a moment and try again.",
+      "unauthorised": "The search provider key is invalid or expired."
     },
     "source": {
       "academic": "Study",
@@ -1326,7 +1333,8 @@
     "dataAnalysis": "Data analysis",
     "unavailable": {
       "webSearch": "Web search is not available yet — we are connecting it to a real search provider.",
-      "deepResearch": "Deep research is not available yet."
+      "deepResearch": "Deep research is not available yet.",
+      "webSearchKey": "Web search needs a search provider key, which has not been configured."
     }
   },
   "roles": {

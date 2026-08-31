@@ -30,6 +30,12 @@ const serverSchema = z.object({
   OPENAI_MODEL: z.string().default('gpt-4.1'),
   GOOGLE_AI_API_KEY: z.string().optional(),
   GOOGLE_MODEL: z.string().default('gemini-2.5-pro'),
+  /**
+   * Web search, through Serper. Optional: without it the provider reports
+   * itself unconfigured and the mode stays unavailable, rather than the app
+   * failing to start over a feature nobody has enabled.
+   */
+  SERPER_API_KEY: z.string().optional(),
 
   // Billing — no real keys in code, ever.
   BILLING_PROVIDER: z.enum(['manual', 'stripe', 'paypal']).default('manual'),

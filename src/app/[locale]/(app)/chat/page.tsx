@@ -120,7 +120,10 @@ export default async function ChatPage({
          * content into someone's composer.
          */
         initialDraft={
-          prompt === 'academicSearchPrompt' || prompt === 'literatureReviewPrompt'
+          prompt === 'academicSearchPrompt' ||
+          prompt === 'literatureReviewPrompt' ||
+          prompt === 'webSearchPrompt' ||
+          prompt === 'deepResearchPrompt'
             ? t(prompt)
             : undefined
         }

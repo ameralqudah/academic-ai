@@ -481,6 +481,84 @@ export async function extractModelStructure(input: {
 }
 
 /**
+ * Answers a question from web sources that were actually retrieved.
+ *
+ * The rules are the ones the literature summary uses, because the failure they
+ * prevent is the same: asked about a topic, a model will add a claim it
+ * half-remembers, phrased exactly like the ones that came from a source, and
+ * the reader has no way to tell them apart. The defence is a closed set and a
+ * requirement to cite — every sentence carries the number of the source it came
+ * from, or it is not written.
+ *
+ * One rule is specific to web sources and matters for a research tool: these
+ * are pages, not peer-reviewed work, and the answer says so rather than letting
+ * a student cite a blog post as though it were a study.
+ */
+export async function answerFromSources(input: {
+  userId: string;
+  question: string;
+  locale: 'ar' | 'en';
+  sources: {
+    index: number;
+    title: string;
+    url: string;
+    site: string;
+    content: string;
+    full: boolean;
+  }[];
+}): Promise<string> {
+  await assertCanUseAI(input.userId, 800);
+
+  const provider = await resolveProvider();
+
+  const rendered = input.sources
+    .map(
+      (source) =>
+        `[${source.index}] ${source.title}\n` +
+        `Site: ${source.site}\n` +
+        `URL: ${source.url}\n` +
+        `${source.full ? 'Full page text' : 'Search snippet only'}:\n${source.content.slice(0, 6000)}`,
+    )
+    .join('\n\n---\n\n');
+
+  const system =
+    input.locale === 'ar'
+      ? `أنت مساعد بحثي. أجب عن سؤال الباحث اعتمادًا على المصادر المرقّمة أدناه وحدها.
+
+القواعد:
+- استشهد برقم المصدر بعد كل معلومة، هكذا [1] أو [2][3].
+- لا تذكر أي معلومة ليست في المصادر، مهما بدت لك صحيحة.
+- إن لم تكفِ المصادر للإجابة، قل ذلك صراحةً وحدّد ما ينقص.
+- ميّز بين ما ورد في نصّ الصفحة كاملًا وما ورد في مقتطف بحث فقط.
+- نبّه في نهاية الإجابة أن هذه مصادر من الويب وليست مراجع علمية محكّمة، وأن الاستشهاد الأكاديمي يحتاج مصادر أكاديمية.`
+      : `You are a research assistant. Answer the researcher's question using only the numbered sources below.
+
+Rules:
+- Cite the source number after each claim, like [1] or [2][3].
+- Never state anything that is not in the sources, however certain it seems.
+- If the sources do not answer the question, say so and name what is missing.
+- Distinguish what came from a full page from what came from a search snippet only.
+- End by noting that these are web sources rather than peer-reviewed references, and that academic citation needs academic sources.`;
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system,
+    messages: [
+      { role: 'user', content: `Question: ${input.question}\n\nSources:\n\n${rendered}` },
+    ],
+    maxTokens: 1600,
+    /* Low: this is reporting what sources say, not composing. */
+    temperature: 0.3,
+  });
+
+  return result.text;
+}
+
+/**
  * Describes academic sources that were actually retrieved.
  *
  * The rules given to the model are the same ones the results chapter uses for

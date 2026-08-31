@@ -44,6 +44,25 @@ export interface ModeConfig {
   unavailableReason?: string;
 }
 
+/**
+ * Whether a web search key is configured.
+ *
+ * Reads the environment directly rather than asking the web search service.
+ * That import looked tidier and pulled the service — and through it the
+ * database — into this module, which the agent catalogue and the smoke tests
+ * load without a database. The result was a test suite that could not start.
+ *
+ * A configuration table should depend on configuration, not on the services it
+ * describes.
+ */
+function hasWebSearchKey(): boolean {
+  try {
+    return Boolean(getEnv().SERPER_API_KEY);
+  } catch {
+    return false;
+  }
+}
+
 export const MODES: Record<ModeKey, ModeConfig> = {
   chat: {
     key: 'chat',
@@ -73,25 +92,33 @@ export const MODES: Record<ModeKey, ModeConfig> = {
       'stats.categorical',
     ],
   },
-  /*
-   * Shown and disabled, like the sidebar entries. A mode selector that hides
-   * what is coming leaves a user unable to tell a missing feature from one they
-   * failed to find; one that offers it as working is a lie. Both are visible and
-   * both say why.
+  /**
+   * Built, and available when a search provider is configured.
+   *
+   * `available` is computed rather than declared, because whether this works
+   * depends on a key that may or may not be set on a given deployment. Hard-
+   * coding `true` would offer a mode that fails on first use; hard-coding
+   * `false` would keep it hidden after someone configured it.
    */
   webSearch: {
     key: 'webSearch',
-    available: false,
+    available: hasWebSearchKey(),
     requiresDataset: false,
-    intents: [],
-    unavailableReason: 'mode.unavailable.webSearch',
+    intents: ['research.web'],
+    unavailableReason: 'mode.unavailable.webSearchKey',
   },
+  /**
+   * Deep research needs both web and academic search, so it follows the same
+   * configuration. Academic search works without a key; web search does not,
+   * and a deep review that cannot reach the web is a literature search under
+   * another name.
+   */
   deepResearch: {
     key: 'deepResearch',
-    available: false,
+    available: hasWebSearchKey(),
     requiresDataset: false,
-    intents: [],
-    unavailableReason: 'mode.unavailable.deepResearch',
+    intents: ['research.deep'],
+    unavailableReason: 'mode.unavailable.webSearchKey',
   },
 };
 

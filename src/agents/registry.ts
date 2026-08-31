@@ -62,6 +62,10 @@ export type IntentKey =
   | 'stats.nonparametric'
   // Literature — searching real academic databases
   | 'research.literature'
+  /** A question answered from web pages the agent found and read. */
+  | 'research.web'
+  /** A multi-step review: planned sub-questions, parallel search, synthesis. */
+  | 'research.deep'
   // Conversation
   | 'general.question'
   | 'general.unclear';
@@ -249,6 +253,35 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
     requiresDataset: false,
     units: 1,
     estimatedCalls: 1,
+  },
+
+  'research.web': {
+    intent: 'research.web',
+    status: 'available',
+    agent: 'research',
+    requiresDataset: false,
+    /*
+     * One unit, like a literature search. It costs a provider credit and up to
+     * five page fetches, which is more work than a chat turn and comparable to
+     * the academic search that is already priced this way.
+     */
+    units: 1,
+    estimatedCalls: 1,
+  },
+
+  /**
+   * Deep research runs many searches and several model calls, so it is priced
+   * well above a single search. The figure is an estimate: the workflow
+   * branches on what it finds, and a question needing a second round of
+   * searching costs more than one that does not.
+   */
+  'research.deep': {
+    intent: 'research.deep',
+    status: 'available',
+    agent: 'research',
+    requiresDataset: false,
+    units: 5,
+    estimatedCalls: 8,
   },
 
   'research.survey': {

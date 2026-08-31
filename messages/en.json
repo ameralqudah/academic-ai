@@ -990,6 +990,23 @@
           "p": "p",
           "ci": "95% CI"
         }
+      },
+      "export": {
+        "title": "PLS-SEM Analysis Report",
+        "provenance": "These results were produced by the standard PLS algorithm and validated against published benchmark results and mathematical properties. They have not been compared against SmartPLS.",
+        "sheet": {
+          "summary": "Summary"
+        },
+        "column": {
+          "severity": "Severity",
+          "finding": "Finding",
+          "action": "Suggested action"
+        },
+        "severity": {
+          "ok": "OK",
+          "attention": "Review",
+          "problem": "Problem"
+        }
       }
     },
     "job": {

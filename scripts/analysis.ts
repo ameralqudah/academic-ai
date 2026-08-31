@@ -12,6 +12,7 @@
 
 import { readFile } from 'node:fs/promises';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 
 import { applyCleaning, planCleaning } from '@/analysis/clean';
 import { readUpload } from '@/analysis';
@@ -28,6 +29,7 @@ import {
 } from '@/analysis/inference/pls/algorithm';
 import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
 import { buildReport } from '@/analysis/inference/pls/report';
+import { exportPlsToExcel, exportPlsToWord } from '@/server/services/pls-export.service';
 import {
   kruskalWallisTest,
   mannWhitneyTest,
@@ -2715,14 +2717,15 @@ console.log('\nPLS-SEM report');
    * saying which item is dragging it leaves the researcher to guess.
    */
   const namedZ3 = findings.some(
-    (finding) => finding.key.startsWith('pls.report.indicator.') && finding.params?.indicator === 'z3',
+    (finding) => finding.key.startsWith('analysis.pls.report.indicator.') && finding.params?.indicator === 'z3',
   );
   assertTrue('the noise indicator is named specifically', namedZ3);
 
   /* Two near-identical constructs must fail discriminant validity. */
   assertTrue(
     'near-identical constructs are flagged by HTMT',
-    keys.includes('pls.report.htmt.violated') || keys.includes('pls.report.fornellLarcker.violated'),
+    keys.includes('analysis.pls.report.htmt.violated') ||
+      keys.includes('analysis.pls.report.fornellLarcker.violated'),
   );
 
   /*
@@ -2744,7 +2747,7 @@ console.log('\nPLS-SEM report');
   );
 
   /* Tables come with the sections that report them. */
-  const constructSections = report.sections.filter((section) => section.titleKey === 'pls.report.section.construct');
+  const constructSections = report.sections.filter((section) => section.titleKey === 'analysis.pls.report.section.construct');
   check('one section per construct', constructSections.length, 3);
   assertTrue('each has an indicator table', constructSections.every((section) => Boolean(section.table)));
   assertTrue(
@@ -2787,7 +2790,7 @@ console.log('\nPLS-SEM report');
     'and says discriminant validity holds',
     cleanReport.sections
       .flatMap((section) => section.findings)
-      .some((finding) => finding.key === 'pls.report.discriminant.allPass'),
+      .some((finding) => finding.key === 'analysis.pls.report.discriminant.allPass'),
   );
 }
 
@@ -2807,9 +2810,9 @@ console.log('\nPLS-SEM report');
     );
 
   const source = await readFile('src/analysis/inference/pls/report.ts', 'utf8');
-  const referenced = [...new Set(source.match(/'pls\.report\.[a-zA-Z.]+'/g) ?? [])].map((match) =>
-    match.slice(1, -1).replace('pls.report.', 'analysis.pls.report.'),
-  );
+  const referenced = [
+    ...new Set(source.match(/'analysis\.pls\.report\.[a-zA-Z.]+'/g) ?? []),
+  ].map((match) => match.slice(1, -1));
 
   assertTrue('the report references message keys', referenced.length > 20);
 
@@ -2817,6 +2820,156 @@ console.log('\nPLS-SEM report');
     assertTrue(`${key} has an Arabic message`, typeof resolve(messagesAr, key) === 'string');
     assertTrue(`${key} has an English message`, typeof resolve(messagesEn, key) === 'string');
   }
+}
+
+
+
+console.log('\nPLS-SEM export');
+
+/*
+ * The files are opened and read back rather than checked for a non-zero size.
+ * A .docx is a zip of XML and a .xlsx is a zip of worksheets; both will produce
+ * bytes for a broken document, and "the buffer is 40KB" says nothing about
+ * whether a researcher can open it.
+ */
+{
+  let s3 = 5;
+  const r3 = () => {
+    s3 = (s3 * 1103515245 + 12345) & 0x7fffffff;
+    return s3 / 0x7fffffff;
+  };
+  const n3 = () => {
+    const u = Math.max(r3(), 1e-9);
+    const v = r3();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const exportData = new Map<string, number[]>();
+  for (const column of ['e1','e2','e3','f1','f2','f3']) exportData.set(column, []);
+
+  for (let i = 0; i < 220; i += 1) {
+    const E = n3();
+    const F = 0.5 * E + 0.87 * n3();
+    for (let j = 1; j <= 3; j += 1) (exportData.get(`e${j}`) as number[]).push(0.88 * E + 0.45 * n3());
+    for (let j = 1; j <= 3; j += 1) (exportData.get(`f${j}`) as number[]).push(0.88 * F + 0.45 * n3());
+  }
+
+  const exportModel: PlsModel = {
+    constructs: [
+      { name: 'Engagement', indicators: ['e1', 'e2', 'e3'], mode: 'reflective' },
+      { name: 'Performance', indicators: ['f1', 'f2', 'f3'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'Engagement', to: 'Performance' }],
+  };
+
+  const exportFit = estimatePls(exportModel, exportData);
+  const exportMeasurement = assessMeasurement(exportModel, exportFit, exportData);
+
+  const exportReport = buildReport({
+    measurement: exportMeasurement,
+    discriminant: assessDiscriminantValidity(exportModel, exportFit, exportData, exportMeasurement),
+    structural: assessStructural(exportModel, exportFit),
+    bootstrap: bootstrapPls(exportModel, exportData, exportFit, { resamples: 300 }),
+    n: exportFit.n,
+    rowsDropped: 0,
+    converged: exportFit.converged,
+  });
+
+  /* A translator that resolves real messages, as the route supplies. */
+  const arabic = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>;
+
+  const translate = (key: string, params?: Record<string, string | number>) => {
+    const value = key
+      .split('.')
+      .reduce<unknown>(
+        (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+        arabic,
+      );
+
+    if (typeof value !== 'string') return key;
+    return value.replace(/\{(\w+)\}/g, (whole, name: string) =>
+      params?.[name] === undefined ? whole : String(params[name]),
+    );
+  };
+
+  /* Word: opened as a zip and its document body read. */
+  const docx = await exportPlsToWord({
+    report: exportReport,
+    translate,
+    locale: 'ar',
+    projectTitle: 'أثر الاندماج الوظيفي في الأداء',
+  });
+
+  assertTrue('the Word export produces bytes', docx.length > 5000);
+
+  const docxZip = await JSZip.loadAsync(docx);
+  const documentXml = await docxZip.file('word/document.xml')?.async('string');
+
+  assertTrue('and a readable document body', Boolean(documentXml));
+  assertTrue('containing the report title', (documentXml ?? '').includes('نمذجة المعادلات البنائية'));
+  assertTrue('and the project title', (documentXml ?? '').includes('الاندماج الوظيفي'));
+
+  /*
+   * The provenance note must survive into the file. It is the sentence that
+   * keeps the claim narrow — validated against published results, not against
+   * SmartPLS — and a report circulating without it overstates what was done.
+   */
+  assertTrue(
+    'and the provenance note, worded as narrowly as the validation justifies',
+    (documentXml ?? '').includes('لم تُقارَن ببرنامج SmartPLS'),
+  );
+
+  /* Arabic must be marked right-to-left, or Word renders it left-aligned. */
+  assertTrue('Arabic runs are marked right-to-left', (documentXml ?? '').includes('<w:rtl'));
+  assertTrue('and paragraphs are bidirectional', (documentXml ?? '').includes('<w:bidi'));
+
+  /* Findings reach the document, not just the headings. */
+  assertTrue(
+    'the findings are written out, not only the table',
+    (documentXml ?? '').includes('متوسط التباين المستخرَج'),
+  );
+
+  /* Excel: opened and its sheets inspected. */
+  const xlsx = await exportPlsToExcel({
+    report: exportReport,
+    translate,
+    locale: 'ar',
+    datasetName: 'survey.csv',
+  });
+
+  assertTrue('the Excel export produces bytes', xlsx.length > 3000);
+
+  const readBack = new ExcelJS.Workbook();
+  await readBack.xlsx.load(xlsx as unknown as ArrayBuffer);
+
+  assertTrue('the workbook opens', readBack.worksheets.length > 0);
+  check('with a summary sheet first', readBack.worksheets[0]?.name, 'الملخّص');
+  assertTrue('and a sheet per table', readBack.worksheets.length >= 3);
+
+  /*
+   * Excel throws on a sheet name over 31 characters or containing : \ / ? * [ ].
+   * A construct named after a long Arabic phrase would fail the whole export,
+   * so the names are checked rather than assumed.
+   */
+  for (const sheet of readBack.worksheets) {
+    assertTrue(`the sheet name "${sheet.name}" is within Excel's limit`, sheet.name.length <= 31);
+    assertTrue(`and contains no forbidden character`, !/[:\\/?*[\]]/.test(sheet.name));
+  }
+
+  const summarySheet = readBack.worksheets[0];
+  const summaryText = (summarySheet?.getColumn(2).values ?? [])
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ');
+
+  assertTrue('the summary sheet carries the findings', summaryText.length > 50);
+
+  /* The numbers must arrive as numbers, or nobody can sort or chart them. */
+  const tableSheet = readBack.worksheets[1];
+  const secondRow = tableSheet?.getRow(2);
+  assertTrue(
+    'loadings are written as numbers rather than text',
+    typeof secondRow?.getCell(2).value === 'number',
+  );
 }
 
 

@@ -52,6 +52,13 @@ export type Severity = 'ok' | 'attention' | 'problem';
  *
  * The key names a message; the params fill it. Both languages are rendered from
  * the same key, so a finding cannot exist in one language and not the other.
+ *
+ * Keys are fully qualified — `analysis.pls.report.ave.violated`, not
+ * `pls.report.ave.violated`. That is verbose and deliberate: a caller resolving
+ * a bare key against the wrong namespace silently gets the key back and writes
+ * it into a Word document, where it reads as a crash in the middle of a
+ * validity warning. A test caught exactly that, and qualifying the keys removes
+ * the possibility rather than documenting it.
  */
 export interface Finding {
   key: string;
@@ -136,7 +143,7 @@ export function buildReport(input: {
 
 function sampleSection(n: number, rowsDropped: number, converged: boolean): ReportSection {
   const findings: Finding[] = [
-    { key: 'pls.report.sample.size', severity: 'ok', params: { n } },
+    { key: 'analysis.pls.report.sample.size', severity: 'ok', params: { n } },
   ];
 
   if (rowsDropped > 0) {
@@ -147,24 +154,24 @@ function sampleSection(n: number, rowsDropped: number, converged: boolean): Repo
     const percent = Math.round((rowsDropped / (n + rowsDropped)) * 100);
 
     findings.push({
-      key: 'pls.report.sample.dropped',
+      key: 'analysis.pls.report.sample.dropped',
       severity: percent > 10 ? 'attention' : 'ok',
       params: { dropped: rowsDropped, percent },
       ...(percent > 10
-        ? { action: { key: 'pls.report.action.checkMissing', params: { percent } } }
+        ? { action: { key: 'analysis.pls.report.action.checkMissing', params: { percent } } }
         : {}),
     });
   }
 
   if (!converged) {
     findings.push({
-      key: 'pls.report.sample.notConverged',
+      key: 'analysis.pls.report.sample.notConverged',
       severity: 'problem',
-      action: { key: 'pls.report.action.simplifyModel' },
+      action: { key: 'analysis.pls.report.action.simplifyModel' },
     });
   }
 
-  return { titleKey: 'pls.report.section.sample', findings };
+  return { titleKey: 'analysis.pls.report.section.sample', findings };
 }
 
 /**
@@ -183,7 +190,7 @@ function constructSection(construct: ConstructAssessment): ReportSection {
   }
 
   return {
-    titleKey: 'pls.report.section.construct',
+    titleKey: 'analysis.pls.report.section.construct',
     findings: findings.map((finding) => ({
       ...finding,
       params: { construct: construct.construct, ...(finding.params ?? {}) },
@@ -205,11 +212,11 @@ function reflectiveFindings(construct: ConstructAssessment): Finding[] {
   for (const indicator of weak) {
     if (indicator.recommendation === 'remove') {
       findings.push({
-        key: 'pls.report.indicator.belowCritical',
+        key: 'analysis.pls.report.indicator.belowCritical',
         severity: 'problem',
         params: { indicator: indicator.indicator, loading: round(indicator.loading) },
         action: {
-          key: 'pls.report.action.removeIndicator',
+          key: 'analysis.pls.report.action.removeIndicator',
           params: { indicator: indicator.indicator },
         },
       });
@@ -220,7 +227,7 @@ function reflectiveFindings(construct: ConstructAssessment): Finding[] {
        * is weak and left to guess whether removing it would help.
        */
       findings.push({
-        key: 'pls.report.indicator.removalWouldFixAve',
+        key: 'analysis.pls.report.indicator.removalWouldFixAve',
         severity: 'attention',
         params: {
           indicator: indicator.indicator,
@@ -229,13 +236,13 @@ function reflectiveFindings(construct: ConstructAssessment): Finding[] {
           aveIfRemoved: round(indicator.aveIfRemoved ?? 0),
         },
         action: {
-          key: 'pls.report.action.considerRemoving',
+          key: 'analysis.pls.report.action.considerRemoving',
           params: { indicator: indicator.indicator },
         },
       });
     } else {
       findings.push({
-        key: 'pls.report.indicator.weakButKept',
+        key: 'analysis.pls.report.indicator.weakButKept',
         severity: 'attention',
         params: { indicator: indicator.indicator, loading: round(indicator.loading) },
       });
@@ -244,11 +251,11 @@ function reflectiveFindings(construct: ConstructAssessment): Finding[] {
 
   if (ave) {
     findings.push({
-      key: ave.verdict === 'met' ? 'pls.report.ave.met' : 'pls.report.ave.violated',
+      key: ave.verdict === 'met' ? 'analysis.pls.report.ave.met' : 'analysis.pls.report.ave.violated',
       severity: ave.verdict === 'met' ? 'ok' : 'problem',
       params: { value: round(ave.value), percent: Math.round(ave.value * 100) },
       ...(ave.verdict !== 'met'
-        ? { action: { key: 'pls.report.action.fixAve' } }
+        ? { action: { key: 'analysis.pls.report.action.fixAve' } }
         : {}),
     });
   }
@@ -261,23 +268,23 @@ function reflectiveFindings(construct: ConstructAssessment): Finding[] {
        * reliability without measuring more of the construct.
        */
       findings.push({
-        key: 'pls.report.reliability.tooHigh',
+        key: 'analysis.pls.report.reliability.tooHigh',
         severity: 'attention',
         params: { value: round(reliability.value) },
-        action: { key: 'pls.report.action.checkRedundancy' },
+        action: { key: 'analysis.pls.report.action.checkRedundancy' },
       });
     } else {
       findings.push({
         key: reliability.verdict === 'met'
-          ? 'pls.report.reliability.met'
-          : 'pls.report.reliability.violated',
+          ? 'analysis.pls.report.reliability.met'
+          : 'analysis.pls.report.reliability.violated',
         severity: reliability.verdict === 'met' ? 'ok' : 'problem',
         params: {
           value: round(reliability.value),
           alpha: round(construct.cronbachAlpha?.value ?? Number.NaN),
         },
         ...(reliability.verdict !== 'met'
-          ? { action: { key: 'pls.report.action.fixReliability' } }
+          ? { action: { key: 'analysis.pls.report.action.fixReliability' } }
           : {}),
       });
     }
@@ -285,7 +292,7 @@ function reflectiveFindings(construct: ConstructAssessment): Finding[] {
 
   /* A single-indicator construct makes these criteria undefined, not merely poor. */
   if (construct.indicators.length === 1) {
-    findings.push({ key: 'pls.report.construct.singleIndicator', severity: 'attention' });
+    findings.push({ key: 'analysis.pls.report.construct.singleIndicator', severity: 'attention' });
   }
 
   return findings;
@@ -298,7 +305,7 @@ function formativeFindings(construct: ConstructAssessment): Finding[] {
      * reader who does not see it will assume the missing reliability figures
      * are an omission rather than a decision.
      */
-    { key: 'pls.report.formative.criteria', severity: 'ok' },
+    { key: 'analysis.pls.report.formative.criteria', severity: 'ok' },
   ];
 
   const vif = construct.maxVif;
@@ -307,14 +314,14 @@ function formativeFindings(construct: ConstructAssessment): Finding[] {
     findings.push({
       key:
         vif.verdict === 'violated'
-          ? 'pls.report.formative.collinear'
+          ? 'analysis.pls.report.formative.collinear'
           : vif.verdict === 'borderline'
-            ? 'pls.report.formative.someCollinearity'
-            : 'pls.report.formative.acceptable',
+            ? 'analysis.pls.report.formative.someCollinearity'
+            : 'analysis.pls.report.formative.acceptable',
       severity: vif.verdict === 'violated' ? 'problem' : vif.verdict === 'borderline' ? 'attention' : 'ok',
       params: { value: round(vif.value) },
       ...(vif.verdict === 'violated'
-        ? { action: { key: 'pls.report.action.reviewFormativeItems' } }
+        ? { action: { key: 'analysis.pls.report.action.reviewFormativeItems' } }
         : {}),
     });
   }
@@ -345,10 +352,10 @@ function indicatorTable(construct: ConstructAssessment): ReportTable {
 
   return {
     headerKeys: [
-      'pls.report.table.indicator',
-      'pls.report.table.loading',
-      'pls.report.table.weight',
-      'pls.report.table.aveIfRemoved',
+      'analysis.pls.report.table.indicator',
+      'analysis.pls.report.table.loading',
+      'analysis.pls.report.table.weight',
+      'analysis.pls.report.table.aveIfRemoved',
     ],
     rows,
     flaggedRows: flagged,
@@ -380,12 +387,12 @@ function discriminantSection(discriminant: DiscriminantValidity): ReportSection 
       findings.push({
         key:
           criterion.verdict === 'violated'
-            ? 'pls.report.htmt.violated'
-            : 'pls.report.htmt.borderline',
+            ? 'analysis.pls.report.htmt.violated'
+            : 'analysis.pls.report.htmt.borderline',
         severity: criterion.verdict === 'violated' ? 'problem' : 'attention',
         params: { pair, value: round(criterion.value) },
         ...(criterion.verdict === 'violated'
-          ? { action: { key: 'pls.report.action.mergeOrRespecify', params: { pair } } }
+          ? { action: { key: 'analysis.pls.report.action.mergeOrRespecify', params: { pair } } }
           : {}),
       });
     }
@@ -396,7 +403,7 @@ function discriminantSection(discriminant: DiscriminantValidity): ReportSection 
 
   for (const failure of flFailures) {
     findings.push({
-      key: 'pls.report.fornellLarcker.violated',
+      key: 'analysis.pls.report.fornellLarcker.violated',
       severity: 'problem',
       params: {
         construct: failure.construct,
@@ -409,7 +416,7 @@ function discriminantSection(discriminant: DiscriminantValidity): ReportSection 
 
   for (const issue of discriminant.crossLoadingIssues) {
     findings.push({
-      key: 'pls.report.crossLoading',
+      key: 'analysis.pls.report.crossLoading',
       severity: 'attention',
       params: {
         indicator: issue.indicator,
@@ -417,21 +424,21 @@ function discriminantSection(discriminant: DiscriminantValidity): ReportSection 
         other: issue.higherWith,
       },
       action: {
-        key: 'pls.report.action.reviewIndicatorPlacement',
+        key: 'analysis.pls.report.action.reviewIndicatorPlacement',
         params: { indicator: issue.indicator, other: issue.higherWith },
       },
     });
   }
 
   if (findings.length === 0) {
-    findings.push({ key: 'pls.report.discriminant.allPass', severity: 'ok' });
+    findings.push({ key: 'analysis.pls.report.discriminant.allPass', severity: 'ok' });
   }
 
   return {
-    titleKey: 'pls.report.section.discriminant',
+    titleKey: 'analysis.pls.report.section.discriminant',
     findings,
     table: {
-      headerKeys: ['pls.report.table.pair', 'pls.report.table.htmt', 'pls.report.table.verdict'],
+      headerKeys: ['analysis.pls.report.table.pair', 'analysis.pls.report.table.htmt', 'analysis.pls.report.table.verdict'],
       rows,
       flaggedRows: flagged,
     },
@@ -446,7 +453,7 @@ function structuralSection(
 
   for (const endogenous of structural.endogenous) {
     findings.push({
-      key: 'pls.report.rSquared',
+      key: 'analysis.pls.report.rSquared',
       severity: 'ok',
       params: {
         construct: endogenous.construct,
@@ -465,8 +472,8 @@ function structuralSection(
       findings.push({
         key:
           endogenous.vifVerdict === 'violated'
-            ? 'pls.report.structuralVif.severe'
-            : 'pls.report.structuralVif.elevated',
+            ? 'analysis.pls.report.structuralVif.severe'
+            : 'analysis.pls.report.structuralVif.elevated',
         severity: endogenous.vifVerdict === 'violated' ? 'problem' : 'attention',
         params: { construct: endogenous.construct, value: round(endogenous.maxVif) },
       });
@@ -495,8 +502,8 @@ function structuralSection(
     if (interval) {
       findings.push({
         key: interval.significant
-          ? 'pls.report.path.significant'
-          : 'pls.report.path.notSignificant',
+          ? 'analysis.pls.report.path.significant'
+          : 'analysis.pls.report.path.notSignificant',
         severity: 'ok',
         params: {
           path: key,
@@ -516,7 +523,7 @@ function structuralSection(
      */
     if (interval?.significant && path.effectBand === 'none') {
       findings.push({
-        key: 'pls.report.path.significantButTrivial',
+        key: 'analysis.pls.report.path.significantButTrivial',
         severity: 'attention',
         params: { path: key, fSquared: round(path.fSquared) },
       });
@@ -524,17 +531,17 @@ function structuralSection(
   });
 
   return {
-    titleKey: 'pls.report.section.structural',
+    titleKey: 'analysis.pls.report.section.structural',
     findings,
     table: {
       headerKeys: [
-        'pls.report.table.path',
-        'pls.report.table.coefficient',
-        'pls.report.table.fSquared',
-        'pls.report.table.effect',
-        'pls.report.table.t',
-        'pls.report.table.p',
-        'pls.report.table.ci',
+        'analysis.pls.report.table.path',
+        'analysis.pls.report.table.coefficient',
+        'analysis.pls.report.table.fSquared',
+        'analysis.pls.report.table.effect',
+        'analysis.pls.report.table.t',
+        'analysis.pls.report.table.p',
+        'analysis.pls.report.table.ci',
       ],
       rows,
       flaggedRows: flagged,
@@ -545,7 +552,7 @@ function structuralSection(
 function bootstrapSection(bootstrap: BootstrapResult): ReportSection {
   const findings: Finding[] = [
     {
-      key: 'pls.report.bootstrap.summary',
+      key: 'analysis.pls.report.bootstrap.summary',
       severity: 'ok',
       params: {
         resamples: bootstrap.resamples,
@@ -564,7 +571,7 @@ function bootstrapSection(bootstrap: BootstrapResult): ReportSection {
     const percent = Math.round((bootstrap.failed / (bootstrap.resamples + bootstrap.failed)) * 100);
 
     findings.push({
-      key: 'pls.report.bootstrap.failures',
+      key: 'analysis.pls.report.bootstrap.failures',
       severity: percent > 5 ? 'attention' : 'ok',
       params: { failed: bootstrap.failed, percent },
     });
@@ -572,12 +579,12 @@ function bootstrapSection(bootstrap: BootstrapResult): ReportSection {
 
   /* Reproducibility: the seed is what lets a thesis produce the same numbers twice. */
   findings.push({
-    key: 'pls.report.bootstrap.seed',
+    key: 'analysis.pls.report.bootstrap.seed',
     severity: 'ok',
     params: { seed: bootstrap.seed },
   });
 
-  return { titleKey: 'pls.report.section.bootstrap', findings };
+  return { titleKey: 'analysis.pls.report.section.bootstrap', findings };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -599,7 +606,7 @@ function overallVerdict(sections: ReportSection[]): PlsReport['verdict'] {
   if (problems > 0) {
     return {
       severity: 'problem',
-      key: 'pls.report.verdict.problems',
+      key: 'analysis.pls.report.verdict.problems',
       params: { problems, attention },
     };
   }
@@ -607,12 +614,12 @@ function overallVerdict(sections: ReportSection[]): PlsReport['verdict'] {
   if (attention > 0) {
     return {
       severity: 'attention',
-      key: 'pls.report.verdict.attention',
+      key: 'analysis.pls.report.verdict.attention',
       params: { attention },
     };
   }
 
-  return { severity: 'ok', key: 'pls.report.verdict.sound', params: {} };
+  return { severity: 'ok', key: 'analysis.pls.report.verdict.sound', params: {} };
 }
 
 /* -------------------------------------------------------------------------- */

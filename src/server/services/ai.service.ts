@@ -559,6 +559,261 @@ Rules:
 }
 
 /**
+ * Breaks a research question into sub-questions worth searching separately.
+ *
+ * The step that makes deep research different from one long search. "How does
+ * remote work affect productivity" searched directly returns opinion pieces;
+ * split into "measured productivity effects", "moderating factors", "measurement
+ * methods" and "contradictory findings", it returns the literature.
+ *
+ * The reply is a plain list, parsed leniently — a model asked for five lines
+ * will occasionally number them, bullet them, or add a preamble, and rejecting
+ * that would fail the whole workflow over formatting.
+ */
+export async function planResearch(input: {
+  userId: string;
+  question: string;
+  locale: 'ar' | 'en';
+  maxQuestions: number;
+}): Promise<string[]> {
+  await assertCanUseAI(input.userId, 300);
+
+  const provider = await resolveProvider();
+
+  const system =
+    input.locale === 'ar'
+      ? `أنت مخطّط بحثي. حلّل سؤال الباحث إلى أسئلة فرعية قابلة للبحث.
+
+القواعد:
+- بين ٣ و${input.maxQuestions} أسئلة، كل سؤال في سطر.
+- كل سؤال يجب أن يكون قابلًا للبحث بذاته، لا مجرد إعادة صياغة للسؤال الأصلي.
+- غطِّ جوانب مختلفة: النتائج المُبلَّغة، العوامل المعدِّلة، طرق القياس، النتائج المتعارضة.
+- لا تكتب مقدّمة ولا ترقيمًا ولا شرحًا — الأسئلة فقط.`
+      : `You are a research planner. Break the researcher's question into searchable sub-questions.
+
+Rules:
+- Between 3 and ${input.maxQuestions} questions, one per line.
+- Each must be searchable on its own, not a rewording of the original.
+- Cover different angles: reported findings, moderating factors, measurement approaches, contradictory results.
+- No preamble, no numbering, no explanation — the questions only.`;
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system,
+    messages: [{ role: 'user', content: input.question }],
+    maxTokens: 400,
+    /* Low but not zero: some variety in angle is useful, invention is not. */
+    temperature: 0.4,
+  });
+
+  return result.text
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:[-*\u2022]|\d+[.)])\s*/, '').trim())
+    .filter((line) => line.length > 10 && line.length < 300)
+    .slice(0, input.maxQuestions);
+}
+
+/**
+ * States what the sources actually say about one sub-question.
+ *
+ * Separated from the writing step on purpose. A model asked to read sources and
+ * write a report in one pass will blend what it read with what it knows, and
+ * the join is invisible. Extracting first produces a record of what each source
+ * supports, and the writing step is then constrained to that record.
+ */
+export async function extractEvidence(input: {
+  userId: string;
+  subQuestion: string;
+  locale: 'ar' | 'en';
+  sources: { index: number; title: string; content: string; kind: string }[];
+}): Promise<string> {
+  await assertCanUseAI(input.userId, 500);
+
+  const provider = await resolveProvider();
+
+  const rendered = input.sources
+    .map(
+      (source) =>
+        `[${source.index}] (${source.kind}) ${source.title}\n${source.content.slice(0, 4000)}`,
+    )
+    .join('\n\n---\n\n');
+
+  const system =
+    input.locale === 'ar'
+      ? `استخرج ما تقوله المصادر عن السؤال المطروح، ولا شيء غير ذلك.
+
+القواعد:
+- كل جملة تنتهي برقم المصدر، هكذا [3].
+- لا تضف معلومة ليست في المصادر.
+- إن تعارضت المصادر، اذكر التعارض صراحةً مع رقمي المصدرين.
+- إن لم تجب المصادر عن السؤال، قل ذلك في جملة واحدة.
+- لا تكتب مقدّمة ولا خاتمة.`
+      : `Extract what the sources say about the question, and nothing else.
+
+Rules:
+- Every sentence ends with its source number, like [3].
+- Add nothing that is not in the sources.
+- Where sources disagree, say so explicitly and give both numbers.
+- If the sources do not answer the question, say so in one sentence.
+- No preamble, no conclusion.`;
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system,
+    messages: [{ role: 'user', content: `Question: ${input.subQuestion}\n\nSources:\n\n${rendered}` }],
+    maxTokens: 900,
+    temperature: 0.2,
+  });
+
+  return result.text;
+}
+
+/**
+ * Names what the evidence does not cover.
+ *
+ * The step that makes the report honest. Without it a synthesis fills its own
+ * gaps — smoothly, and in the same voice as the evidence — and a researcher
+ * cannot tell which parts rest on sources.
+ *
+ * The gaps also drive one more round of searching, so this is not only
+ * disclosure: it is what makes the workflow iterative rather than linear.
+ */
+export async function identifyGaps(input: {
+  userId: string;
+  question: string;
+  locale: 'ar' | 'en';
+  evidence: { subQuestion: string; findings: string }[];
+}): Promise<string[]> {
+  await assertCanUseAI(input.userId, 300);
+
+  const provider = await resolveProvider();
+
+  const rendered = input.evidence
+    .map((entry) => `Q: ${entry.subQuestion}\nFound: ${entry.findings.slice(0, 1500)}`)
+    .join('\n\n');
+
+  const system =
+    input.locale === 'ar'
+      ? `حدّد ما لم تجب عنه الأدلة المجمّعة بخصوص السؤال الأصلي.
+
+القواعد:
+- اكتب الثغرات فقط، كل ثغرة في سطر، بصيغة قابلة للبحث.
+- ثلاث ثغرات على الأكثر.
+- إن كانت الأدلة كافية، لا تكتب شيئًا إطلاقًا.
+- لا تخترع ثغرة لملء القائمة.`
+      : `Identify what the collected evidence does not answer about the original question.
+
+Rules:
+- Gaps only, one per line, phrased so they could be searched.
+- At most three.
+- If the evidence is sufficient, write nothing at all.
+- Do not invent a gap to fill the list.`;
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system,
+    messages: [{ role: 'user', content: `Original question: ${input.question}\n\n${rendered}` }],
+    maxTokens: 300,
+    temperature: 0.3,
+  });
+
+  return result.text
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:[-*\u2022]|\d+[.)])\s*/, '').trim())
+    .filter((line) => line.length > 10 && line.length < 300)
+    .slice(0, 3);
+}
+
+/**
+ * Writes the report from the extracted evidence.
+ *
+ * Given the evidence rather than the sources, which is the point of having
+ * extracted it: this step cannot reach past what the previous step established,
+ * so it cannot quietly add a fact between two cited ones.
+ *
+ * The gaps are passed in and required to appear. A report that omits its own
+ * limitations is the failure mode this whole workflow exists to avoid.
+ */
+export async function synthesiseReport(input: {
+  userId: string;
+  question: string;
+  locale: 'ar' | 'en';
+  evidence: { subQuestion: string; findings: string }[];
+  gaps: string[];
+  sources: { index: number; title: string; url: string; kind: string; year?: number; container?: string }[];
+}): Promise<string> {
+  await assertCanUseAI(input.userId, 1200);
+
+  const provider = await resolveProvider();
+
+  const evidenceBlock = input.evidence
+    .map((entry) => `## ${entry.subQuestion}\n${entry.findings}`)
+    .join('\n\n');
+
+  const sourceList = input.sources
+    .map(
+      (source) =>
+        `[${source.index}] ${source.title}${source.year ? ` (${source.year})` : ''} — ${source.kind === 'academic' ? 'academic' : 'web'}${source.container ? `, ${source.container}` : ''}`,
+    )
+    .join('\n');
+
+  const gapBlock =
+    input.gaps.length > 0 ? input.gaps.map((gap) => `- ${gap}`).join('\n') : '(none)';
+
+  const system =
+    input.locale === 'ar'
+      ? `اكتب تقريرًا بحثيًا من الأدلة المستخرجة أدناه وحدها.
+
+القواعد:
+- كل معلومة تحمل رقم مصدرها، هكذا [3] أو [2][5].
+- لا تضف أي معلومة ليست في الأدلة، مهما بدت بديهية.
+- اذكر التعارضات بين المصادر بدل تجاوزها.
+- ميّز بين المصادر الأكاديمية ومصادر الويب حين يكون التمييز مهمًّا للاستنتاج.
+- أنهِ التقرير بقسم "حدود هذه المراجعة" يذكر الثغرات المذكورة أدناه حرفيًا؛ لا تحذف أيًّا منها ولا تخفّف صياغتها.
+- استخدم Markdown بعناوين واضحة.`
+      : `Write a research report from the extracted evidence below, and nothing else.
+
+Rules:
+- Every claim carries its source number, like [3] or [2][5].
+- Add nothing that is not in the evidence, however obvious it seems.
+- Report disagreements between sources rather than smoothing them over.
+- Distinguish academic sources from web sources where the distinction bears on the conclusion.
+- End with a "Limitations of this review" section stating the gaps listed below, verbatim; do not omit or soften any of them.
+- Use Markdown with clear headings.`;
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system,
+    messages: [
+      {
+        role: 'user',
+        content: `Research question: ${input.question}\n\nEvidence:\n\n${evidenceBlock}\n\nGaps that must appear in the limitations section:\n${gapBlock}\n\nSources:\n${sourceList}`,
+      },
+    ],
+    maxTokens: 3000,
+    temperature: 0.4,
+  });
+
+  return result.text;
+}
+
+/**
  * Describes academic sources that were actually retrieved.
  *
  * The rules given to the model are the same ones the results chapter uses for

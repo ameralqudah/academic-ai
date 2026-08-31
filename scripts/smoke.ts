@@ -29,6 +29,7 @@ import {
 } from '@/agents/modes';
 import { isPublicUrl } from '@/server/knowledge/fetch-content';
 import { SerperProvider } from '@/server/knowledge/providers/serper';
+import { deduplicate, normaliseUrl } from '@/server/research/dedupe';
 import { containsMath } from '@/components/chat/markdown';
 import {
   buildDraftFromStructure,
@@ -1487,6 +1488,157 @@ assertTrue(
 assertTrue(
   'and says web sources are not peer-reviewed references',
   aiSource.includes('rather than peer-reviewed references'),
+);
+
+
+console.log('\ndeep research');
+
+/*
+ * The workflow, tested where it can be tested without a network: deduplication,
+ * URL normalisation, and the structural guarantees that make the report
+ * trustworthy.
+ *
+ * The model calls are not exercised here — they need a provider key — but what
+ * they are *told* is, because the instructions are what stand between a cited
+ * report and a fluent invention.
+ */
+
+/*
+ * Five sub-questions on one topic return heavily overlapping results. Without
+ * deduplication the report cites the same paper as [3], [11] and [17], which
+ * reads as three studies agreeing.
+ */
+{
+  const now = new Date().toISOString();
+  const source = (url: string, doi?: string, extra: Record<string, unknown> = {}) => ({
+    kind: 'academic' as const,
+    title: 'A study',
+    url,
+    doi,
+    language: 'en' as const,
+    provider: 'test',
+    retrievedAt: now,
+    ...extra,
+  });
+
+  const { unique, removed } = deduplicate([
+    source('https://a.com/1', '10.1/abc'),
+    source('https://b.com/mirror', '10.1/ABC'),
+    source('https://c.com/other', '10.2/xyz'),
+  ]);
+
+  check('the same DOI in different places is one source', unique.length, 2);
+  check('and the duplicate is counted', removed, 1);
+
+  const byUrl = deduplicate([
+    source('https://example.com/page'),
+    source('https://www.example.com/page/'),
+    source('https://example.com/page?utm_source=twitter'),
+    source('https://example.com/different'),
+  ]);
+
+  check('www, trailing slash and campaign parameters are one page', byUrl.unique.length, 2);
+}
+
+check('URLs normalise past www', normaliseUrl('https://www.example.com/x'), 'example.com/x');
+check('and a trailing slash', normaliseUrl('https://example.com/x/'), 'example.com/x');
+check('and campaign parameters', normaliseUrl('https://example.com/x?utm_source=a'), 'example.com/x');
+assertTrue(
+  'but a real query parameter is kept, since it changes the page',
+  normaliseUrl('https://example.com/search?q=term').includes('q=term'),
+);
+
+/*
+ * The instructions are the guardrail. A model asked to research and write in one
+ * pass blends what it read with what it knows, invisibly — which is the failure
+ * this whole workflow is built to avoid.
+ */
+const aiForResearch = await readFile('src/server/services/ai.service.ts', 'utf8');
+
+assertTrue('planning asks for searchable sub-questions', aiForResearch.includes('searchable on its own'));
+assertTrue(
+  'extraction requires a source number on every sentence',
+  aiForResearch.includes('Every sentence ends with its source number'),
+);
+assertTrue(
+  'and forbids adding anything',
+  aiForResearch.includes('Add nothing that is not in the sources'),
+);
+assertTrue(
+  'disagreements are surfaced rather than smoothed over',
+  aiForResearch.includes('Where sources disagree'),
+);
+assertTrue(
+  'gap detection is told not to invent gaps to fill a list',
+  aiForResearch.includes('Do not invent a gap'),
+);
+assertTrue(
+  'and to write nothing when the evidence is sufficient',
+  aiForResearch.includes('If the evidence is sufficient, write nothing'),
+);
+
+/*
+ * The limitations section is required verbatim. A report that omits its own
+ * gaps is the thing that makes an unreliable review look like a reliable one.
+ */
+assertTrue(
+  'the report must state its gaps verbatim',
+  aiForResearch.includes('verbatim') && aiForResearch.includes('do not omit or soften'),
+);
+assertTrue(
+  'and must distinguish academic from web sources',
+  aiForResearch.includes('Distinguish academic sources from web sources'),
+);
+
+/* The pipeline is a workflow, not one prompt. */
+const pipelineSource = await readFile('src/server/research/pipeline.ts', 'utf8');
+
+for (const stage of [
+  'planResearch',
+  'searchAcademic',
+  'deduplicate',
+  'fetchSources',
+  'extractEvidence',
+  'identifyGaps',
+  'synthesiseReport',
+]) {
+  assertTrue(`the pipeline runs ${stage}`, pipelineSource.includes(stage));
+}
+
+assertTrue(
+  'it searches both academic and web sources',
+  pipelineSource.includes('searchAcademic') && pipelineSource.includes('web.search'),
+);
+assertTrue('progress is reported through the run', pipelineSource.includes('onProgress'));
+assertTrue('and it can be cancelled between stages', pipelineSource.includes('shouldStop'));
+
+/*
+ * Bounded at one extra round. The questions a first pass could not answer are
+ * usually questions the sources do not contain, and searching again finds the
+ * same sources — so what remains is reported as a gap.
+ */
+assertTrue('gap searching is bounded', pipelineSource.includes('GAP_ROUNDS'));
+
+/* Long-running work must not sit in a request. */
+const researchService = await readFile('src/server/services/deep-research.service.ts', 'utf8');
+assertTrue('research runs as a background job', researchService.includes('jobsRepo.create'));
+assertTrue('reusing the existing jobs table', researchService.includes("kind: 'research.deep'"));
+assertTrue(
+  'and refuses to run without a web provider rather than degrading silently',
+  researchService.includes('isWebSearchConfigured()'),
+);
+assertTrue(
+  'a floating promise carries a rejection handler',
+  researchService.includes('.catch((error: unknown)'),
+);
+
+/* The route returns a job, never a report — the work outlives the request. */
+const researchRoute = await readFile('src/app/api/deep-research/route.ts', 'utf8');
+assertTrue('the route returns a job id', researchRoute.includes('job: { id: job.id'));
+assertTrue('with 202, since the work is not done', researchRoute.includes('status: 202'));
+assertTrue(
+  'and is rate limited, because one run costs fifteen searches',
+  researchRoute.includes('rateLimit'),
 );
 
 console.log('\nPLS conversational extraction');

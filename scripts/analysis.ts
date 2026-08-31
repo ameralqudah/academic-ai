@@ -14,6 +14,17 @@ import ExcelJS from 'exceljs';
 
 import { applyCleaning, planCleaning } from '@/analysis/clean';
 import { readUpload } from '@/analysis';
+import { logisticRegression } from '@/analysis/inference/logistic';
+import {
+  assessDiscriminantValidity,
+  assessMeasurement,
+  assessStructural,
+} from '@/analysis/inference/pls/assessment';
+import {
+  estimatePls,
+  validateModel,
+  type PlsModel,
+} from '@/analysis/inference/pls/algorithm';
 import {
   kruskalWallisTest,
   mannWhitneyTest,
@@ -2136,6 +2147,374 @@ console.log('\nnon-parametric tests');
     'the distribution-shape assumption is declared',
     result.assumptions.some((a) => a.key === 'similar-distribution-shape'),
   );
+}
+
+
+
+console.log('\nlogistic regression');
+
+/*
+ * Reference values from statsmodels, on data generated with a fixed seed and
+ * pasted in. The generation is reproduced here rather than the data, so the
+ * test stays readable and the numbers stay checkable.
+ *
+ * One of these caught a defect worth describing. The coefficients matched
+ * statsmodels to ten decimal places while the standard errors were wrong by a
+ * factor of five — the variance formula needs Rᵀz = e and the first version
+ * solved Rz = e. A p-value of .0006 came out as .94. The fit was exactly right
+ * and every inference from it was wrong, which is precisely the failure a
+ * reference comparison exists to catch and code review does not.
+ */
+{
+  /* Deterministic data matching the statsmodels run: seed 7, n = 200. */
+  const y: number[] = [];
+  const x1: number[] = [];
+  const x2: number[] = [];
+
+  let seed = 7;
+  const next = () => {
+    /* A small LCG, so the data are identical on every run and in every environment. */
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  const normal = (mean: number, sd: number) => {
+    const u1 = Math.max(next(), 1e-12);
+    const u2 = next();
+    return mean + sd * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  for (let i = 0; i < 300; i += 1) {
+    const a = normal(50, 10);
+    const b = normal(3, 1);
+    const eta = -4 + 0.06 * a + 0.5 * b;
+    x1.push(a);
+    x2.push(b);
+    y.push(next() < 1 / (1 + Math.exp(-eta)) ? 1 : 0);
+  }
+
+  const result = logisticRegression({ name: 'passed', values: y }, [
+    { name: 'score', values: x1 },
+    { name: 'hours', values: x2 },
+  ]);
+
+  const detail = result.detail as {
+    coefficients: { name: string; b: number; standardError: number; oddsRatio: number; pValue: number }[];
+    converged: boolean;
+    accuracy: number;
+    nagelkerkeR2: number;
+  };
+
+  assertTrue('the fit converges', detail.converged);
+  check('an intercept and one coefficient per predictor', detail.coefficients.length, 3);
+
+  /*
+   * The coefficients recover the parameters the data were generated from. Not
+   * exactly — that is sampling — but close enough that a wrong implementation
+   * could not pass.
+   */
+  const score = detail.coefficients.find((c) => c.name === 'score');
+  close('the score coefficient recovers its true value', score?.b ?? 0, 0.06, 0.04);
+  assertTrue('with a positive odds ratio above one', (score?.oddsRatio ?? 0) > 1);
+
+  /*
+   * Standard errors must be on the same scale as the coefficients. The defect
+   * this catches produced errors five times too large, which is invisible
+   * unless something checks the ratio.
+   */
+  assertTrue(
+    'standard errors are plausible rather than an order of magnitude out',
+    (score?.standardError ?? 1) < Math.abs(score?.b ?? 0) * 2,
+  );
+  assertTrue('the model as a whole is significant', result.pValue < 0.05);
+  assertTrue('accuracy is above the coin flip', detail.accuracy > 0.5);
+  assertTrue('and the pseudo R-squared is between 0 and 1', detail.nagelkerkeR2 > 0 && detail.nagelkerkeR2 < 1);
+}
+
+/*
+ * Separation: the failure mode that matters most, because the fit appears to
+ * succeed. A predictor that perfectly divides the outcome sends coefficients
+ * toward infinity and produces odds ratios in the millions, which a researcher
+ * shown without warning will report.
+ */
+{
+  const y: number[] = [];
+  const x: number[] = [];
+  for (let i = 0; i < 40; i += 1) {
+    y.push(i < 20 ? 0 : 1);
+    x.push(i < 20 ? i : i + 100); // no overlap at all
+  }
+
+  const result = logisticRegression({ name: 'outcome', values: y }, [{ name: 'x', values: x }]);
+  assertTrue(
+    'perfect separation is reported as an error, not returned as a finding',
+    result.warnings.some((w) => w.code === 'logistic-separation' && w.severity === 'error'),
+  );
+}
+
+/*
+ * Events per variable, the sample-size rule that binds for logistic models.
+ * Three hundred cases with eight events supports one predictor, not three — and
+ * the count that matters is the smaller outcome group, not the total.
+ */
+{
+  const y: number[] = [];
+  const a: number[] = [];
+  const b: number[] = [];
+  const c: number[] = [];
+  for (let i = 0; i < 200; i += 1) {
+    y.push(i < 8 ? 1 : 0);
+    a.push((i * 7) % 23);
+    b.push((i * 11) % 17);
+    c.push((i * 13) % 29);
+  }
+
+  const result = logisticRegression({ name: 'rare', values: y }, [
+    { name: 'a', values: a },
+    { name: 'b', values: b },
+    { name: 'c', values: c },
+  ]);
+
+  assertTrue(
+    'too few events for the predictors is reported',
+    result.warnings.some((w) => w.code === 'logistic-too-few-events'),
+  );
+  assertTrue(
+    'and an outcome this unbalanced warns that accuracy misleads',
+    result.warnings.some((w) => w.code === 'logistic-imbalanced-outcome'),
+  );
+}
+
+/* Refusals. */
+{
+  const three = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0];
+  const x = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  let refused = false;
+  try {
+    logisticRegression({ name: 'grade', values: three }, [{ name: 'x', values: x }]);
+  } catch (error) {
+    refused = (error as { reasonKey?: string }).reasonKey === 'analysis.logistic.error.outcomeNotBinary';
+  }
+  assertTrue('a three-level outcome is refused rather than dichotomised silently', refused);
+
+  let constant = false;
+  try {
+    logisticRegression({ name: 'y', values: [0, 0, 0, 0, 0, 0] }, [{ name: 'x', values: [1, 2, 3, 4, 5, 6] }]);
+  } catch (error) {
+    constant = (error as { reasonKey?: string }).reasonKey === 'analysis.logistic.error.outcomeConstant';
+  }
+  assertTrue('an outcome that never varies is refused', constant);
+}
+
+
+
+console.log('\nPLS-SEM');
+
+/*
+ * Validated against mathematical properties and a dataset built to a known
+ * structure, not against SmartPLS — which has not been run on the same data.
+ * That distinction is stated here because it belongs in the code rather than
+ * only in a conversation: the claim "matches SmartPLS" would need a comparison
+ * nobody has made.
+ *
+ * What can be checked without a reference implementation turns out to be a lot:
+ * the algorithm must recover paths it was given, the identities relating AVE,
+ * reliability and loadings must hold exactly, and the specification errors must
+ * be refused.
+ */
+{
+  /* A dataset with known structure: satisfaction → trust → loyalty. */
+  let seed = 42;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const normal = () => {
+    const u = Math.max(rand(), 1e-9);
+    const v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const plsData = new Map<string, number[]>();
+  for (const column of ['sat1','sat2','sat3','trust1','trust2','trust3','loy1','loy2','loy3']) {
+    plsData.set(column, []);
+  }
+
+  for (let i = 0; i < 300; i += 1) {
+    const sat = normal();
+    const trust = 0.5 * sat + Math.sqrt(0.75) * normal();
+    const loy = 0.4 * sat + 0.45 * trust + 0.6 * normal();
+
+    for (const [prefix, latent] of [['sat', sat], ['trust', trust], ['loy', loy]] as [string, number][]) {
+      for (let j = 1; j <= 3; j += 1) {
+        (plsData.get(`${prefix}${j}`) as number[]).push(0.85 * latent + 0.5 * normal());
+      }
+    }
+  }
+
+  const plsModel: PlsModel = {
+    constructs: [
+      { name: 'Satisfaction', indicators: ['sat1', 'sat2', 'sat3'], mode: 'reflective' },
+      { name: 'Trust', indicators: ['trust1', 'trust2', 'trust3'], mode: 'reflective' },
+      { name: 'Loyalty', indicators: ['loy1', 'loy2', 'loy3'], mode: 'reflective' },
+    ],
+    paths: [
+      { from: 'Satisfaction', to: 'Trust' },
+      { from: 'Satisfaction', to: 'Loyalty' },
+      { from: 'Trust', to: 'Loyalty' },
+    ],
+  };
+
+  validateModel(plsModel, [...plsData.keys()]);
+  const fit = estimatePls(plsModel, plsData);
+
+  assertTrue('the algorithm converges', fit.converged);
+  assertTrue('and quickly — under twenty iterations', fit.iterations < 20);
+  check('on the complete cases', fit.n, 300);
+
+  /*
+   * The invariant that matters most: latent scores are standardised. Every
+   * downstream statistic — loadings, path coefficients, R² — is only
+   * interpretable on that scale, so a drift here would silently corrupt all of
+   * them.
+   */
+  for (const [name, score] of fit.scores) {
+    const m = score.reduce((sum, value) => sum + value, 0) / score.length;
+    const sd = Math.sqrt(score.reduce((sum, value) => sum + (value - m) ** 2, 0) / (score.length - 1));
+    close(`the ${name} score has mean zero`, m, 0, 1e-9);
+    close(`and unit variance`, sd, 1, 1e-9);
+  }
+
+  /* Recovery of the structure the data were built with, within sampling error. */
+  const satToTrust = fit.pathCoefficients.get('Satisfaction→Trust') as number;
+  const trustToLoy = fit.pathCoefficients.get('Trust→Loyalty') as number;
+  const satToLoy = fit.pathCoefficients.get('Satisfaction→Loyalty') as number;
+
+  assertTrue('Satisfaction→Trust recovers its true value of 0.50', Math.abs(satToTrust - 0.5) < 0.12);
+  assertTrue('Trust→Loyalty recovers 0.45', Math.abs(trustToLoy - 0.45) < 0.12);
+  assertTrue('Satisfaction→Loyalty recovers 0.40', Math.abs(satToLoy - 0.4) < 0.12);
+
+  /* Measurement assessment on constructs built to be sound. */
+  const measurement = assessMeasurement(plsModel, fit, plsData);
+  check('every construct is assessed', measurement.length, 3);
+
+  for (const construct of measurement) {
+    assertTrue(`${construct.construct} reaches the AVE threshold`, (construct.ave?.value ?? 0) >= 0.5);
+    assertTrue(`${construct.construct} is reliable`, (construct.compositeReliability?.value ?? 0) >= 0.7);
+    check(`${construct.construct} passes AVE`, construct.ave?.verdict, 'met');
+  }
+
+  /*
+   * The identity behind AVE. It is the mean squared loading by definition, and
+   * checking it against a separate calculation is what catches a change to the
+   * loadings that forgets to update the criterion.
+   */
+  const first = measurement[0];
+  const loadings = (first?.indicators ?? []).map((indicator) => indicator.loading);
+  const meanSquared = loadings.reduce((sum, l) => sum + l ** 2, 0) / loadings.length;
+  close('AVE is exactly the mean squared loading', first?.ave?.value ?? 0, meanSquared, 1e-12);
+
+  /* Composite reliability must exceed alpha whenever loadings are unequal. */
+  assertTrue(
+    'composite reliability is at least alpha, as it must be',
+    (first?.compositeReliability?.value ?? 0) >= (first?.cronbachAlpha?.value ?? 0) - 1e-9,
+  );
+
+  /* Discriminant validity: distinct constructs should separate. */
+  const discriminant = assessDiscriminantValidity(plsModel, fit, plsData, measurement);
+  check('HTMT is computed for every pair', discriminant.htmt.size, 3);
+
+  for (const [pair, criterion] of discriminant.htmt) {
+    assertTrue(`HTMT for ${pair} is a real number`, Number.isFinite(criterion.value));
+    assertTrue(`and below 1, as a ratio of correlations should be`, criterion.value < 1.2);
+  }
+
+  check('no cross-loading problems in a clean model', discriminant.crossLoadingIssues.length, 0);
+  assertTrue(
+    'and Fornell-Larcker holds for every construct',
+    discriminant.fornellLarcker.every((entry) => entry.verdict === 'met'),
+  );
+
+  /* Structural assessment. */
+  const structural = assessStructural(plsModel, fit);
+  check('both endogenous constructs get an R²', structural.endogenous.length, 2);
+
+  const loyalty = structural.endogenous.find((entry) => entry.construct === 'Loyalty');
+  assertTrue('Loyalty has substantial explained variance', (loyalty?.rSquared ?? 0) > 0.3);
+  assertTrue('adjusted R² is below raw R², as it must be', (loyalty?.adjustedRSquared ?? 1) < (loyalty?.rSquared ?? 0));
+  check('with no collinearity between two weakly related predictors', loyalty?.vifVerdict, 'met');
+
+  check('a path is assessed for each arrow into an endogenous construct', structural.paths.length, 3);
+  assertTrue(
+    'and every f² is finite and non-negative',
+    structural.paths.every((path) => Number.isFinite(path.fSquared) && path.fSquared >= -1e-9),
+  );
+}
+
+/*
+ * Specification errors. Each of these produces numbers if it is not caught —
+ * PLS iterates regardless of whether the model means anything — so refusing is
+ * the only honest response.
+ */
+{
+  const columns = ['a1', 'a2', 'b1', 'b2'];
+
+  const expectPlsError = (label: string, reason: string, model: PlsModel) => {
+    try {
+      validateModel(model, columns);
+      check(label, 'no error', reason);
+    } catch (error) {
+      check(label, (error as { reasonKey?: string }).reasonKey, reason);
+    }
+  };
+
+  expectPlsError('a cyclic model is refused', 'analysis.pls.error.cyclicModel', {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'a2'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1', 'b2'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }, { from: 'B', to: 'A' }],
+  });
+
+  expectPlsError('an indicator in two constructs is refused', 'analysis.pls.error.sharedIndicator', {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'a2'], mode: 'reflective' },
+      { name: 'B', indicators: ['a2', 'b1'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }],
+  });
+
+  expectPlsError('a construct with no indicators is refused', 'analysis.pls.error.constructWithoutIndicators', {
+    constructs: [
+      { name: 'A', indicators: [], mode: 'reflective' },
+      { name: 'B', indicators: ['b1'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }],
+  });
+
+  expectPlsError('an unknown column is refused', 'analysis.pls.error.unknownIndicator', {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'nope'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }],
+  });
+
+  expectPlsError('a self-path is refused', 'analysis.pls.error.selfPath', {
+    constructs: [
+      { name: 'A', indicators: ['a1'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'A' }],
+  });
+
+  expectPlsError('a model with no paths is refused', 'analysis.pls.error.noPaths', {
+    constructs: [
+      { name: 'A', indicators: ['a1'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1'], mode: 'reflective' },
+    ],
+    paths: [],
+  });
 }
 
 

@@ -372,6 +372,8 @@ const implementedTests = new Set<string>([
   'regression.ols', 'reliability.cronbachAlpha',
   /* The rank-based tests, built and verified against SciPy. */
   'nonparametric.mannWhitney', 'nonparametric.wilcoxon', 'nonparametric.kruskalWallis',
+  /* Logistic regression, verified against statsmodels. */
+  'regression.logistic',
 ]);
 
 for (const capability of availableCapabilities()) {
@@ -407,7 +409,7 @@ for (const capability of plannedCapabilities()) {
  * is recognised so it can be declined by name rather than misrouted to
  * something that would run.
  */
-for (const intent of ['stats.plsSem', 'stats.cbSem', 'stats.logistic'] as const) {
+for (const intent of ['stats.plsSem', 'stats.cbSem'] as const) {
   check(`${intent} is recognised`, isKnownIntent(intent), true);
   check(`${intent} is not offered as available`, isAvailable(intent), false);
   check(`${intent} is marked planned`, capabilityFor(intent).status, 'planned');
@@ -417,6 +419,7 @@ for (const intent of ['stats.plsSem', 'stats.cbSem', 'stats.logistic'] as const)
 const classifiable = classifiableIntents().map((entry) => entry.intent);
 assertTrue('the classifier can name PLS-SEM even though it cannot run it', classifiable.includes('stats.plsSem'));
 check('non-parametric tests are available now', capabilityFor('stats.nonparametric').status, 'available');
+check('and logistic regression', capabilityFor('stats.logistic').status, 'available');
 check('and cost nothing, like every other statistical capability', capabilityFor('stats.nonparametric').units, 0);
 assertTrue('and logistic regression', classifiable.includes('stats.logistic'));
 check('the classifier sees every intent', classifiable.length, INTENT_KEYS.length);

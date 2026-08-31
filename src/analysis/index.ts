@@ -44,6 +44,7 @@ export {
   toNumber,
   variance,
 } from './stats-core';
+export { logisticRegression, LogisticError } from './inference/logistic';
 export {
   kruskalWallisTest,
   mannWhitneyTest,

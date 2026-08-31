@@ -105,6 +105,7 @@ const IMPLEMENTED: ReadonlySet<TestKey> = new Set<TestKey>([
   'nonparametric.mannWhitney',
   'nonparametric.wilcoxon',
   'nonparametric.kruskalWallis',
+  'regression.logistic',
 ]);
 
 /**

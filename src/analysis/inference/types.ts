@@ -42,6 +42,7 @@ export type TestKey =
   | 'chiSquare.independence'
   | 'chiSquare.goodnessOfFit'
   | 'regression.ols'
+  | 'regression.logistic'
   | 'normality.shapiroWilk'
   | 'homogeneity.levene'
   | 'reliability.cronbachAlpha'

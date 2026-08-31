@@ -867,6 +867,33 @@
         "tooFewPairs": "Too few non-zero differences ({n}); at least {minimum} are needed.",
         "tooFewGroups": "Kruskal-Wallis needs at least three groups (found {groups}). Use Mann-Whitney for two."
       }
+    },
+    "logistic": {
+      "error": {
+        "noPredictors": "A logistic regression needs at least one predictor.",
+        "noCompleteCases": "There are no complete cases after removing missing values.",
+        "outcomeNotBinary": "The outcome \"{variable}\" has {levels} levels; logistic regression needs a binary one.",
+        "outcomeConstant": "The outcome \"{variable}\" never varies — every case has the same value.",
+        "tooFewCases": "Too few cases ({n}) for {predictors} predictors; at least {minimum} are needed.",
+        "constantPredictor": "The predictor \"{variable}\" does not vary, so it cannot explain anything.",
+        "singular": "The model could not be fitted — a predictor duplicates another or is a linear combination."
+      }
+    },
+    "pls": {
+      "error": {
+        "tooFewConstructs": "The model needs at least two latent constructs (found {constructs}).",
+        "noPaths": "The model has no structural paths; specify the relationships between constructs.",
+        "duplicateConstruct": "The construct \"{construct}\" is defined twice.",
+        "constructWithoutIndicators": "The construct \"{construct}\" has no indicators.",
+        "unknownIndicator": "The indicator \"{indicator}\" is not in the file (construct \"{construct}\").",
+        "sharedIndicator": "The indicator \"{indicator}\" belongs to both \"{first}\" and \"{second}\"; an indicator cannot measure two constructs.",
+        "unknownConstructInPath": "A path refers to an undefined construct: \"{construct}\".",
+        "selfPath": "The construct \"{construct}\" cannot affect itself.",
+        "cyclicModel": "The model contains a cycle ({cycle}); PLS requires a recursive model.",
+        "tooFewCases": "Too few complete cases ({n}); at least {minimum} are needed.",
+        "constantIndicator": "The indicator \"{indicator}\" does not vary — every response is identical.",
+        "singularConstruct": "Two indicators are identical or one is a linear combination of others, so there is no unique solution."
+      }
     }
   },
   "agent": {
@@ -958,7 +985,8 @@
       "nonparametric_wilcoxon": "Wilcoxon signed-rank",
       "nonparametric_kruskalWallis": "Kruskal-Wallis",
       "normality_shapiroWilk": "Shapiro–Wilk",
-      "homogeneity_levene": "Levene's test"
+      "homogeneity_levene": "Levene's test",
+      "regression_logistic": "Logistic regression"
     },
     "intent": {
       "data_inspect": "Inspect data",
@@ -986,7 +1014,6 @@
       "generic": "That is not available yet.",
       "plsSem": "PLS-SEM is not built yet. It is coming, and we would rather say so than hand you approximate results from a different test.",
       "cbSem": "CB-SEM is not built yet — it is deferred to a later stage.",
-      "logistic": "Logistic regression is not built yet. Your outcome is categorical, and a linear regression would not be valid for it.",
       "surveyGenerator": "Questionnaire generation is not available yet.",
       "test": {
         "nonparametric_mannWhitney": "The right test for your data is Mann–Whitney U, which is not built yet.",
@@ -1047,7 +1074,10 @@
       "zero-differences-dropped": "{dropped} zero differences were dropped; the test ran on {remaining} cases.",
       "nonparametric-normal-approximation": "The sample is small ({n}); the p-value is a normal approximation.",
       "nonparametric-approximate-due-to-ties": "Ties made the exact calculation invalid; the normal approximation was used.",
-      "omnibus-needs-posthoc": "The result is significant but does not say which groups differ; a post-hoc test is needed."
+      "omnibus-needs-posthoc": "The result is significant but does not say which groups differ; a post-hoc test is needed.",
+      "logistic-separation": "Complete separation: a predictor divides the outcome perfectly, so the coefficients cannot be estimated and the odds ratios are meaningless. Remove the predictor or merge its categories.",
+      "logistic-too-few-events": "Only {events} cases in the smaller outcome group for {predictors} predictors ({ratio} each); at least {recommended} is recommended.",
+      "logistic-imbalanced-outcome": "The outcome is unbalanced ({percent}%); predicting the majority class alone would score {baseline}%, so accuracy alone is misleading."
     },
     "type": {
       "likert": "Likert",

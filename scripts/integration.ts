@@ -1111,10 +1111,21 @@ async function main() {
   assertTrue('and something else offered instead', (unavailable?.alternatives.length ?? 0) > 0);
   assertTrue('and no analysis is produced', !kinds(plsSem).includes('result'));
 
-  check(
-    'logistic regression is declined the same way',
-    (await drive('stats.logistic')).some((event) => event.type === 'unavailable'),
-    true,
+  /*
+   * Logistic regression used to be declined here, and this assertion checked
+   * that. It is built now, so what matters is the opposite: the request must
+   * reach the agent rather than being refused. The refusal path is still
+   * exercised above by PLS-SEM, which genuinely is not built.
+   */
+  const logisticRun = await drive('stats.logistic', {
+    roles: [
+      { column: 'gender', role: 'dependent' },
+      { column: 'score', role: 'independent' },
+    ],
+  });
+  assertTrue(
+    'logistic regression is no longer declined',
+    !logisticRun.some((event) => event.type === 'unavailable'),
   );
 
   /* Without confirmed roles the agent asks rather than deciding for the researcher. */

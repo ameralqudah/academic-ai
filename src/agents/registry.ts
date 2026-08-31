@@ -281,14 +281,20 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
     estimatedCalls: 0,
     unavailableReason: 'agent.unavailable.cbSem',
   },
+  /**
+   * Built. A great deal of education and management research asks whether
+   * something happened — passed, continued, adopted — and linear regression is
+   * invalid for it. The recommender has been naming this and declining to run
+   * it since it was written.
+   */
   'stats.logistic': {
     intent: 'stats.logistic',
-    status: 'planned',
+    status: 'available',
     agent: 'statistics',
     requiresDataset: true,
+    tests: ['regression.logistic'],
     units: 0,
     estimatedCalls: 0,
-    unavailableReason: 'agent.unavailable.logistic',
   },
   /**
    * The non-parametric family. Recognised because the recommender already names

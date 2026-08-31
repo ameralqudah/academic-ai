@@ -36,6 +36,7 @@ import {
   independentTTest,
   kruskalWallisTest,
   linearRegression,
+  logisticRegression,
   mannWhitneyTest,
   oneSampleTTest,
   oneWayAnova,
@@ -75,7 +76,8 @@ export type AnalysisTestKey =
   | 'reliability.cronbachAlpha'
   | 'nonparametric.mannWhitney'
   | 'nonparametric.wilcoxon'
-  | 'nonparametric.kruskalWallis';
+  | 'nonparametric.kruskalWallis'
+  | 'regression.logistic';
 
 export interface AnalysisRequest {
   datasetId: string;
@@ -474,6 +476,30 @@ function compute(
       const group = requireColumn(columns.grouping, 'grouping');
       const { labels, groups } = groupedColumn(dataset, value, group);
       return kruskalWallisTest(groups, labels);
+    }
+
+    /*
+     * Logistic regression, for a binary outcome. Same column shape as the
+     * linear model, so a researcher whose outcome turned out to be pass/fail
+     * rather than a score can switch without respecifying anything.
+     */
+    case 'regression.logistic': {
+      const target = requireColumn(columns.dependent, 'dependent');
+      const predictors = columns.independents ?? [];
+
+      if (predictors.length === 0) {
+        throw new AppError(
+          'VALIDATION',
+          'A logistic regression needs at least one predictor.',
+          'الانحدار اللوجستي يحتاج متغيّرًا مستقلًا واحدًا على الأقل.',
+        );
+      }
+
+      return logisticRegression(
+        { name: target, values: alignedColumn(dataset, target) },
+        predictors.map((name) => ({ name, values: alignedColumn(dataset, name) })),
+        { confidenceLevel: level },
+      );
     }
 
     case 'reliability.cronbachAlpha': {

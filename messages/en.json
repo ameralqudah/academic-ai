@@ -1337,5 +1337,42 @@
       "interval": "interval",
       "ratio": "ratio"
     }
+  },
+  "pls": {
+    "title": "PLS-SEM",
+    "constructs": "Latent constructs",
+    "paths": "Structural paths",
+    "diagram": "Model diagram",
+    "addConstruct": "Add a construct",
+    "constructName": "Construct name",
+    "removeConstruct": "Remove construct",
+    "chooseIndicators": "Choose indicators",
+    "indicatorCount": "{count} indicators",
+    "searchIndicators": "Search indicators…",
+    "usedElsewhere": "used by another construct",
+    "from": "From",
+    "to": "To",
+    "addPath": "Add path",
+    "removePath": "Remove path",
+    "pathExists": "That path already exists",
+    "estimate": "Estimate the model",
+    "estimateWithBootstrap": "Estimate with bootstrap",
+    "bootstrapNote": "Bootstrapping with 5,000 resamples takes about a minute and runs in the background.",
+    "mode": {
+      "reflective": "Reflective",
+      "formative": "Formative"
+    },
+    "issue": {
+      "tooFewConstructs": "The model needs at least two constructs (you have {count}).",
+      "unnamedConstruct": "One construct has no name.",
+      "duplicateName": "The name {name} is used twice.",
+      "noIndicators": "The construct {name} has no indicators.",
+      "sharedIndicator": "The indicator {indicator} belongs to both {first} and {second}; an indicator cannot measure two constructs.",
+      "noPaths": "No paths have been defined between the constructs.",
+      "cycle": "The model contains a cycle ({cycle}); PLS requires a recursive model."
+    },
+    "bootstrapRunning": "Bootstrapping… {percent}%",
+    "cancelBootstrap": "Cancel",
+    "validationNote": "Produced by the standard PLS algorithm and validated against published benchmark results and mathematical properties."
   }
 }

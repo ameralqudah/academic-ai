@@ -28,6 +28,7 @@ import {
   shouldOfferModelChoice,
 } from '@/agents/modes';
 import { containsMath } from '@/components/chat/markdown';
+import { validateDraft } from '@/components/agent/pls-builder';
 import { resolveReason } from '@/server/http/reasons';
 import { mergeSources } from '@/server/knowledge/merge';
 import { CrossrefProvider } from '@/server/knowledge/providers/crossref';
@@ -1293,6 +1294,194 @@ assertTrue(
   'regenerate is offered only once the reply is complete',
   chatSource3.includes("!turn.stages?.some((stage) => stage.status === 'running')"),
 );
+
+
+console.log('\nPLS model builder');
+
+/*
+ * The builder validates the same rules the engine does, and that duplication is
+ * deliberate. The server must check independently — a client check is a
+ * convenience, never a guarantee — but catching a cycle before a minute of
+ * bootstrap resampling is the difference between an instant correction and a
+ * minute spent learning something knowable immediately.
+ *
+ * This version can also be more forgiving: it reports every problem at once,
+ * where the engine throws on the first.
+ */
+const draft = (constructs: { name: string; indicators: string[] }[], paths: { from: string; to: string }[]) => ({
+  constructs: constructs.map((construct, index) => ({
+    id: `c${index}`,
+    name: construct.name,
+    indicators: construct.indicators,
+    mode: 'reflective' as const,
+  })),
+  paths,
+});
+
+const issueKeys = (model: Parameters<typeof validateDraft>[0]) =>
+  validateDraft(model).map((issue) => issue.key);
+
+check(
+  'a sound model has no issues',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['a1', 'a2'] },
+        { name: 'B', indicators: ['b1', 'b2'] },
+      ],
+      [{ from: 'A', to: 'B' }],
+    ),
+  ).length,
+  0,
+);
+
+assertTrue(
+  'a single construct is refused',
+  issueKeys(draft([{ name: 'A', indicators: ['a1'] }], [])).includes('tooFewConstructs'),
+);
+
+assertTrue(
+  'a construct with no indicators is caught',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: [] },
+        { name: 'B', indicators: ['b1'] },
+      ],
+      [{ from: 'A', to: 'B' }],
+    ),
+  ).includes('noIndicators'),
+);
+
+assertTrue(
+  'an unnamed construct is caught',
+  issueKeys(
+    draft(
+      [
+        { name: '', indicators: ['a1'] },
+        { name: 'B', indicators: ['b1'] },
+      ],
+      [],
+    ),
+  ).includes('unnamedConstruct'),
+);
+
+assertTrue(
+  'a duplicate name is caught',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['a1'] },
+        { name: 'A', indicators: ['b1'] },
+      ],
+      [],
+    ),
+  ).includes('duplicateName'),
+);
+
+/*
+ * An indicator in two constructs makes their scores partly the same variable,
+ * which guarantees they correlate and destroys discriminant validity by
+ * construction rather than by finding.
+ */
+assertTrue(
+  'an indicator in two constructs is caught',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['x1', 'x2'] },
+        { name: 'B', indicators: ['x2', 'b1'] },
+      ],
+      [{ from: 'A', to: 'B' }],
+    ),
+  ).includes('sharedIndicator'),
+);
+
+assertTrue(
+  'a model with no paths is caught',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['a1'] },
+        { name: 'B', indicators: ['b1'] },
+      ],
+      [],
+    ),
+  ).includes('noPaths'),
+);
+
+/*
+ * The cycle check matters most: PLS iterates on a cyclic model, converges, and
+ * returns coefficients that cannot be interpreted causally. Nothing downstream
+ * would notice.
+ */
+assertTrue(
+  'a two-step cycle is caught',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['a1'] },
+        { name: 'B', indicators: ['b1'] },
+      ],
+      [
+        { from: 'A', to: 'B' },
+        { from: 'B', to: 'A' },
+      ],
+    ),
+  ).includes('cycle'),
+);
+
+assertTrue(
+  'and a longer one',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['a1'] },
+        { name: 'B', indicators: ['b1'] },
+        { name: 'C', indicators: ['c1'] },
+      ],
+      [
+        { from: 'A', to: 'B' },
+        { from: 'B', to: 'C' },
+        { from: 'C', to: 'A' },
+      ],
+    ),
+  ).includes('cycle'),
+);
+
+/* A branching model is not a cycle, and must not be reported as one. */
+check(
+  'a model where two paths converge is fine',
+  issueKeys(
+    draft(
+      [
+        { name: 'A', indicators: ['a1'] },
+        { name: 'B', indicators: ['b1'] },
+        { name: 'C', indicators: ['c1'] },
+      ],
+      [
+        { from: 'A', to: 'C' },
+        { from: 'B', to: 'C' },
+      ],
+    ),
+  ).length,
+  0,
+);
+
+/* Every issue the builder can raise must have a message in both languages. */
+const builderSource = await readFile('src/components/agent/pls-builder.tsx', 'utf8');
+const raisedKeys = [...new Set(builderSource.match(/key: '[a-zA-Z]+'/g) ?? [])].map((match) =>
+  match.slice(6, -1),
+);
+
+for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as const) {
+  for (const key of raisedKeys) {
+    assertTrue(
+      `${language}: the builder issue "${key}" has a message`,
+      typeof lookup(messages as Record<string, unknown>, `pls.issue.${key}`) === 'string',
+    );
+  }
+}
 
 console.log('\nmaths detection');
 

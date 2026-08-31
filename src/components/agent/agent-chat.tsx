@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState } from 'react';
 
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
+import { PlsModelBuilder, type PlsModelDraft } from '@/components/agent/pls-builder';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { MessageActions, MessageEditor } from '@/components/agent/message-actions';
 import {
@@ -166,6 +167,7 @@ export function AgentChat({
 }) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
+  const tp = useTranslations('pls');
 
   const [projectId, setProjectId] = useState<string | null>(
     initialProjectId && projects.some((project) => project.id === initialProjectId)
@@ -196,6 +198,15 @@ export function AgentChat({
   const [roles, setRoles] = useState<RoleAssignment[]>([]);
   /** The message being rewritten, if any. */
   const [editingId, setEditingId] = useState<string | null>(null);
+  /*
+   * The PLS builder is opened deliberately rather than by classification. It is
+   * a form, not a message: a researcher specifying a structural model is doing
+   * something the conversation cannot express in a sentence, and guessing that
+   * they wanted it from a phrase would open a two-hundred-row panel uninvited.
+   */
+  const [plsOpen, setPlsOpen] = useState(false);
+  const [plsDraft, setPlsDraft] = useState<PlsModelDraft>({ constructs: [], paths: [] });
+  const [plsJob, setPlsJob] = useState<{ id: string; progress: number; status: string } | null>(null);
   /*
    * Forks in the saved thread. Only ever populated from the server, because
    * whether a message has siblings is a fact about the stored tree rather than
@@ -669,6 +680,115 @@ export function AgentChat({
     }
   }
 
+  /**
+   * Runs the model, optionally with bootstrapping.
+   *
+   * The estimate comes back in the response; the bootstrap comes back as a job
+   * id to poll. That split is the same one the API makes, for the same reason —
+   * five thousand resamples outlive the request.
+   */
+  async function runPls(bootstrap: boolean) {
+    if (!file) return;
+
+    setError(null);
+    setBusy(true);
+
+    try {
+      const response = await fetch('/api/pls', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          datasetId: file.datasetId,
+          projectId: projectId ?? undefined,
+          bootstrap,
+          model: {
+            constructs: plsDraft.constructs.map((construct) => ({
+              name: construct.name.trim(),
+              indicators: construct.indicators,
+              mode: construct.mode,
+            })),
+            paths: plsDraft.paths,
+          },
+        }),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok || !json.ok) {
+        setError((locale === 'ar' ? json?.error?.messageAr : json?.error?.message) ?? te('generic'));
+        return;
+      }
+
+      setPlsOpen(false);
+      setTurns((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          results: [{ kind: 'pls', payload: json.data.analysis }],
+        },
+      ]);
+
+      if (json.data.job) {
+        setPlsJob({ id: json.data.job.id, progress: 0, status: 'RUNNING' });
+        void pollPlsJob(json.data.job.id as string);
+      }
+    } catch {
+      setError(te('network'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Polls a bootstrap job until it settles.
+   *
+   * Every two seconds rather than continuously: the job reports whole
+   * percentages about a hundred times over a minute, so a faster poll asks the
+   * same question repeatedly and a slower one makes the bar look stuck.
+   */
+  async function pollPlsJob(jobId: string) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      try {
+        const response = await fetch(`/api/pls/jobs/${jobId}`);
+        const json = await response.json();
+        if (!json.ok) break;
+
+        const job = json.data as {
+          status: string;
+          progress: number;
+          error: { ar: string; en: string } | null;
+          result: { report?: unknown } | null;
+        };
+
+        setPlsJob({ id: jobId, progress: job.progress, status: job.status });
+
+        if (job.status === 'COMPLETED') {
+          setTurns((current) => [
+            ...current,
+            {
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              results: [{ kind: 'plsReport', runId: jobId, payload: job.result?.report }],
+            },
+          ]);
+          setPlsJob(null);
+          return;
+        }
+
+        if (job.status === 'FAILED' || job.status === 'CANCELLED') {
+          if (job.error) setError(locale === 'ar' ? job.error.ar : job.error.en);
+          setPlsJob(null);
+          return;
+        }
+      } catch {
+        /* A dropped poll is not a failure; the next one will catch up. */
+      }
+    }
+  }
+
   function stop() {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -721,10 +841,21 @@ export function AgentChat({
           <span className="shrink-0 text-xs text-muted">
             {t('fileSummary', { rows: file.rows, columns: file.columns })}
           </span>
+          {/*
+            Offered only when a file is attached, because a structural model
+            without indicators to measure is not something anyone can specify.
+          */}
+          <button
+            type="button"
+            onClick={() => setPlsOpen((open) => !open)}
+            className="ms-auto shrink-0 rounded px-2 py-1 text-xs text-accent hover:bg-subtle"
+          >
+            {tp('title')}
+          </button>
           <button
             type="button"
             onClick={() => setFile(null)}
-            className="ms-auto shrink-0 rounded p-1 text-muted hover:text-ink"
+            className="shrink-0 rounded p-1 text-muted hover:text-ink"
             aria-label={t('detachFile')}
           >
             <X className="size-3.5" />
@@ -739,6 +870,60 @@ export function AgentChat({
         question that prompted it off the screen, and scrolling back to read it
         while choosing is exactly the friction this is meant to remove.
       */}
+      {/*
+        The builder appears above the composer, like the role picker, so the
+        conversation stays readable while a model is being specified.
+      */}
+      {plsOpen && file && (
+        <div className="rounded-xl border border-line bg-surface p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-medium text-ink">{tp('title')}</h3>
+            <button
+              type="button"
+              onClick={() => setPlsOpen(false)}
+              aria-label={t('cancel')}
+              className="rounded p-1 text-muted hover:text-ink"
+            >
+              ✕
+            </button>
+          </div>
+          <PlsModelBuilder
+            columns={file.fields}
+            value={plsDraft}
+            onChange={setPlsDraft}
+            onEstimate={() => void runPls(false)}
+            onBootstrap={() => void runPls(true)}
+            busy={busy}
+          />
+        </div>
+      )}
+
+      {/*
+        Progress for a running bootstrap. Shown as a bar with a percentage
+        because a minute of a spinner is indistinguishable from a hang.
+      */}
+      {plsJob && (
+        <div className="flex items-center gap-3 rounded-lg border border-line bg-subtle px-3 py-2">
+          <span className="text-xs text-muted">{tp('bootstrapRunning', { percent: plsJob.progress })}</span>
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
+            <div
+              className="h-full bg-accent transition-[width] duration-500"
+              style={{ width: `${plsJob.progress}%` }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void fetch(`/api/pls/jobs/${plsJob.id}`, { method: 'DELETE' });
+              setPlsJob(null);
+            }}
+            className="text-xs text-muted hover:text-danger"
+          >
+            {tp('cancelBootstrap')}
+          </button>
+        </div>
+      )}
+
       {rolePrompt && file && (
         <RolePicker
           columns={file.fields}
@@ -984,6 +1169,10 @@ function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
     return <ResultCard result={payload as StatisticalResult} />;
   }
 
+  if (kind === 'pls' || kind === 'plsReport') {
+    return <PlsResult payload={payload} />;
+  }
+
   if (kind === 'literature') {
     const found = payload as { sources: RetrievedSource[]; coverage: SourceCoverage };
     return <SourceList sources={found.sources} coverage={found.coverage} />;
@@ -1052,6 +1241,117 @@ function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
   }
 
   return null;
+}
+
+/**
+ * A PLS result, rendered from the report the server built.
+ *
+ * The findings arrive as message keys with parameters, so the interface
+ * resolves them in the reader's language rather than displaying a sentence the
+ * server chose. Severity comes with each finding, so a validity failure is
+ * visually distinct from a note without the interface deciding which is which.
+ */
+function PlsResult({ payload }: { payload: unknown }) {
+  const t = useTranslations();
+  const tp = useTranslations('pls');
+
+  const data = payload as {
+    report?: {
+      verdict: { severity: string; key: string; params: Record<string, string | number> };
+      sections: {
+        titleKey: string;
+        findings: {
+          key: string;
+          severity: string;
+          params?: Record<string, string | number>;
+          action?: { key: string; params?: Record<string, string | number> };
+        }[];
+        table?: { headerKeys: string[]; rows: (string | number)[][]; flaggedRows: number[] };
+      }[];
+    };
+  } | null;
+
+  /* A bootstrap job returns the report at the top level; an estimate nests it. */
+  const report = (data as { verdict?: unknown })?.verdict
+    ? (data as unknown as NonNullable<typeof data>['report'])
+    : data?.report;
+
+  if (!report) return null;
+
+  const tone = (severity: string) =>
+    severity === 'problem' ? 'text-danger' : severity === 'attention' ? 'text-warning-strong' : 'text-ink';
+
+  return (
+    <div className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-4">
+      <p className={cn('text-sm font-medium', tone(report.verdict.severity))}>
+        {t(report.verdict.key, report.verdict.params)}
+      </p>
+
+      {report.sections.map((section, index) => (
+        <section key={index} className="flex flex-col gap-2">
+          <h4 className="text-xs font-medium text-muted">
+            {t(section.titleKey, findingParams(section))}
+          </h4>
+
+          {section.findings.map((finding, findingIndex) => (
+            <div key={findingIndex} className="flex flex-col gap-1">
+              <p className={cn('text-sm', tone(finding.severity))}>
+                {t(finding.key, finding.params)}
+              </p>
+              {finding.action && (
+                <p className="ms-4 text-xs text-muted">
+                  ← {t(finding.action.key, finding.action.params)}
+                </p>
+              )}
+            </div>
+          ))}
+
+          {section.table && section.table.rows.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-line">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-line bg-subtle">
+                    {section.table.headerKeys.map((key) => (
+                      <th key={key} className="px-2 py-1.5 text-start font-medium text-muted">
+                        {t(key)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {section.table.rows.map((row, rowIndex) => (
+                    <tr
+                      key={rowIndex}
+                      className={cn(
+                        'border-t border-line/50',
+                        section.table?.flaggedRows.includes(rowIndex) && 'font-medium text-warning-strong',
+                      )}
+                    >
+                      {row.map((cell, cellIndex) => (
+                        <td key={cellIndex} className="px-2 py-1.5 font-mono text-ink">
+                          {String(cell)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ))}
+
+      <p className="text-xs text-muted">{tp('validationNote')}</p>
+    </div>
+  );
+}
+
+/** Construct sections name their construct in the heading. */
+function findingParams(section: {
+  findings: { params?: Record<string, string | number> }[];
+}): Record<string, string | number> {
+  const construct = section.findings[0]?.params?.construct;
+  return construct === undefined ? {} : { construct };
 }
 
 function Welcome({ onPick }: { onPick: (text: string) => void }) {

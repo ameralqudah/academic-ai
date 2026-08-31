@@ -1337,5 +1337,42 @@
       "interval": "فترة",
       "ratio": "نسبة"
     }
+  },
+  "pls": {
+    "title": "نمذجة المعادلات البنائية (PLS-SEM)",
+    "constructs": "المتغيّرات الكامنة",
+    "paths": "المسارات البنائية",
+    "diagram": "مخطّط النموذج",
+    "addConstruct": "أضف متغيّرًا كامنًا",
+    "constructName": "اسم المتغيّر الكامن",
+    "removeConstruct": "حذف المتغيّر",
+    "chooseIndicators": "اختر البنود",
+    "indicatorCount": "{count} بند",
+    "searchIndicators": "ابحث عن بند…",
+    "usedElsewhere": "مُسنَد لمتغيّر آخر",
+    "from": "من",
+    "to": "إلى",
+    "addPath": "أضف مسارًا",
+    "removePath": "حذف المسار",
+    "pathExists": "هذا المسار موجود",
+    "estimate": "قدّر النموذج",
+    "estimateWithBootstrap": "قدّر مع Bootstrap",
+    "bootstrapNote": "Bootstrap بـ5000 إعادة يستغرق نحو دقيقة، ويعمل في الخلفية.",
+    "mode": {
+      "reflective": "عاكس",
+      "formative": "تكويني"
+    },
+    "issue": {
+      "tooFewConstructs": "النموذج يحتاج متغيّرين كامنين على الأقل (المتاح {count}).",
+      "unnamedConstruct": "أحد المتغيّرات بلا اسم.",
+      "duplicateName": "الاسم «{name}» مستعمل مرتين.",
+      "noIndicators": "المتغيّر «{name}» بلا بنود قياس.",
+      "sharedIndicator": "البند «{indicator}» مُسنَد إلى «{first}» و«{second}» معًا؛ لا يجوز أن ينتمي بند إلى متغيّرين.",
+      "noPaths": "لم تحدّد أي مسار بين المتغيّرات.",
+      "cycle": "النموذج يحتوي دورة ({cycle})؛ نمذجة PLS تتطلّب نموذجًا غير دوري."
+    },
+    "bootstrapRunning": "جارٍ Bootstrap… {percent}%",
+    "cancelBootstrap": "إلغاء",
+    "validationNote": "النتائج مُنتَجة بخوارزمية PLS القياسية، ومتحقَّق منها مقابل نتائج منشورة وخصائص رياضية."
   }
 }

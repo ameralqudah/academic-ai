@@ -43,6 +43,8 @@ export interface ModeOption {
   key: ModeKey;
   available: boolean;
   requiresDataset: boolean;
+  /** Why it is unavailable — shown on hover, so the reason is discoverable. */
+  unavailableReason?: string;
 }
 
 export interface ModelOption {
@@ -88,6 +90,8 @@ export function Composer({
 }: Props) {
   const t = useTranslations('agent');
   const tm = useTranslations('mode');
+  /* Root namespace: the reason keys are fully qualified by the server. */
+  const tu = useTranslations();
 
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -261,11 +265,16 @@ export function Composer({
                   <span
                     key={option.key}
                     className="flex w-full items-center justify-between rounded px-2.5 py-1.5 text-sm text-muted/60"
-                    title={tm(`unavailable.${option.key}`)}
+                    /*
+                     * The server's own reason, not one derived from the key.
+                     * "Needs a search provider key" is actionable; "coming
+                     * soon" is not, and is false once the feature is built.
+                     */
+                    title={option.unavailableReason ? tu(option.unavailableReason) : undefined}
                   >
                     {tm(option.key)}
                     <span className="rounded bg-subtle px-1.5 py-0.5 text-[10px]">
-                      {t('soon')}
+                      {t('needsSetup')}
                     </span>
                   </span>
                 ),

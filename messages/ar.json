@@ -1259,7 +1259,8 @@
     "soon": "قريبًا",
     "cancel": "إلغاء",
     "webSearchPrompt": "ابحث في الويب عن ",
-    "deepResearchPrompt": "أجرِ بحثًا معمّقًا عن "
+    "deepResearchPrompt": "أجرِ بحثًا معمّقًا عن ",
+    "needsSetup": "يحتاج إعدادًا"
   },
   "knowledge": {
     "coverage": {

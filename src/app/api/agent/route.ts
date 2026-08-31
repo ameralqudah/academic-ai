@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { agentStream } from '@/agents/orchestrator';
-import { availableModes, MODE_KEYS, MODES } from '@/agents/modes';
+import { MODE_KEYS, MODES } from '@/agents/modes';
 import { availableCapabilities, plannedCapabilities } from '@/agents/registry';
 import { ok, withApi } from '@/server/http/api';
 import { modelAccessFor, resolveRequestedModel } from '@/server/services/model-access.service';
@@ -93,13 +93,26 @@ export const GET = withApi({}, async ({ user }) => {
   const access = await modelAccessFor(user.id);
 
   return ok({
-    modes: availableModes().map((mode) => ({
+    /*
+     * Every mode, each carrying whether it is available.
+     *
+     * This sent only the available ones and omitted the `available` field —
+     * which the composer reads to decide what to disable. Finding it undefined
+     * on every entry, it marked all of them "Soon", including the three that
+     * work. A user reported it as "everything says Soon", and the cause was a
+     * field the client needed and the server never sent.
+     *
+     * Sending the whole list with an explicit flag is also what lets an
+     * unavailable mode explain itself rather than vanish: hiding a feature
+     * leaves someone unable to tell a missing capability from one they failed
+     * to find.
+     */
+    modes: MODE_KEYS.map((key) => MODES[key]).map((mode) => ({
       key: mode.key,
+      available: mode.available,
       requiresDataset: mode.requiresDataset,
+      unavailableReason: mode.unavailableReason,
     })),
-    plannedModes: MODE_KEYS.map((key) => MODES[key])
-      .filter((mode) => !mode.available)
-      .map((mode) => ({ key: mode.key, reasonKey: mode.unavailableReason })),
     models: access.models.map((model) => ({ id: model.id, isDefault: model.isDefault })),
     showModelSelector: access.showSelector,
     available: availableCapabilities().map((capability) => ({

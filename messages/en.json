@@ -1259,7 +1259,8 @@
     "soon": "Soon",
     "cancel": "Cancel",
     "webSearchPrompt": "Search the web for ",
-    "deepResearchPrompt": "Do deep research on "
+    "deepResearchPrompt": "Do deep research on ",
+    "needsSetup": "Needs setup"
   },
   "knowledge": {
     "coverage": {

@@ -1491,6 +1491,69 @@ assertTrue(
 );
 
 
+
+/*
+ * The mode list must carry availability, and this is checked because it was
+ * once missing.
+ *
+ * The route sent only the available modes and omitted the `available` field
+ * entirely. The composer reads that field to decide what to disable; finding it
+ * undefined on every entry, it marked all of them unavailable — including the
+ * three that worked. The symptom reported was "everything says Soon", and no
+ * type error and no test caught it, because the shape was valid and the
+ * meaning was not.
+ */
+const agentRouteModes = await readFile('src/app/api/agent/route.ts', 'utf8');
+
+assertTrue(
+  'the agent route sends every mode, not only the available ones',
+  agentRouteModes.includes('MODE_KEYS.map((key) => MODES[key]).map'),
+);
+assertTrue(
+  'and each carries its availability',
+  agentRouteModes.includes('available: mode.available'),
+);
+assertTrue(
+  'and the reason when it is unavailable',
+  agentRouteModes.includes('unavailableReason: mode.unavailableReason'),
+);
+
+/*
+ * The badge must say something actionable. "Soon" is false once a feature is
+ * built and waiting on configuration, and it tells the person nothing they can
+ * do about it.
+ */
+const composerModes = await readFile('src/components/agent/composer.tsx', 'utf8');
+
+assertTrue(
+  'an unavailable mode explains itself with the server\'s reason',
+  composerModes.includes('option.unavailableReason'),
+);
+assertTrue(
+  'and the badge no longer claims the feature is merely coming',
+  !composerModes.includes("{t('soon')}"),
+);
+
+/* Every mode's reason key must resolve, or the tooltip shows a raw identifier. */
+{
+  const arAll = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>;
+  const enAll = JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>;
+
+  const resolve = (messages: Record<string, unknown>, path: string) =>
+    path.split('.').reduce<unknown>(
+      (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+      messages,
+    );
+
+  for (const key of MODE_KEYS) {
+    const reason = MODES[key].unavailableReason;
+    if (!reason) continue;
+
+    assertTrue(`${key}: the unavailable reason resolves in Arabic`, typeof resolve(arAll, reason) === 'string');
+    assertTrue(`${key}: and in English`, typeof resolve(enAll, reason) === 'string');
+  }
+}
+
 console.log('\ndeep research');
 
 /*

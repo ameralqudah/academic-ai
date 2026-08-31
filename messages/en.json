@@ -895,6 +895,12 @@
         "singularConstruct": "Two indicators are identical or one is a linear combination of others, so there is no unique solution.",
         "bootstrapUnstable": "{failed} of {resamples} resamples failed to converge; the model is too unstable for reliable estimates. Review the indicators and the sample."
       }
+    },
+    "job": {
+      "error": {
+        "interrupted": "This analysis stopped because the server restarted. Please run it again.",
+        "failed": "The analysis could not be completed. Check the model and the data, then try again."
+      }
     }
   },
   "agent": {

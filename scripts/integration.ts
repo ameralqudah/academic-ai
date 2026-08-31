@@ -30,12 +30,13 @@ import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
-import { users } from '@/server/db/schema';
+import { users, analysisJobs } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
 import * as adminRepo from '@/server/repositories/admin.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
+import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import * as chatRepo from '@/server/repositories/chat.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
@@ -81,6 +82,7 @@ import {
   startConversation,
   switchToBranch,
 } from '@/server/services/chat.service';
+import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -1289,6 +1291,178 @@ async function main() {
     'detaching returns the section to producing a template',
     buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')),
     null,
+  );
+
+  /* ------------------------------------------------------ PLS-SEM as a job */
+
+  section('PLS-SEM: estimation inline, bootstrapping in the background');
+
+  const plsOwner = await newUser('pls-owner');
+  const plsIntruder = await newUser('pls-intruder');
+
+  /*
+   * A questionnaire-shaped file: nine indicators measuring three constructs,
+   * with a known structure. Written as CSV and uploaded through the ordinary
+   * path so the whole chain is exercised — storage, parsing, profiling — rather
+   * than the algorithm being handed a Map directly.
+   */
+  let plsSeed = 11;
+  const plsRand = () => {
+    plsSeed = (plsSeed * 1103515245 + 12345) & 0x7fffffff;
+    return plsSeed / 0x7fffffff;
+  };
+  const plsNormal = () => {
+    const u = Math.max(plsRand(), 1e-9);
+    const v = plsRand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const plsRows: string[] = ['a1,a2,a3,b1,b2,b3,c1,c2,c3'];
+  for (let i = 0; i < 200; i += 1) {
+    const A = plsNormal();
+    const B = 0.55 * A + Math.sqrt(1 - 0.3025) * plsNormal();
+    const C = 0.5 * B + 0.7 * plsNormal();
+    const cells: number[] = [];
+    for (const latent of [A, B, C]) {
+      for (let j = 0; j < 3; j += 1) cells.push(0.85 * latent + 0.5 * plsNormal());
+    }
+    plsRows.push(cells.map((value) => value.toFixed(4)).join(','));
+  }
+
+  const plsFile = await saveUpload({
+    userId: plsOwner,
+    file: {
+      name: 'survey.csv',
+      bytes: new TextEncoder().encode(`${plsRows.join('\n')}\n`).buffer as ArrayBuffer,
+    },
+  });
+
+  const plsModelSpec = {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' as const },
+      { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' as const },
+      { name: 'C', indicators: ['c1', 'c2', 'c3'], mode: 'reflective' as const },
+    ],
+    paths: [
+      { from: 'A', to: 'B' },
+      { from: 'B', to: 'C' },
+      { from: 'A', to: 'C' },
+    ],
+  };
+
+  /* Estimation runs inline and answers immediately. */
+  const analysis = await runPls({
+    datasetId: plsFile.dataset.id,
+    userId: plsOwner,
+    model: plsModelSpec,
+  });
+
+  assertTrue('the model converges on real uploaded data', analysis.converged);
+  check('every construct is assessed', analysis.measurement.length, 3);
+  check('and every pair gets an HTMT', analysis.discriminant.htmt.length, 3);
+  check('two endogenous constructs get an R²', analysis.structural.endogenous.length, 2);
+  assertTrue('the sample survives the round trip through storage', analysis.n === 200);
+
+  /* Ownership, on the estimation path. */
+  await expectAppError('another user cannot analyse this dataset', 'NOT_FOUND', () =>
+    runPls({ datasetId: plsFile.dataset.id, userId: plsIntruder, model: plsModelSpec }),
+  );
+
+  /*
+   * A specification error is caught before any job is created. Discovering it a
+   * minute into a background run would be a minute spent to learn something
+   * knowable immediately.
+   */
+  await expectAppError('a cyclic model is refused before the job starts', 'VALIDATION', () =>
+    startBootstrap({
+      datasetId: plsFile.dataset.id,
+      userId: plsOwner,
+      model: {
+        ...plsModelSpec,
+        paths: [
+          { from: 'A', to: 'B' },
+          { from: 'B', to: 'A' },
+        ],
+      },
+    }),
+  );
+
+  /* The background job: started, polled, and read. */
+  const job = await startBootstrap({
+    datasetId: plsFile.dataset.id,
+    userId: plsOwner,
+    model: plsModelSpec,
+    resamples: 1000,
+  });
+
+  check('the job starts queued or running', ['QUEUED', 'RUNNING'].includes(job.status), true);
+
+  /* Poll until it settles, as the interface will. */
+  let view = await getJob(job.id, plsOwner);
+  for (let attempt = 0; attempt < 120 && view.status !== 'COMPLETED' && view.status !== 'FAILED'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    view = await getJob(job.id, plsOwner);
+  }
+
+  check('the job completes', view.status, 'COMPLETED');
+  check('and reports full progress', view.progress, 100);
+  assertTrue('with a duration recorded', (view.durationMs ?? 0) > 0);
+  assertTrue('and a bootstrap result', Boolean(view.result?.bootstrap));
+
+  const bootstrapped = view.result?.bootstrap;
+  check('every path is bootstrapped', bootstrapped?.paths.length, 3);
+  assertTrue('and every loading', (bootstrapped?.loadings.length ?? 0) === 9);
+
+  /*
+   * The substantive check, surviving a full round trip through JSON and the
+   * database: the path built to be zero is still not significant.
+   */
+  const nullPath = bootstrapped?.paths.find((path) => path.key === 'A→C');
+  check('a path that is really zero stays non-significant', nullPath?.significant, false);
+
+  const realPath = bootstrapped?.paths.find((path) => path.key === 'A→B');
+  check('and a real one is significant', realPath?.significant, true);
+
+  /* Ownership again, on the job. */
+  await expectAppError('another user cannot read the job', 'NOT_FOUND', () =>
+    getJob(job.id, plsIntruder),
+  );
+
+  /* A finished job cannot be cancelled — its result is already there. */
+  await expectAppError('a completed job cannot be cancelled', 'VALIDATION', () =>
+    cancelJob(job.id, plsOwner),
+  );
+
+  /*
+   * Jobs orphaned by a restart are closed out rather than left showing a
+   * progress bar that will never move.
+   */
+  const orphanJob = await jobsRepo.create({
+    userId: plsOwner,
+    datasetId: plsFile.dataset.id,
+    kind: 'pls.bootstrap',
+    status: 'RUNNING',
+    spec: { model: plsModelSpec, resamples: 1000, confidenceLevel: 0.95, seed: 1 },
+  });
+
+  /* Backdated past the staleness window, as a restart would leave it. */
+  await db
+    .update(analysisJobs)
+    .set({
+      startedAt: new Date(Date.now() - 30 * 60_000),
+      createdAt: new Date(Date.now() - 30 * 60_000),
+    })
+    .where(eq(analysisJobs.id, orphanJob.id));
+
+  const cleared = await jobsRepo.failStale();
+  assertTrue('a stale job is closed out', cleared >= 1);
+
+  const orphanView = await getJob(orphanJob.id, plsOwner);
+  check('and reported as failed rather than running', orphanView.status, 'FAILED');
+  assertTrue('with a reason the user can act on', Boolean(orphanView.error?.ar));
+  assertTrue(
+    'resolved to a sentence, not a key',
+    (orphanView.error?.ar ?? '').includes('إعادة تشغيل'),
   );
 
   await rm(storageRoot, { recursive: true, force: true });

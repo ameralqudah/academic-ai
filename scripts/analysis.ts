@@ -1966,6 +1966,54 @@ await expectReason('an empty file is refused', 'analysis.error.emptyFile', () =>
 );
 
 
+
+/*
+ * Workbooks whose data is not on the first sheet.
+ *
+ * A user uploaded a file named for its three hundred cases and was told it held
+ * eight rows. The parser took the first sheet with more than one row, and that
+ * was a cover page — the responses were on the sheet behind it. Exported
+ * workbooks open with notes, codebooks and summaries often enough that "first"
+ * is the wrong rule; "largest" is right almost always.
+ */
+{
+  const workbook = new ExcelJS.Workbook();
+
+  const notes = workbook.addWorksheet('Notes');
+  notes.addRow(['Study', 'AI Procurement']);
+  notes.addRow(['N', 300]);
+
+  const data = workbook.addWorksheet('Data');
+  data.addRow(['id', 'gender', 'score']);
+  for (let i = 1; i <= 300; i += 1) data.addRow([i, i % 2 ? 'male' : 'female', 60 + (i % 40)]);
+
+  const parsed = await readUpload({
+    name: 'study.xlsx',
+    bytes: (await workbook.xlsx.writeBuffer()) as ArrayBuffer,
+  });
+
+  check('the data sheet is found behind a cover sheet', parsed.rows.length, 300);
+  check('with its own columns, not the cover page\'s', parsed.columns.length, 3);
+  check('and the right ones', parsed.columns.join(','), 'id,gender,score');
+}
+
+/* A single-sheet workbook is unaffected — the common case must not regress. */
+{
+  const workbook = new ExcelJS.Workbook();
+  const only = workbook.addWorksheet('Sheet1');
+  only.addRow(['a', 'b']);
+  only.addRow([1, 2]);
+  only.addRow([3, 4]);
+
+  const parsed = await readUpload({
+    name: 'simple.xlsx',
+    bytes: (await workbook.xlsx.writeBuffer()) as ArrayBuffer,
+  });
+
+  check('a single-sheet workbook still reads', parsed.rows.length, 2);
+}
+
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

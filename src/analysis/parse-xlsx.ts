@@ -24,8 +24,23 @@ export async function parseXlsx(buffer: ArrayBuffer, source: string): Promise<Da
     throw new DataParseError('analysis.error.unreadableWorkbook');
   }
 
-  const sheet =
-    workbook.worksheets.find((candidate) => candidate.rowCount > 1) ?? workbook.worksheets[0];
+  /*
+   * The sheet with the most data, not the first one with any.
+   *
+   * Picking the first sheet with more than one row sounds reasonable and is
+   * wrong in the common case: exported workbooks routinely open with a cover
+   * sheet, a codebook, or a page of notes, and the actual responses sit behind
+   * them. A user uploaded a file named for its three hundred cases and was told
+   * it held eight rows — the parser had found a summary tab and stopped.
+   *
+   * Ranked by rows first and columns as the tie-break, because a data sheet is
+   * almost always the longest thing in the file. Ties keep the earlier sheet,
+   * which preserves the old behaviour when every sheet is the same size.
+   */
+  const sheet = [...workbook.worksheets].sort((a, b) => {
+    const rows = (b.rowCount ?? 0) - (a.rowCount ?? 0);
+    return rows !== 0 ? rows : (b.columnCount ?? 0) - (a.columnCount ?? 0);
+  })[0];
 
   if (!sheet) throw new DataParseError('analysis.error.noSheets');
   if (sheet.columnCount > MAX_COLUMNS) {

@@ -54,6 +54,8 @@ interface Turn {
   text?: string;
   /** The request this answers, so a restatement of it can be suppressed. */
   userMessage?: string;
+  /** An attachment notice, replaced by the next upload rather than accumulating. */
+  isUploadNotice?: boolean;
   understanding?: { intent: string; restatement: string; confidence: number };
   stages?: Stage[];
   results?: { kind: string; runId?: string; payload: unknown }[];
@@ -212,6 +214,13 @@ export function AgentChat({
         return;
       }
 
+      /*
+       * A previous failure is no longer true once a file has been read. It was
+       * staying on screen underneath the success line, so the page showed a
+       * refusal and an accepted file at the same time.
+       */
+      setError(null);
+
       setFile({
         datasetId: json.data.dataset.id,
         name: json.data.dataset.originalName,
@@ -225,11 +234,20 @@ export function AgentChat({
        * and will be referred to by later questions, so it deserves to be
        * visible in the history rather than implied.
        */
+      /*
+       * Replaces any previous upload notice rather than appending one.
+       *
+       * Re-uploading — after a failure, or to swap the file — was leaving a
+       * trail of identical "file ready" lines, each describing a file that was
+       * no longer the attached one. Only the current attachment is true, so
+       * only it is shown.
+       */
       setTurns((current) => [
-        ...current,
+        ...current.filter((turn) => !turn.isUploadNotice),
         {
           id: crypto.randomUUID(),
           role: 'assistant',
+          isUploadNotice: true,
           text: t('fileReady', {
             name: json.data.dataset.originalName,
             rows: json.data.profile.rowCount,

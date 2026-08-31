@@ -370,6 +370,8 @@ const implementedTests = new Set<string>([
   'correlation.pearson', 'correlation.spearman', 'correlation.matrix',
   'chiSquare.independence', 'chiSquare.goodnessOfFit',
   'regression.ols', 'reliability.cronbachAlpha',
+  /* The rank-based tests, built and verified against SciPy. */
+  'nonparametric.mannWhitney', 'nonparametric.wilcoxon', 'nonparametric.kruskalWallis',
 ]);
 
 for (const capability of availableCapabilities()) {
@@ -399,7 +401,13 @@ for (const capability of plannedCapabilities()) {
  * The four the user asked about by name. Each is recognised — so the agent can
  * decline it precisely — and none is available, so nothing improvises an answer.
  */
-for (const intent of ['stats.plsSem', 'stats.cbSem', 'stats.logistic', 'stats.nonparametric'] as const) {
+/*
+ * Non-parametric tests have left this list — they are built now. What remains
+ * is what genuinely is not, and the point of the assertion is unchanged: each
+ * is recognised so it can be declined by name rather than misrouted to
+ * something that would run.
+ */
+for (const intent of ['stats.plsSem', 'stats.cbSem', 'stats.logistic'] as const) {
   check(`${intent} is recognised`, isKnownIntent(intent), true);
   check(`${intent} is not offered as available`, isAvailable(intent), false);
   check(`${intent} is marked planned`, capabilityFor(intent).status, 'planned');
@@ -408,6 +416,8 @@ for (const intent of ['stats.plsSem', 'stats.cbSem', 'stats.logistic', 'stats.no
 /* The classifier is given planned intents too: declining precisely beats misrouting. */
 const classifiable = classifiableIntents().map((entry) => entry.intent);
 assertTrue('the classifier can name PLS-SEM even though it cannot run it', classifiable.includes('stats.plsSem'));
+check('non-parametric tests are available now', capabilityFor('stats.nonparametric').status, 'available');
+check('and cost nothing, like every other statistical capability', capabilityFor('stats.nonparametric').units, 0);
 assertTrue('and logistic regression', classifiable.includes('stats.logistic'));
 check('the classifier sees every intent', classifiable.length, INTENT_KEYS.length);
 

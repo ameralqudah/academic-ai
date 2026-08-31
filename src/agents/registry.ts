@@ -296,14 +296,24 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
    * what it was declining would be worse than one that says "Mann–Whitney is
    * what you need, and it is not built yet".
    */
+  /**
+   * Built now. The recommender has been naming these tests and declining to run
+   * them since it was written — "Mann–Whitney is what you need, and it is not
+   * available" — which was honest and useless. It can now run what it
+   * recommends.
+   */
   'stats.nonparametric': {
     intent: 'stats.nonparametric',
-    status: 'planned',
+    status: 'available',
     agent: 'statistics',
     requiresDataset: true,
+    tests: [
+      'nonparametric.mannWhitney',
+      'nonparametric.wilcoxon',
+      'nonparametric.kruskalWallis',
+    ],
     units: 0,
     estimatedCalls: 0,
-    unavailableReason: 'agent.unavailable.nonparametric',
   },
 
   /* ---------------------------- conversation ------------------------------ */

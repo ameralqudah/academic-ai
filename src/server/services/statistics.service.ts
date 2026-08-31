@@ -34,13 +34,16 @@ import {
   cronbachAlpha,
   profileDataset,
   independentTTest,
+  kruskalWallisTest,
   linearRegression,
+  mannWhitneyTest,
   oneSampleTTest,
   oneWayAnova,
   pairedTTest,
   recommendTest,
   shouldCheckReliability,
   toNumber,
+  wilcoxonSignedRankTest,
   type CellValue,
   type CorrelationMethod,
   type Dataset as ParsedDataset,
@@ -69,7 +72,10 @@ export type AnalysisTestKey =
   | 'chiSquare.independence'
   | 'chiSquare.goodnessOfFit'
   | 'regression.ols'
-  | 'reliability.cronbachAlpha';
+  | 'reliability.cronbachAlpha'
+  | 'nonparametric.mannWhitney'
+  | 'nonparametric.wilcoxon'
+  | 'nonparametric.kruskalWallis';
 
 export interface AnalysisRequest {
   datasetId: string;
@@ -420,6 +426,54 @@ function compute(
         predictors.map((name) => ({ name, values: alignedColumn(dataset, name) })),
         { confidenceLevel: level },
       );
+    }
+
+    /*
+     * The rank-based tests. Their column requirements mirror their parametric
+     * counterparts exactly — Mann–Whitney takes what an independent t-test
+     * takes — so a researcher whose assumptions failed can switch without
+     * re-specifying anything.
+     */
+    case 'nonparametric.mannWhitney': {
+      const value = requireColumn(columns.dependent, 'dependent');
+      const group = requireColumn(columns.grouping, 'grouping');
+      const { labels, groups } = groupedColumn(dataset, value, group);
+
+      if (labels.length !== 2) {
+        throw new AppError(
+          'VALIDATION',
+          `"${group}" has ${labels.length} groups; Mann-Whitney needs exactly two. Use Kruskal-Wallis instead.`,
+          `"${group}" فيه ${labels.length} مجموعات؛ اختبار مان-ويتني يحتاج مجموعتين بالضبط. استخدم كروسكال-واليس بدلًا منه.`,
+        );
+      }
+
+      return mannWhitneyTest(groups[0] as number[], groups[1] as number[], [
+        labels[0] as string,
+        labels[1] as string,
+      ]);
+    }
+
+    case 'nonparametric.wilcoxon': {
+      if (!columns.paired || columns.paired.length !== 2) {
+        throw new AppError(
+          'VALIDATION',
+          'A Wilcoxon test needs two measurements.',
+          'اختبار ويلكوكسون يحتاج قياسين.',
+        );
+      }
+      const [first, second] = columns.paired;
+      return wilcoxonSignedRankTest(
+        alignedColumn(dataset, first),
+        alignedColumn(dataset, second),
+        [first, second],
+      );
+    }
+
+    case 'nonparametric.kruskalWallis': {
+      const value = requireColumn(columns.dependent, 'dependent');
+      const group = requireColumn(columns.grouping, 'grouping');
+      const { labels, groups } = groupedColumn(dataset, value, group);
+      return kruskalWallisTest(groups, labels);
     }
 
     case 'reliability.cronbachAlpha': {

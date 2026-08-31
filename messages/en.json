@@ -859,6 +859,14 @@
         "singular": "The matrix cannot be inverted — there is a duplicate column or a linear combination.",
         "underdetermined": "There are fewer rows ({rows}) than columns ({columns})."
       }
+    },
+    "nonparametric": {
+      "error": {
+        "groupTooSmall": "One group is too small ({smallest}); at least {minimum} per group are needed.",
+        "unequalPairs": "The two measurements have different lengths ({first} vs {second}).",
+        "tooFewPairs": "Too few non-zero differences ({n}); at least {minimum} are needed.",
+        "tooFewGroups": "Kruskal-Wallis needs at least three groups (found {groups}). Use Mann-Whitney for two."
+      }
     }
   },
   "agent": {
@@ -918,7 +926,9 @@
       "multicollinearity": "Multicollinearity",
       "no-autocorrelation": "No autocorrelation",
       "sample-size": "Sample size",
-      "measurement-scale": "Measurement scale"
+      "measurement-scale": "Measurement scale",
+      "similar-distribution-shape": "Similar distribution shape",
+      "symmetric-differences": "Symmetric differences"
     },
     "secondary": {
       "student": "Student's form (assumes equal variances)",
@@ -944,9 +954,9 @@
       "chiSquare_goodnessOfFit": "Chi-square goodness of fit",
       "regression_ols": "Linear regression",
       "reliability_cronbachAlpha": "Cronbach's alpha",
-      "nonparametric_mannWhitney": "Mann–Whitney U",
+      "nonparametric_mannWhitney": "Mann-Whitney U",
       "nonparametric_wilcoxon": "Wilcoxon signed-rank",
-      "nonparametric_kruskalWallis": "Kruskal–Wallis",
+      "nonparametric_kruskalWallis": "Kruskal-Wallis",
       "normality_shapiroWilk": "Shapiro–Wilk",
       "homogeneity_levene": "Levene's test"
     },
@@ -977,7 +987,6 @@
       "plsSem": "PLS-SEM is not built yet. It is coming, and we would rather say so than hand you approximate results from a different test.",
       "cbSem": "CB-SEM is not built yet — it is deferred to a later stage.",
       "logistic": "Logistic regression is not built yet. Your outcome is categorical, and a linear regression would not be valid for it.",
-      "nonparametric": "Non-parametric tests are not built yet. The right test for your data is one of them, and substituting a parametric test could mislead you.",
       "surveyGenerator": "Questionnaire generation is not available yet.",
       "test": {
         "nonparametric_mannWhitney": "The right test for your data is Mann–Whitney U, which is not built yet.",
@@ -1033,7 +1042,12 @@
       "normality-sample-too-small": "The sample is too small to test for normality ({n}).",
       "normality-sample-too-large": "The sample is beyond the range of the normality test ({n}).",
       "normality-no-variance": "The column has no variance, so its distribution cannot be checked.",
-      "homogeneity-not-testable": "Equality of variances could not be tested."
+      "homogeneity-not-testable": "Equality of variances could not be tested.",
+      "ties-corrected": "A tie correction was applied across {tiedGroups} groups of repeated values.",
+      "zero-differences-dropped": "{dropped} zero differences were dropped; the test ran on {remaining} cases.",
+      "nonparametric-normal-approximation": "The sample is small ({n}); the p-value is a normal approximation.",
+      "nonparametric-approximate-due-to-ties": "Ties made the exact calculation invalid; the normal approximation was used.",
+      "omnibus-needs-posthoc": "The result is significant but does not say which groups differ; a post-hoc test is needed."
     },
     "type": {
       "likert": "Likert",

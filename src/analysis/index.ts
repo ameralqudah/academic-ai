@@ -44,6 +44,12 @@ export {
   toNumber,
   variance,
 } from './stats-core';
+export {
+  kruskalWallisTest,
+  mannWhitneyTest,
+  NonParametricError,
+  wilcoxonSignedRankTest,
+} from './inference/nonparametric';
 export { bandForAlpha, cronbachAlpha } from './reliability';
 export {
   backSubstitute,

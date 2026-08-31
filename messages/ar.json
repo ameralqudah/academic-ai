@@ -859,6 +859,14 @@
         "singular": "المصفوفة غير قابلة للعكس — يوجد عمود مكرّر أو تركيبة خطية.",
         "underdetermined": "عدد الصفوف ({rows}) أقل من عدد الأعمدة ({columns})."
       }
+    },
+    "nonparametric": {
+      "error": {
+        "groupTooSmall": "إحدى المجموعتين صغيرة جدًا ({smallest})؛ الحد الأدنى {minimum} لكل مجموعة.",
+        "unequalPairs": "عدد القياسين غير متساوٍ ({first} مقابل {second}).",
+        "tooFewPairs": "عدد الفروق غير الصفرية غير كافٍ ({n})؛ الحد الأدنى {minimum}.",
+        "tooFewGroups": "اختبار كروسكال-واليس يحتاج ثلاث مجموعات على الأقل (المتاح {groups}). استخدم مان-ويتني لمجموعتين."
+      }
     }
   },
   "agent": {
@@ -911,7 +919,9 @@
       "multicollinearity": "التعدد الخطي",
       "no-autocorrelation": "عدم الارتباط الذاتي",
       "sample-size": "حجم العينة",
-      "measurement-scale": "مقياس القياس"
+      "measurement-scale": "مقياس القياس",
+      "similar-distribution-shape": "تشابه شكل التوزيعات",
+      "symmetric-differences": "تماثل الفروق"
     },
     "secondary": {
       "student": "صيغة Student (بافتراض تساوي التباين)",
@@ -970,7 +980,6 @@
       "plsSem": "تحليل PLS-SEM غير متاح بعد. نعمل عليه، ولا نريد أن نعطيك نتائج تقريبية من اختبار آخر.",
       "cbSem": "تحليل CB-SEM غير متاح بعد. هو مؤجَّل إلى مرحلة لاحقة.",
       "logistic": "الانحدار اللوجستي غير متاح بعد. متغيّرك التابع فئوي، والانحدار الخطي لا يصلح له.",
-      "nonparametric": "الاختبارات اللامعلمية غير متاحة بعد. الاختبار المناسب لبياناتك منها، ولا نريد استبداله باختبار معلمي قد يعطي نتيجة مضلّلة.",
       "surveyGenerator": "إنشاء الاستبانات غير متاح بعد.",
       "test": {
         "nonparametric_mannWhitney": "الاختبار المناسب لبياناتك هو مان-ويتني، وهو غير متاح بعد.",
@@ -1026,7 +1035,12 @@
       "normality-sample-too-small": "العينة أصغر من أن تُختبر طبيعيتها ({n}).",
       "normality-sample-too-large": "العينة أكبر من نطاق اختبار الطبيعية ({n}).",
       "normality-no-variance": "لا تباين في العمود، فلا يمكن فحص التوزيع.",
-      "homogeneity-not-testable": "تعذّر فحص تجانس التباين."
+      "homogeneity-not-testable": "تعذّر فحص تجانس التباين.",
+      "ties-corrected": "طُبّق تصحيح التعادلات على {tiedGroups} مجموعة من القيم المتكررة.",
+      "zero-differences-dropped": "حُذف {dropped} فرقًا صفريًا؛ الاختبار جرى على {remaining} حالة.",
+      "nonparametric-normal-approximation": "العينة صغيرة ({n})؛ قيمة p تقريبية عبر التوزيع الطبيعي.",
+      "nonparametric-approximate-due-to-ties": "وُجدت تعادلات فتعذّر الحساب الدقيق؛ استُخدم التقريب الطبيعي.",
+      "omnibus-needs-posthoc": "النتيجة دالّة لكنها لا تحدّد أي مجموعتين تختلفان؛ يلزم اختبار بعدي."
     },
     "type": {
       "likert": "ليكرت",

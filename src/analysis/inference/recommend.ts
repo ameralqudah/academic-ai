@@ -96,6 +96,15 @@ const IMPLEMENTED: ReadonlySet<TestKey> = new Set<TestKey>([
   'chiSquare.goodnessOfFit',
   'regression.ols',
   'reliability.cronbachAlpha',
+  /*
+   * The rank-based tests, built after the recommender had been naming them for
+   * some time. Until now a researcher whose normality assumption failed on a
+   * small sample was told exactly which test they needed and that it did not
+   * exist — correct, and no help at all.
+   */
+  'nonparametric.mannWhitney',
+  'nonparametric.wilcoxon',
+  'nonparametric.kruskalWallis',
 ]);
 
 /**

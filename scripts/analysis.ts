@@ -14,6 +14,11 @@ import ExcelJS from 'exceljs';
 
 import { applyCleaning, planCleaning } from '@/analysis/clean';
 import { readUpload } from '@/analysis';
+import {
+  kruskalWallisTest,
+  mannWhitneyTest,
+  wilcoxonSignedRankTest,
+} from '@/analysis/inference/nonparametric';
 import { detectDelimiter, parseCsv } from '@/analysis/parse';
 import { parseXlsx } from '@/analysis/parse-xlsx';
 import { profileDataset } from '@/analysis/profile';
@@ -1577,8 +1582,11 @@ async function main() {
 
   /*
    * A small-sample ordinal outcome across two groups: the honest answer is
-   * Mann–Whitney, which is not implemented. The recommender says so instead of
-   * quietly promoting the t-test.
+   * Mann–Whitney, and it is now built. This assertion used to check that the
+   * recommender named the right test and admitted it could not run it — which
+   * was the correct behaviour while that was true. Now it checks that the
+   * recommendation is actually runnable, which is the point the earlier version
+   * was standing in for.
    */
   const ordinalSmall = recommendTest(smallSurvey, [
     { column: 'q1', role: 'dependent' },
@@ -1588,8 +1596,8 @@ async function main() {
     (candidate) => candidate.test === 'nonparametric.mannWhitney',
   );
   check('the right test is named', mannWhitney?.confidence, 'recommended');
-  check('and marked as not yet built', mannWhitney?.available, false);
-  check('so no runnable test is recommended', ordinalSmall.best, null);
+  check('and it can be run', mannWhitney?.available, true);
+  check('so it is what the recommender settles on', ordinalSmall.best?.test, 'nonparametric.mannWhitney');
   check(
     'while the t-test is offered as merely possible',
     ordinalSmall.candidates.find((candidate) => candidate.test === 't.independent')?.confidence,
@@ -2011,6 +2019,123 @@ await expectReason('an empty file is refused', 'analysis.error.emptyFile', () =>
   });
 
   check('a single-sheet workbook still reads', parsed.rows.length, 2);
+}
+
+
+
+console.log('\nnon-parametric tests');
+
+/*
+ * The tests the recommender has been naming and refusing to run. Every value
+ * below was produced by SciPy and pasted in, because a statistic that is only
+ * checked against itself is not checked.
+ *
+ * One of them earned its place the hard way: the first exact Mann–Whitney
+ * implementation returned p = 0.0093 where SciPy gives 0.0499. The recurrence
+ * looked reasonable and double-counted arrangements — a difference that would
+ * turn a marginal result significant, found only by comparison.
+ */
+{
+  const a = [12, 15, 18, 20, 22, 25, 28, 30];
+  const b = [10, 11, 13, 14, 16, 17, 19, 21];
+  const result = mannWhitneyTest(a, b, ['A', 'B']);
+
+  check('Mann-Whitney U matches SciPy', result.statistic.value, 13);
+  close('and its exact p-value', result.pValue, 0.0498834499, 1e-9);
+  check('the exact method is used when there are no ties and n is small', (result.detail as { method: string }).method, 'exact');
+  check('medians are reported, since there is no mean to report', result.estimates[0]?.mean, 21);
+}
+
+{
+  /* Complete separation: every value in one group exceeds every value in the other. */
+  const result = mannWhitneyTest([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], ['low', 'high']);
+  check('complete separation gives U = 0', result.statistic.value, 0);
+  close('with the p-value SciPy gives', result.pValue, 0.0079365079, 1e-9);
+  check('and a large effect', result.effect?.band, 'large');
+}
+
+{
+  /*
+   * Likert data — the case this product actually sees. Almost every value is
+   * tied, so the tie correction is what makes the result usable rather than
+   * conservative.
+   */
+  const first = [4, 5, 4, 5, 3, 4, 5, 4, 3, 5, 4, 4];
+  const second = [3, 3, 4, 2, 3, 3, 2, 4, 3, 3, 2, 3];
+  const result = mannWhitneyTest(first, second, ['before', 'after']);
+
+  close('Mann-Whitney with heavy ties matches SciPy', result.pValue, 0.0009423622, 1e-9);
+  check('and falls back to the approximation, which is correct with ties', (result.detail as { method: string }).method, 'normal');
+  assertTrue('the tie correction is reported', result.warnings.some((w) => w.code === 'ties-corrected'));
+}
+
+{
+  const x = [4, 5, 3, 4, 5, 4, 3, 5, 4, 5, 3, 4];
+  const y = [3, 3, 2, 4, 4, 3, 2, 4, 3, 4, 2, 3];
+  const result = wilcoxonSignedRankTest(x, y, ['pre', 'post']);
+
+  check('Wilcoxon W matches SciPy', result.statistic.value, 0);
+  close('and its p-value under the same approximation', result.pValue, 0.0015856049, 1e-9);
+  assertTrue(
+    'zero differences are reported rather than absorbed',
+    result.warnings.some((w) => w.code === 'zero-differences-dropped'),
+  );
+}
+
+{
+  const result = kruskalWallisTest(
+    [[20, 22, 25, 28, 30], [15, 17, 19, 21, 23], [10, 12, 14, 16, 18]],
+    ['g1', 'g2', 'g3'],
+  );
+
+  close('Kruskal-Wallis H matches SciPy', result.statistic.value, 9.68, 1e-9);
+  close('and its p-value', result.pValue, 0.0079070541, 1e-9);
+  check('with two degrees of freedom for three groups', result.df, 2);
+  assertTrue(
+    'a significant omnibus result says it names no pair',
+    result.warnings.some((w) => w.code === 'omnibus-needs-posthoc'),
+  );
+}
+
+/* Refusals: too little data is refused rather than answered unreliably. */
+{
+  let refused = false;
+  try {
+    mannWhitneyTest([1, 2], [3, 4], ['A', 'B']);
+  } catch (error) {
+    refused = (error as { reasonKey?: string }).reasonKey === 'analysis.nonparametric.error.groupTooSmall';
+  }
+  assertTrue('a group of two is refused', refused);
+
+  let unequal = false;
+  try {
+    wilcoxonSignedRankTest([1, 2, 3], [1, 2], ['a', 'b']);
+  } catch (error) {
+    unequal = (error as { reasonKey?: string }).reasonKey === 'analysis.nonparametric.error.unequalPairs';
+  }
+  assertTrue('unequal paired measurements are refused', unequal);
+
+  let tooFewGroups = false;
+  try {
+    kruskalWallisTest([[1, 2, 3], [4, 5, 6]], ['a', 'b']);
+  } catch (error) {
+    tooFewGroups = (error as { reasonKey?: string }).reasonKey === 'analysis.nonparametric.error.tooFewGroups';
+  }
+  assertTrue('Kruskal-Wallis with two groups is refused — that is Mann-Whitney', tooFewGroups);
+}
+
+/*
+ * The assumption these tests are most often reported as having and do not.
+ * They compare medians only when the distributions share a shape; otherwise
+ * they answer whether one group tends to score higher. Declaring it is what
+ * stops "the medians differ" being written when that was not shown.
+ */
+{
+  const result = mannWhitneyTest([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], ['A', 'B']);
+  assertTrue(
+    'the distribution-shape assumption is declared',
+    result.assumptions.some((a) => a.key === 'similar-distribution-shape'),
+  );
 }
 
 

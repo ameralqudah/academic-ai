@@ -126,7 +126,20 @@ export type AssumptionKey =
   | 'multicollinearity'
   | 'no-autocorrelation'
   | 'sample-size'
-  | 'measurement-scale';
+  | 'measurement-scale'
+  /*
+   * The rank-based tests' own assumption, and the one most often misreported.
+   *
+   * Mann–Whitney and Kruskal–Wallis compare medians only when the groups share
+   * a distribution shape; otherwise they answer the weaker question of whether
+   * one group tends to score higher. It cannot be tested from the data in any
+   * useful way, so it is declared rather than checked — but declaring it is
+   * what stops "the medians differ" being written when that is not what was
+   * shown.
+   */
+  | 'similar-distribution-shape'
+  /** Wilcoxon assumes the differences are symmetric about their median. */
+  | 'symmetric-differences';
 
 export type AssumptionStatus =
   | 'met'

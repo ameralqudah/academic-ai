@@ -112,6 +112,7 @@ export default async function ChatPage({
         initialProjectId={project ?? thread?.conversation.projectId ?? null}
         conversationId={thread?.conversation.id ?? null}
         initialTurns={thread ? toTurns(thread.messages) : undefined}
+        initialBranches={thread?.branchPoints ?? []}
         /*
          * A starting phrase, when the user arrived from a sidebar entry like
          * "Academic search". The key is resolved to text here rather than

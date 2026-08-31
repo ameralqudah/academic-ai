@@ -1364,6 +1364,51 @@ async function main() {
   );
   check('switching back restores the original question', restoredThread.messages[2]?.content, 'ومتى أستخدم Welch؟');
 
+  /*
+   * What the interface needs to offer "1 of 2": not just where the fork is, but
+   * which version is showing and what its neighbours are. Computing this on the
+   * client would mean reconstructing tree traversal there, where it can drift
+   * from the server's.
+   */
+  /*
+   * The thread is on the *first* version here — the assertions above stepped
+   * back to it deliberately. Reading the fork fresh rather than reusing an
+   * earlier view: a branch point describes the thread as it stands, and an
+   * earlier snapshot describes a state that has since been navigated away from.
+   */
+  const forked = await getThread(thread.id, chatOwner);
+  check('the fork is reported once', forked.branchPoints.length, 1);
+
+  const point = forked.branchPoints[0];
+  check('with two versions', point?.total, 2);
+  check('showing the original, which is where the previous step left it', point?.index, 0);
+  check('and both siblings listed', point?.siblingIds.length, 2);
+  assertTrue(
+    'the fork names the message currently on the active path',
+    point?.messageId === forked.messages[2]?.id,
+  );
+
+  /* Forward to the edit, by id from the sibling list. */
+  const forward = await switchToBranch(thread.id, chatOwner, point?.siblingIds[1] as string);
+  check('stepping forward shows the edit', forward.messages[2]?.content, 'ومتى أستخدم مان-ويتني؟');
+  check('and the position updates', forward.branchPoints[0]?.index, 1);
+
+  /* And back again — navigation has to work in both directions. */
+  const backward = await switchToBranch(thread.id, chatOwner, point?.siblingIds[0] as string);
+  check('stepping back returns to the original', backward.messages[2]?.content, 'ومتى أستخدم Welch؟');
+  check('and the position follows', backward.branchPoints[0]?.index, 0);
+  check('with the sibling count unchanged', backward.branchPoints[0]?.total, 2);
+
+  /* A thread nobody edited reports no forks at all. */
+  const untouched = await startConversation({ userId: chatOwner, firstMessage: 'بلا تعديل' });
+  await recordTurn({
+    conversationId: untouched.id,
+    userId: chatOwner,
+    userMessage: 'بلا تعديل',
+    assistantMessage: 'جواب.',
+  });
+  check('an unedited thread has no forks', (await getThread(untouched.id, chatOwner)).branchPoints.length, 0);
+
   /* Only the user's own messages. An assistant reply is a record of what was said. */
   let editAssistantBlocked = false;
   try {
@@ -1404,8 +1449,13 @@ async function main() {
     assistantMessage: 'جواب.',
   });
 
+  /*
+   * Three: the main thread, the untouched one used for the no-forks check, and
+   * this second one. Counting them explicitly rather than asserting a bare
+   * number keeps the test honest when another conversation is added above.
+   */
   const recent = await listRecent(chatOwner);
-  check('both conversations appear in the sidebar', recent.length, 2);
+  check('every conversation appears in the sidebar', recent.length, 3);
   check('newest first', recent[0]?.id, second.id);
   check('and another user sees none of them', (await listRecent(chatIntruder)).length, 0);
 
@@ -1418,14 +1468,14 @@ async function main() {
 
   /* Deleting hides without destroying, and can be undone. */
   await deleteConversation(second.id, chatOwner);
-  check('a deleted conversation leaves the list', (await listRecent(chatOwner)).length, 1);
+  check('a deleted conversation leaves the list', (await listRecent(chatOwner)).length, 2);
   check(
     'but its messages are still there',
     (await chatRepo.allMessages(second.id)).length,
     2,
   );
   await chatRepo.unarchive(second.id, chatOwner);
-  check('and it can be restored', (await listRecent(chatOwner)).length, 2);
+  check('and it can be restored', (await listRecent(chatOwner)).length, 3);
 
   /* A permanent purge is a separate, deliberate act. */
   await deleteConversation(second.id, chatOwner, true);

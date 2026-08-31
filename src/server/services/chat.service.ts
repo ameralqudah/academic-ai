@@ -21,17 +21,30 @@ import * as chatRepo from '@/server/repositories/chat.repository';
 /** Above this a user is keeping more threads than any sidebar can serve. */
 const MAX_CONVERSATIONS = 500;
 
+export interface BranchPoint {
+  /** The message currently on the active path. */
+  messageId: string;
+  /** Its position among its siblings, oldest first. */
+  index: number;
+  total: number;
+  /** Sibling ids in the same order, so the interface can step through them. */
+  siblingIds: string[];
+}
+
 export interface ThreadView {
   conversation: AIConversation;
   messages: AIMessageRow[];
   /**
-   * Message ids that have siblings — the forks in this thread.
+   * Where this thread forks, and which version is showing.
    *
-   * Sent so the interface can offer "1 of 2" navigation without asking about
-   * every message individually. Empty for a conversation nobody has edited,
-   * which is most of them.
+   * A list of ids was not enough: the interface has to say "2 of 3" and offer
+   * the neighbours, and asking the server about every message to find out would
+   * be one request per message. Everything needed is computed in the same pass
+   * that already reads the whole conversation.
+   *
+   * Empty for a thread nobody has edited, which is most of them.
    */
-  branchPoints: string[];
+  branchPoints: BranchPoint[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -68,9 +81,30 @@ export async function getThread(id: string, userId: string): Promise<ThreadView>
     childrenByParent.set(key, (childrenByParent.get(key) ?? 0) + 1);
   }
 
-  const branchPoints = messages
+  /*
+   * Siblings grouped by parent, in creation order. `null` is a real key here —
+   * the first message of a thread has no parent, and editing it forks the
+   * conversation at the root like anywhere else.
+   */
+  const siblingsByParent = new Map<string | null, string[]>();
+  for (const message of all) {
+    const key = message.parentMessageId;
+    const group = siblingsByParent.get(key);
+    if (group) group.push(message.id);
+    else siblingsByParent.set(key, [message.id]);
+  }
+
+  const branchPoints: BranchPoint[] = messages
     .filter((message) => (childrenByParent.get(message.parentMessageId) ?? 0) > 1)
-    .map((message) => message.id);
+    .map((message) => {
+      const siblingIds = siblingsByParent.get(message.parentMessageId) ?? [message.id];
+      return {
+        messageId: message.id,
+        index: siblingIds.indexOf(message.id),
+        total: siblingIds.length,
+        siblingIds,
+      };
+    });
 
   return { conversation, messages, branchPoints };
 }

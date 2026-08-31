@@ -23,7 +23,7 @@
  * every read.
  */
 
-import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 
 import { db } from '@/server/db';
 import {
@@ -173,7 +173,7 @@ export async function activeThread(conversationId: string): Promise<AIMessageRow
     .select()
     .from(aiMessages)
     .where(and(eq(aiMessages.conversationId, conversationId), eq(aiMessages.isActive, true)))
-    .orderBy(asc(aiMessages.createdAt));
+    .orderBy(asc(aiMessages.createdAt), asc(aiMessages.id));
 }
 
 /** Every message including inactive branches — for export and for debugging. */
@@ -182,7 +182,20 @@ export async function allMessages(conversationId: string): Promise<AIMessageRow[
     .select()
     .from(aiMessages)
     .where(eq(aiMessages.conversationId, conversationId))
-    .orderBy(asc(aiMessages.createdAt));
+    /*
+     * Id as a tie-break, because the timestamp alone is not one.
+     *
+     * Two messages written in the same millisecond — an edit made moments after
+     * the original, or any two rows inserted in one transaction — come back in
+     * whatever order the planner chose. That made "version 1 of 2" point at a
+     * different sibling between reads, and stepping forward could land back
+     * where it started.
+     *
+     * The ids are UUIDs and carry no order themselves, but they are stable, and
+     * a stable arbitrary order is what sibling navigation needs: the same list
+     * every time.
+     */
+    .orderBy(asc(aiMessages.createdAt), asc(aiMessages.id));
 }
 
 export async function findMessage(
@@ -293,31 +306,85 @@ export async function switchBranch(
   messageId: string,
 ): Promise<AIMessageRow | undefined> {
   return db.transaction(async (tx) => {
-    const [target] = await tx
+    const rows = await tx
       .select()
       .from(aiMessages)
-      .where(and(eq(aiMessages.id, messageId), eq(aiMessages.conversationId, conversationId)))
-      .limit(1);
+      .where(eq(aiMessages.conversationId, conversationId));
 
+    const target = rows.find((row) => row.id === messageId);
     if (!target) return undefined;
 
-    await tx
-      .update(aiMessages)
-      .set({ isActive: false })
-      .where(
-        and(
-          eq(aiMessages.conversationId, conversationId),
-          gte(aiMessages.createdAt, target.createdAt),
-        ),
-      );
+    /*
+     * The active path is recomputed by walking the tree, not by comparing
+     * timestamps.
+     *
+     * Time was the wrong tool and failed in the ordinary case. An edit and the
+     * message it replaces are siblings created seconds apart, and
+     * "deactivate everything at or after this instant" cannot separate them —
+     * so switching left both branches active at once, and the thread showed
+     * whichever the ordering happened to return. Navigation appeared to work
+     * going back and silently did nothing going forward.
+     *
+     * Structure answers the question that time cannot: from the root, follow
+     * the chosen message where its fork is reached and the earliest child
+     * everywhere else. Exactly one child of each parent ends up active, which
+     * is the invariant the whole design rests on.
+     */
+    const childrenOf = new Map<string | null, typeof rows>();
+    for (const row of rows) {
+      const key = row.parentMessageId;
+      const group = childrenOf.get(key);
+      if (group) group.push(row);
+      else childrenOf.set(key, [row]);
+    }
 
-    const [activated] = await tx
-      .update(aiMessages)
-      .set({ isActive: true })
-      .where(eq(aiMessages.id, messageId))
-      .returning();
+    const byCreation = (list: typeof rows) =>
+      [...list].sort((a, b) => {
+        const time = a.createdAt.getTime() - b.createdAt.getTime();
+        return time !== 0 ? time : a.id.localeCompare(b.id);
+      });
 
-    return activated;
+    /* Ancestors of the target, so the walk knows where to turn. */
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const onTargetPath = new Set<string>([messageId]);
+    let ancestor = target.parentMessageId;
+    for (let step = 0; step < rows.length && ancestor; step += 1) {
+      onTargetPath.add(ancestor);
+      ancestor = byId.get(ancestor)?.parentMessageId ?? null;
+    }
+
+    const active = new Set<string>();
+    let cursor: string | null = null;
+
+    for (let step = 0; step < rows.length; step += 1) {
+      const children = childrenOf.get(cursor);
+      if (!children || children.length === 0) break;
+
+      /*
+       * At the fork containing the target, take the target. Elsewhere take the
+       * earliest child, which reproduces the path as it was written.
+       */
+      const chosen =
+        children.find((child) => onTargetPath.has(child.id)) ?? byCreation(children)[0];
+
+      if (!chosen) break;
+      active.add(chosen.id);
+      cursor = chosen.id;
+    }
+
+    const inactive = rows.filter((row) => !active.has(row.id)).map((row) => row.id);
+
+    if (active.size > 0) {
+      await tx
+        .update(aiMessages)
+        .set({ isActive: true })
+        .where(inArray(aiMessages.id, [...active]));
+    }
+    if (inactive.length > 0) {
+      await tx.update(aiMessages).set({ isActive: false }).where(inArray(aiMessages.id, inactive));
+    }
+
+    return byId.get(messageId);
   });
 }
 

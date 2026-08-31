@@ -91,6 +91,36 @@ interface Turn {
   units?: number;
 }
 
+/** A fork in the thread, as the server reports it. */
+interface BranchPoint {
+  messageId: string;
+  index: number;
+  total: number;
+  siblingIds: string[];
+}
+
+/**
+ * Rebuilds the visible turns from stored messages.
+ *
+ * Shared by branch switching and by the page's initial load, so a thread looks
+ * the same whether it was opened from the sidebar or reached by stepping
+ * between versions.
+ */
+function toTurnsFromMessages(
+  messages: { id: string; role: string; content: string; payload: Record<string, unknown> | null }[],
+): Turn[] {
+  return messages.map((message) =>
+    message.role === 'USER'
+      ? { id: message.id, role: 'user' as const, text: message.content }
+      : {
+          id: message.id,
+          role: 'assistant' as const,
+          text: message.content,
+          results: (message.payload?.results ?? []) as Turn['results'],
+        },
+  );
+}
+
 interface AttachedFile {
   datasetId: string;
   name: string;
@@ -113,6 +143,7 @@ export function AgentChat({
   initialDraft,
   conversationId: initialConversationId,
   initialTurns,
+  initialBranches,
 }: {
   locale: 'ar' | 'en';
   projects: ProjectOption[];
@@ -130,6 +161,8 @@ export function AgentChat({
   conversationId?: string | null;
   /** Its saved turns, so a refresh returns to the thread rather than an empty page. */
   initialTurns?: Turn[];
+  /** Where the thread forks, and which version is showing at each fork. */
+  initialBranches?: BranchPoint[];
 }) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
@@ -163,6 +196,12 @@ export function AgentChat({
   const [roles, setRoles] = useState<RoleAssignment[]>([]);
   /** The message being rewritten, if any. */
   const [editingId, setEditingId] = useState<string | null>(null);
+  /*
+   * Forks in the saved thread. Only ever populated from the server, because
+   * whether a message has siblings is a fact about the stored tree rather than
+   * anything the client could work out from what it has on screen.
+   */
+  const [branches, setBranches] = useState<BranchPoint[]>(initialBranches ?? []);
   const [modelId, setModelId] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<{
     modes: ModeOption[];
@@ -598,6 +637,38 @@ export function AgentChat({
     }
   }
 
+  /**
+   * Moves to another version of a message.
+   *
+   * The server deactivates the current path from the fork onward and activates
+   * the chosen branch, then returns the thread as it now reads. Rebuilding from
+   * that response rather than patching locally means the screen matches what is
+   * stored — the alternative is a client-side reconstruction of tree traversal
+   * that can drift from the server's.
+   */
+  async function switchBranch(messageId: string) {
+    if (!conversationId) return;
+
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'switchBranch', messageId }),
+      });
+
+      const json = await response.json();
+      if (!response.ok || !json.ok) {
+        setError(json?.error?.message ?? te('generic'));
+        return;
+      }
+
+      setTurns(toTurnsFromMessages(json.data.messages ?? []));
+      setBranches(json.data.branchPoints ?? []);
+    } catch {
+      setError(te('network'));
+    }
+  }
+
   function stop() {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -628,6 +699,8 @@ export function AgentChat({
               <TurnView
                 key={turn.id}
                 turn={turn}
+                branch={branches.find((point) => point.messageId === turn.id)}
+                onSwitchBranch={(messageId) => void switchBranch(messageId)}
                 editing={editingId === turn.id}
                 onStartEdit={() => setEditingId(turn.id)}
                 onCancelEdit={() => setEditingId(null)}
@@ -742,18 +815,42 @@ function addsMeaning(restatement: string, userMessage?: string): boolean {
 function TurnView({
   turn,
   editing,
+  branch,
   onStartEdit,
   onCancelEdit,
   onSubmitEdit,
   onRegenerate,
+  onSwitchBranch,
 }: {
   turn: Turn;
   editing: boolean;
+  /** Present when this message has siblings — other versions of the same turn. */
+  branch?: BranchPoint;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSubmitEdit: (value: string) => void;
   onRegenerate: () => void;
+  onSwitchBranch: (messageId: string) => void;
 }) {
+  /*
+   * Turned into the shape the actions component wants. Stepping is by position
+   * in the sibling list rather than by id arithmetic, so "previous" means the
+   * version written before this one.
+   */
+  const branchNav = branch
+    ? {
+        index: branch.index,
+        total: branch.total,
+        onPrevious: () => {
+          const target = branch.siblingIds[branch.index - 1];
+          if (target) onSwitchBranch(target);
+        },
+        onNext: () => {
+          const target = branch.siblingIds[branch.index + 1];
+          if (target) onSwitchBranch(target);
+        },
+      }
+    : undefined;
   const t = useTranslations('agent');
 
   if (turn.role === 'user') {
@@ -777,7 +874,12 @@ function TurnView({
         <div className="max-w-[85%] rounded-2xl bg-accent px-4 py-2.5 text-sm text-on-accent">
           {turn.text}
         </div>
-        <MessageActions role="user" content={turn.text ?? ''} onEdit={onStartEdit} />
+        <MessageActions
+          role="user"
+          content={turn.text ?? ''}
+          onEdit={onStartEdit}
+          branch={branchNav}
+        />
       </div>
     );
   }
@@ -850,7 +952,12 @@ function TurnView({
         invite a click that races the answer still arriving.
       */}
       {turn.text && !turn.stages?.some((stage) => stage.status === 'running') && (
-        <MessageActions role="assistant" content={turn.text} onRegenerate={onRegenerate} />
+        <MessageActions
+          role="assistant"
+          content={turn.text}
+          onRegenerate={onRegenerate}
+          branch={branchNav}
+        />
       )}
     </div>
   );

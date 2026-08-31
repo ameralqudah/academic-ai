@@ -445,6 +445,42 @@ export async function answerGeneralQuestion(input: {
 }
 
 /**
+ * Reads a structural model out of a researcher's description.
+ *
+ * Temperature at zero, which is unusual here and deliberate: this is a parsing
+ * task with one right answer, not a writing task. Two researchers describing
+ * the same model should get the same structure, and the same researcher asking
+ * twice should not get two.
+ *
+ * A small token budget for the same reason — the reply is a short JSON object,
+ * and a generous budget invites the explanation the prompt asks it not to give.
+ */
+export async function extractModelStructure(input: {
+  userId: string;
+  description: string;
+  locale: 'ar' | 'en';
+  system: string;
+}): Promise<{ text: string; usage: { tokensIn: number; tokensOut: number } }> {
+  await assertCanUseAI(input.userId, 200);
+
+  const provider = await resolveProvider();
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system: input.system,
+    messages: [{ role: 'user', content: input.description }],
+    maxTokens: 600,
+    temperature: 0,
+  });
+
+  return { text: result.text, usage: result.usage };
+}
+
+/**
  * Describes academic sources that were actually retrieved.
  *
  * The rules given to the model are the same ones the results chapter uses for

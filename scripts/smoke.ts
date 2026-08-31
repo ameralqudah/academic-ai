@@ -28,6 +28,11 @@ import {
   shouldOfferModelChoice,
 } from '@/agents/modes';
 import { containsMath } from '@/components/chat/markdown';
+import {
+  buildDraftFromStructure,
+  parseProposedStructure,
+  STRUCTURE_EXTRACTION_PROMPT,
+} from '@/analysis/inference/pls/extract';
 import { validateDraft } from '@/components/agent/pls-builder';
 import { resolveReason } from '@/server/http/reasons';
 import { mergeSources } from '@/server/knowledge/merge';
@@ -1348,6 +1353,154 @@ assertTrue('a draft converts to a model', schemaSource.includes('export function
 assertTrue(
   'and a model converts back, for editing a proposal',
   schemaSource.includes('export function modelToDraft'),
+);
+
+
+console.log('\nPLS conversational extraction');
+
+/*
+ * Reading a model out of a sentence. The language model proposes; the
+ * researcher confirms. What is tested here is everything after the model
+ * replies — the parsing and the column matching — because that is where a wrong
+ * answer becomes a model someone might run without noticing.
+ */
+check(
+  'a well-formed reply parses',
+  parseProposedStructure('{"constructs":["Satisfaction","Loyalty"],"paths":[{"from":"Satisfaction","to":"Loyalty"}]}')
+    ?.constructs.length,
+  2,
+);
+
+/* Models wrap JSON in a fence despite being told not to. */
+check(
+  'a fenced reply parses',
+  parseProposedStructure('```json\n{"constructs":["A","B"],"paths":[{"from":"A","to":"B"}]}\n```')?.paths.length,
+  1,
+);
+
+check(
+  'and one with surrounding prose',
+  parseProposedStructure('Here is the model:\n{"constructs":["A","B"],"paths":[{"from":"A","to":"B"}]}\nHope that helps.')
+    ?.constructs[0],
+  'A',
+);
+
+/*
+ * A path naming a construct that was not listed means the model misread the
+ * sentence. The path is dropped rather than the construct being invented —
+ * silently adding it would put something in the researcher's model that they
+ * never mentioned.
+ */
+check(
+  'a path to an unlisted construct is dropped',
+  parseProposedStructure(
+    '{"constructs":["A","B"],"paths":[{"from":"A","to":"B"},{"from":"B","to":"C"}]}',
+  )?.paths.length,
+  1,
+);
+
+check('a reply with one construct is rejected', parseProposedStructure('{"constructs":["A"],"paths":[]}'), null);
+check('a reply with no usable path is rejected', parseProposedStructure('{"constructs":["A","B"],"paths":[]}'), null);
+check('a self-path is dropped, leaving nothing', parseProposedStructure('{"constructs":["A","B"],"paths":[{"from":"A","to":"A"}]}'), null);
+check('malformed JSON is rejected', parseProposedStructure('not json at all'), null);
+check('an empty reply is rejected', parseProposedStructure(''), null);
+
+/* Column matching, which is the guess rather than the reading. */
+{
+  const columns = [
+    'satisfaction_1', 'satisfaction_2', 'satisfaction_3',
+    'loyalty_1', 'loyalty_2',
+    'age', 'gender',
+  ];
+
+  const extracted = buildDraftFromStructure(
+    { constructs: ['Satisfaction', 'Loyalty'], paths: [{ from: 'Satisfaction', to: 'Loyalty' }] },
+    columns,
+  );
+
+  check('indicators are matched by name', extracted.matchedIndicators.Satisfaction?.length, 3);
+  check('for both constructs', extracted.matchedIndicators.Loyalty?.length, 2);
+  check('and unrelated columns are left alone', extracted.unmatchedConstructs.length, 0);
+  assertTrue(
+    'demographic columns are not swept in',
+    !(extracted.matchedIndicators.Satisfaction ?? []).includes('age'),
+  );
+}
+
+/* Abbreviated item series — the common export convention. */
+{
+  const extracted = buildDraftFromStructure(
+    { constructs: ['Satisfaction', 'Performance'], paths: [{ from: 'Satisfaction', to: 'Performance' }] },
+    ['SAT1', 'SAT2', 'SAT3', 'PERF1', 'PERF2', 'SATURATION_LEVEL'],
+  );
+
+  check('a SAT1/SAT2 series is matched', extracted.matchedIndicators.Satisfaction?.length, 3);
+  /*
+   * The prefix rule requires digits after the abbreviation, which is what keeps
+   * "SATURATION_LEVEL" out of "Satisfaction" — a column that starts with the
+   * same four letters and measures something else entirely.
+   */
+  assertTrue(
+    'a similarly-spelled unrelated column is not',
+    !(extracted.matchedIndicators.Satisfaction ?? []).includes('SATURATION_LEVEL'),
+  );
+}
+
+/*
+ * When nothing matches — the ordinary case on real data, where items are called
+ * Q17_3 — the construct is kept and reported as unmatched. Dropping it would
+ * leave the researcher working out what went missing.
+ */
+{
+  const extracted = buildDraftFromStructure(
+    { constructs: ['Job Satisfaction', 'Turnover Intention'], paths: [{ from: 'Job Satisfaction', to: 'Turnover Intention' }] },
+    ['Q1', 'Q2', 'Q3', 'Q4', 'V17', 'V18'],
+  );
+
+  check('both constructs are reported unmatched', extracted.unmatchedConstructs.length, 2);
+  check('but both still appear in the draft', extracted.draft.constructs.length, 2);
+  check('with no indicators guessed', extracted.draft.constructs[0]?.indicators.length, 0);
+  check('and the paths preserved', extracted.draft.paths.length, 1);
+}
+
+/* A column already claimed by one construct is not given to another. */
+{
+  const extracted = buildDraftFromStructure(
+    { constructs: ['Trust', 'Trustworthiness'], paths: [{ from: 'Trust', to: 'Trustworthiness' }] },
+    ['trust_1', 'trust_2', 'trustworthiness_1'],
+  );
+
+  const all = Object.values(extracted.matchedIndicators).flat();
+  check('no column is assigned twice', all.length, new Set(all).size);
+}
+
+/* Arabic construct names match Arabic column names. */
+{
+  const extracted = buildDraftFromStructure(
+    { constructs: ['الرضا', 'الولاء'], paths: [{ from: 'الرضا', to: 'الولاء' }] },
+    ['الرضا_1', 'الرضا_2', 'الولاء_1', 'العمر'],
+  );
+
+  check('Arabic indicators are matched', extracted.matchedIndicators['الرضا']?.length, 2);
+  assertTrue('and unrelated Arabic columns are not', !(extracted.matchedIndicators['الرضا'] ?? []).includes('العمر'));
+}
+
+/*
+ * The proposal must reach the researcher as a proposal. This asserts the route
+ * says so rather than returning something the client might run directly.
+ */
+const extractRoute = await readFile('src/app/api/pls/extract/route.ts', 'utf8');
+assertTrue('the route marks its output as requiring confirmation', extractRoute.includes('requiresConfirmation: true'));
+assertTrue('and does not estimate anything itself', !extractRoute.includes('estimatePls') && !extractRoute.includes('runPls'));
+
+/* The prompt must state the direction rules, which are what a model gets wrong. */
+assertTrue(
+  'the extraction prompt covers reversed phrasing',
+  STRUCTURE_EXTRACTION_PROMPT.includes('depends on') && STRUCTURE_EXTRACTION_PROMPT.includes('reverses'),
+);
+assertTrue(
+  'and mediation, so A→B→C does not become A→C',
+  STRUCTURE_EXTRACTION_PROMPT.includes('mediator'),
 );
 
 console.log('\nPLS model builder');

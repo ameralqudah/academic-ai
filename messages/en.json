@@ -892,7 +892,8 @@
         "cyclicModel": "The model contains a cycle ({cycle}); PLS requires a recursive model.",
         "tooFewCases": "Too few complete cases ({n}); at least {minimum} are needed.",
         "constantIndicator": "The indicator \"{indicator}\" does not vary — every response is identical.",
-        "singularConstruct": "Two indicators are identical or one is a linear combination of others, so there is no unique solution."
+        "singularConstruct": "Two indicators are identical or one is a linear combination of others, so there is no unique solution.",
+        "bootstrapUnstable": "{failed} of {resamples} resamples failed to converge; the model is too unstable for reliable estimates. Review the indicators and the sample."
       }
     }
   },

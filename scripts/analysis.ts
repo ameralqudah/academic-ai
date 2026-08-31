@@ -25,6 +25,7 @@ import {
   validateModel,
   type PlsModel,
 } from '@/analysis/inference/pls/algorithm';
+import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
 import {
   kruskalWallisTest,
   mannWhitneyTest,
@@ -2515,6 +2516,124 @@ console.log('\nPLS-SEM');
     ],
     paths: [],
   });
+}
+
+
+
+/*
+ * Bootstrapping.
+ *
+ * PLS has no formula for the standard error of a path, so the sampling
+ * distribution is obtained by resampling. What can be checked without a
+ * reference implementation is the behaviour that matters: a path built to be
+ * zero must come back non-significant, paths built to be real must not, and the
+ * resampled means must sit near the original estimates.
+ *
+ * The last of those is the check on sign correction. A latent variable's
+ * direction is arbitrary, so a fraction of resamples come back mirrored;
+ * averaging them unflipped drags every coefficient toward zero. If that
+ * correction broke, the bootstrap mean would fall well below the original and
+ * this assertion would catch it.
+ */
+{
+  let bootSeed = 7;
+  const bootRand = () => {
+    bootSeed = (bootSeed * 1103515245 + 12345) & 0x7fffffff;
+    return bootSeed / 0x7fffffff;
+  };
+  const bootNormal = () => {
+    const u = Math.max(bootRand(), 1e-9);
+    const v = bootRand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const bootData = new Map<string, number[]>();
+  for (const column of ['a1','a2','a3','b1','b2','b3','c1','c2','c3']) bootData.set(column, []);
+
+  for (let i = 0; i < 200; i += 1) {
+    const A = bootNormal();
+    const B = 0.55 * A + Math.sqrt(1 - 0.3025) * bootNormal();
+    /* C depends on B alone — the A→C path is genuinely zero. */
+    const C = 0.5 * B + 0.7 * bootNormal();
+
+    for (const [prefix, latent] of [['a', A], ['b', B], ['c', C]] as [string, number][]) {
+      for (let j = 1; j <= 3; j += 1) {
+        (bootData.get(`${prefix}${j}`) as number[]).push(0.85 * latent + 0.5 * bootNormal());
+      }
+    }
+  }
+
+  const bootModel: PlsModel = {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' },
+      { name: 'C', indicators: ['c1', 'c2', 'c3'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }, { from: 'B', to: 'C' }, { from: 'A', to: 'C' }],
+  };
+
+  const bootFit = estimatePls(bootModel, bootData);
+  let reachedPercent = 0;
+
+  const boot = bootstrapPls(bootModel, bootData, bootFit, {
+    resamples: 500,
+    onProgress: (percent) => {
+      reachedPercent = percent;
+    },
+  });
+
+  check('every resample converged', boot.failed, 0);
+  check('and all were used', boot.resamples, 500);
+  check('progress is reported to completion', reachedPercent, 100);
+
+  const aToB = boot.paths.find((path) => path.key === 'A→B');
+  const bToC = boot.paths.find((path) => path.key === 'B→C');
+  const aToC = boot.paths.find((path) => path.key === 'A→C');
+
+  /*
+   * The assertion the whole method exists for: a path that is really zero must
+   * not be declared significant, and one that is real must be.
+   */
+  check('a path built to be zero is not significant', aToC?.significant, false);
+  assertTrue('and its interval spans zero', (aToC?.lower ?? 0) < 0 && (aToC?.upper ?? 0) > 0);
+
+  check('a real path is significant', aToB?.significant, true);
+  assertTrue('with a t-statistic above the conventional 1.96', (aToB?.tStatistic ?? 0) > 1.96);
+  check('and the second real path too', bToC?.significant, true);
+
+  /* Sign correction: the resampled mean must not collapse toward zero. */
+  for (const path of boot.paths) {
+    assertTrue(
+      `the bootstrap mean for ${path.key} stays near the original estimate`,
+      Math.abs(path.bootstrapMean - path.original) < 0.05,
+    );
+  }
+
+  /* Intervals must bracket their own estimate — a basic sanity property. */
+  for (const path of boot.paths) {
+    assertTrue(
+      `the interval for ${path.key} contains the estimate`,
+      path.lower <= path.original + 1e-9 && path.upper >= path.original - 1e-9,
+    );
+    assertTrue(`and is ordered`, path.lower <= path.upper);
+  }
+
+  assertTrue('loadings are bootstrapped as well as paths', boot.loadings.length === 9);
+  assertTrue('and weights', boot.weights.length === 9);
+  assertTrue(
+    'every loading is significant in a well-measured model',
+    boot.loadings.every((loading) => loading.significant),
+  );
+
+  /* A fixed seed makes a thesis reproducible. */
+  const repeat = bootstrapPls(bootModel, bootData, bootFit, { resamples: 200, seed: 99 });
+  const again = bootstrapPls(bootModel, bootData, bootFit, { resamples: 200, seed: 99 });
+  close(
+    'the same seed gives the same standard error',
+    repeat.paths[0]?.standardError ?? 0,
+    again.paths[0]?.standardError ?? 1,
+    1e-12,
+  );
 }
 
 

@@ -29,6 +29,13 @@
       "when": 1788106605861,
       "tag": "0003_conversation_persistence",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788187407798,
+      "tag": "0004_analysis_jobs",
+      "breakpoints": true
     }
   ]
 }

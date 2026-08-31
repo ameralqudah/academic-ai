@@ -729,6 +729,60 @@ export const analysisRuns = pgTable(
  * task carries structure — stages, timings, a declared ceiling — that a usage
  * row has nowhere to put.
  */
+/**
+ * Long-running analyses that outlive the request that started them.
+ *
+ * Bootstrapping a PLS model means running the estimation five thousand times.
+ * That takes a minute or more, and an HTTP request will not survive it — so the
+ * request records a job, returns its id, and the work continues afterwards
+ * while the client polls.
+ *
+ * Separate from `agent_tasks`, which measures what the agent did for metering
+ * and never carries a payload. This carries the result, and the two answer
+ * different questions: one is "what did this cost", the other is "is it ready".
+ *
+ * The honest limitation, recorded here because it shapes the design: on the
+ * current hosting the work runs inside the web process. A redeploy mid-run
+ * loses it, which is why `startedAt` exists — anything still RUNNING at boot
+ * is marked failed rather than left claiming to be in progress forever.
+ */
+export const analysisJobs = pgTable(
+  'analysis_jobs',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    datasetId: text('dataset_id').references(() => datasets.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    /** 'pls.bootstrap' for now; the table is general on purpose. */
+    kind: varchar('kind', { length: 64 }).notNull(),
+    status: varchar('status', { length: 16 })
+      .$type<'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'>()
+      .default('QUEUED')
+      .notNull(),
+    /** 0–100, so the interface can show something moving rather than a spinner. */
+    progress: integer('progress').default(0).notNull(),
+    /** What it is doing now — 'estimating', 'resampling', 'summarising'. */
+    stage: varchar('stage', { length: 32 }),
+    /** The model specification and options, so a job can be re-run or explained. */
+    spec: jsonb('spec').$type<Record<string, unknown>>().notNull(),
+    result: jsonb('result').$type<Record<string, unknown> | null>(),
+    /** A reason key, resolved to a sentence when it is shown. */
+    errorReasonKey: varchar('error_reason_key', { length: 128 }),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+    durationMs: integer('duration_ms'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index('analysis_jobs_user_idx').on(table.userId, table.createdAt),
+    /* Finding work to resume, and finding jobs orphaned by a restart. */
+    index('analysis_jobs_status_idx').on(table.status, table.startedAt),
+  ],
+);
+
 export const agentTasks = pgTable(
   'agent_tasks',
   {
@@ -917,6 +971,8 @@ export type ResearchSection = typeof researchSections.$inferSelect;
 export type SectionVersion = typeof sectionVersions.$inferSelect;
 export type TitleCandidate = typeof titleCandidates.$inferSelect;
 export type ReferenceRow = typeof references.$inferSelect;
+export type AnalysisJob = typeof analysisJobs.$inferSelect;
+export type NewAnalysisJob = typeof analysisJobs.$inferInsert;
 export type AIConversation = typeof aiConversations.$inferSelect;
 export type NewAIConversation = typeof aiConversations.$inferInsert;
 export type AIMessageRow = typeof aiMessages.$inferSelect;

@@ -463,6 +463,36 @@ function structuralSection(
       },
     });
 
+    /*
+     * Q² beside R², because they answer different questions and a reader who
+     * sees only R² will assume the model predicts. Where it was withheld, the
+     * reason is stated rather than the row being silently absent.
+     */
+    const relevance = endogenous.predictiveRelevance;
+
+    if (relevance) {
+      findings.push(
+        relevance.status === 'available'
+          ? {
+              key:
+                relevance.qSquared > 0
+                  ? 'analysis.pls.report.qSquared.relevant'
+                  : 'analysis.pls.report.qSquared.notRelevant',
+              severity: relevance.qSquared > 0 ? 'ok' : 'attention',
+              params: {
+                construct: endogenous.construct,
+                value: round(relevance.qSquared),
+                band: relevance.band,
+              },
+            }
+          : {
+              key: `analysis.pls.report.qSquared.withheld.${relevance.status}`,
+              severity: 'attention',
+              params: { construct: endogenous.construct, passes: relevance.passesUsed },
+            },
+      );
+    }
+
     if (endogenous.vifVerdict !== 'met') {
       /*
        * Collinearity between predictors inflates path coefficients and their

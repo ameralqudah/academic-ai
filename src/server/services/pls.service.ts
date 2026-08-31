@@ -34,6 +34,11 @@ import {
   validateModel,
   type PlsModel,
 } from '@/analysis/inference/pls/algorithm';
+import {
+  blindfold,
+  usableOmissionDistance,
+  type PredictiveRelevance,
+} from '@/analysis/inference/pls/blindfolding';
 import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
 import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
 import { logger } from '@/lib/logger';
@@ -108,7 +113,27 @@ export async function runPls(input: {
 
     const measurement = assessMeasurement(input.model, estimate, columns);
     const discriminant = assessDiscriminantValidity(input.model, estimate, columns, measurement);
-    const structural = assessStructural(input.model, estimate);
+
+    /*
+     * Blindfolding runs inline: it costs seven re-estimations, which is
+     * milliseconds, not the minute that pushed bootstrapping into a background
+     * job. A failure is swallowed rather than propagated — predictive relevance
+     * is one figure among many, and losing the whole analysis because it could
+     * not be computed would be a poor trade.
+     */
+    let relevance: PredictiveRelevance[] | undefined;
+    try {
+      relevance = blindfold(input.model, columns, estimate, {
+        omissionDistance: usableOmissionDistance(estimate.n),
+      });
+    } catch (error) {
+      logger.info('pls.blindfoldingSkipped', {
+        datasetId: input.datasetId,
+        reason: error instanceof PlsError ? error.reasonKey : 'unknown',
+      });
+    }
+
+    const structural = assessStructural(input.model, estimate, relevance);
 
     logger.info('pls.estimated', {
       datasetId: input.datasetId,
@@ -303,7 +328,17 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
      */
     const measurement = assessMeasurement(spec.model, estimate, columns);
     const discriminant = assessDiscriminantValidity(spec.model, estimate, columns, measurement);
-    const structural = assessStructural(spec.model, estimate);
+
+    let jobRelevance: PredictiveRelevance[] | undefined;
+    try {
+      jobRelevance = blindfold(spec.model, columns, estimate, {
+        omissionDistance: usableOmissionDistance(estimate.n),
+      });
+    } catch {
+      /* As above: one figure, not the analysis. */
+    }
+
+    const structural = assessStructural(spec.model, estimate, jobRelevance);
 
     const report = buildReport({
       measurement,

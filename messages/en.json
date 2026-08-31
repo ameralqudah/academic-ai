@@ -893,7 +893,9 @@
         "tooFewCases": "Too few complete cases ({n}); at least {minimum} are needed.",
         "constantIndicator": "The indicator \"{indicator}\" does not vary — every response is identical.",
         "singularConstruct": "Two indicators are identical or one is a linear combination of others, so there is no unique solution.",
-        "bootstrapUnstable": "{failed} of {resamples} resamples failed to converge; the model is too unstable for reliable estimates. Review the indicators and the sample."
+        "bootstrapUnstable": "{failed} of {resamples} resamples failed to converge; the model is too unstable for reliable estimates. Review the indicators and the sample.",
+        "badOmissionDistance": "The omission distance {distance} is outside the accepted range (2 to 20).",
+        "omissionDistanceDivides": "The omission distance {distance} divides the sample size {n} exactly; the same positions would be removed on every pass, so the procedure would not cover the data."
       },
       "report": {
         "section": {
@@ -989,6 +991,15 @@
           "t": "t",
           "p": "p",
           "ci": "95% CI"
+        },
+        "qSquared": {
+          "relevant": "Predictive relevance for {construct}: Q² = {value}. The model predicts this construct better than its own mean does.",
+          "notRelevant": "Predictive relevance for {construct}: Q² = {value}, at or below zero — the model does not predict this construct better than its mean, however high R² is.",
+          "withheld": {
+            "no-explained-variance": "Predictive relevance could not be established for {construct}: the model explains too little of its variance for there to be a prediction to assess. No figure is shown, because any value here would be noise rather than a result.",
+            "insufficient-passes": "Predictive relevance could not be established for {construct}: only {passes} blindfolding passes succeeded, too few to rest an estimate on.",
+            "undefined-baseline": "Predictive relevance could not be established for {construct}: the baseline sum of squares is zero, so the ratio is undefined."
+          }
         }
       },
       "export": {

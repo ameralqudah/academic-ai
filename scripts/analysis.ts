@@ -28,6 +28,7 @@ import {
   type PlsModel,
 } from '@/analysis/inference/pls/algorithm';
 import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
+import { blindfold, usableOmissionDistance } from '@/analysis/inference/pls/blindfolding';
 import { buildReport } from '@/analysis/inference/pls/report';
 import { exportPlsToExcel, exportPlsToWord } from '@/server/services/pls-export.service';
 import {
@@ -2970,6 +2971,131 @@ console.log('\nPLS-SEM export');
     'loadings are written as numbers rather than text',
     typeof secondRow?.getCell(2).value === 'number',
   );
+}
+
+
+
+console.log('\nPLS-SEM predictive relevance (Q²)');
+
+/*
+ * Q² asks whether the model predicts, which R² does not: a model with enough
+ * predictors fits its own data well while predicting nothing about a new case.
+ * Blindfolding answers it by holding data back, re-estimating, and comparing
+ * the prediction error against predicting the mean.
+ *
+ * Two regression tests, both from observed behaviour rather than from theory.
+ * Nothing here asserts that Q² must fall below R² — that relationship was
+ * claimed during development on intuition rather than a source, and the claim
+ * was withdrawn.
+ */
+function plsQTestData(realPath: boolean, n: number, seed = 13) {
+  let state = seed;
+  const rand = () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x7fffffff;
+  };
+  const normal = () => {
+    const u = Math.max(rand(), 1e-9);
+    const v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const data = new Map<string, number[]>();
+  for (const column of ['a1', 'a2', 'a3', 'b1', 'b2', 'b3']) data.set(column, []);
+
+  for (let i = 0; i < n; i += 1) {
+    const A = normal();
+    /* With realPath false, B is independent of A — nothing to predict. */
+    const B = realPath ? 0.6 * A + 0.8 * normal() : normal();
+
+    for (let j = 1; j <= 3; j += 1) (data.get(`a${j}`) as number[]).push(0.85 * A + 0.5 * normal());
+    for (let j = 1; j <= 3; j += 1) (data.get(`b${j}`) as number[]).push(0.85 * B + 0.5 * normal());
+  }
+
+  return data;
+}
+
+const qModel: PlsModel = {
+  constructs: [
+    { name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' },
+    { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' },
+  ],
+  paths: [{ from: 'A', to: 'B' }],
+};
+
+/*
+ * The validated result, pinned. A change to the algorithm that moves this is a
+ * change worth noticing — it may be an improvement, and it should not pass
+ * unremarked.
+ */
+{
+  const data = plsQTestData(true, 200);
+  const fit = estimatePls(qModel, data);
+  const relevance = blindfold(qModel, data, fit, {
+    omissionDistance: usableOmissionDistance(200),
+  })[0];
+
+  const structural = assessStructural(qModel, fit);
+  const rSquared = structural.endogenous[0]?.rSquared ?? 0;
+
+  check('a real path yields an interpretable Q²', relevance?.status, 'available');
+  close('Q² matches the validated value', relevance?.qSquared ?? 0, 0.2961, 0.005);
+  close('alongside the R² it was validated against', rSquared, 0.3407, 0.005);
+  check('and is banded as medium predictive relevance', relevance?.band, 'medium');
+  check('every pass contributed', relevance?.passesUsed, 7);
+}
+
+/*
+ * The edge case that was returning a number it should not have.
+ *
+ * With no real path there is nothing to predict, and this implementation was
+ * observed to produce figures that could not be relied on in that regime. It
+ * now withholds the value and says why, rather than presenting noise over noise
+ * as a result — a number a researcher cannot rely on is worse than an absent
+ * one, because it will be copied into a table and defended.
+ */
+{
+  const data = plsQTestData(false, 200);
+  const fit = estimatePls(qModel, data);
+  const relevance = blindfold(qModel, data, fit, {
+    omissionDistance: usableOmissionDistance(200),
+  })[0];
+
+  check('a null model withholds Q²', relevance?.status, 'no-explained-variance');
+  check('and says so rather than reporting a band', relevance?.band, 'unavailable');
+  assertTrue('the value is NaN, not a plausible-looking number', Number.isNaN(relevance?.qSquared ?? 0));
+  check('while still reporting how many passes ran', relevance?.passesUsed, 7);
+}
+
+/*
+ * The omission distance must not divide the sample size: if it does, every pass
+ * removes the same positions and the procedure evaluates one partition
+ * repeatedly instead of covering the data.
+ */
+{
+  const data = plsQTestData(true, 203);
+  const fit = estimatePls(qModel, data);
+
+  let refused = false;
+  try {
+    blindfold(qModel, data, fit, { omissionDistance: 7 });
+  } catch (error) {
+    refused = (error as { reasonKey?: string }).reasonKey === 'analysis.pls.error.omissionDistanceDivides';
+  }
+
+  assertTrue('an omission distance that divides n is refused (203 = 7 × 29)', refused);
+  check('and a usable one is offered instead', usableOmissionDistance(203), 8);
+  check('7 is fine for 200', usableOmissionDistance(200), 7);
+}
+
+/* Only endogenous constructs have predictive relevance to assess. */
+{
+  const data = plsQTestData(true, 200);
+  const fit = estimatePls(qModel, data);
+  const relevance = blindfold(qModel, data, fit, { omissionDistance: 7 });
+
+  check('one result, for the one endogenous construct', relevance.length, 1);
+  check('and it is the predicted one', relevance[0]?.construct, 'B');
 }
 
 

@@ -28,6 +28,8 @@
 
 import { pearson } from '../../stats-core';
 
+import type { PredictiveRelevance } from './blindfolding';
+
 import type { LatentConstruct, OuterWeight, PlsEstimate, PlsModel } from './algorithm';
 
 /* -------------------------------------------------------------------------- */
@@ -542,6 +544,14 @@ export interface PathAssessment {
 export interface EndogenousAssessment {
   construct: string;
   rSquared: number;
+  /**
+   * Predictive relevance, when blindfolding was run and could support a value.
+   *
+   * Optional because blindfolding costs seven re-estimations and is not always
+   * wanted, and because it is withheld where this implementation cannot support
+   * a figure. Absent and withheld are different states, and the report says so.
+   */
+  predictiveRelevance?: PredictiveRelevance;
   adjustedRSquared: number;
   band: 'weak' | 'moderate' | 'substantial';
   /** Collinearity among this construct's predictors. */
@@ -557,6 +567,8 @@ export interface StructuralAssessment {
 export function assessStructural(
   model: PlsModel,
   estimate: PlsEstimate,
+  /** Blindfolding results, when they were computed. */
+  relevance?: PredictiveRelevance[],
 ): StructuralAssessment {
   const endogenous: EndogenousAssessment[] = [];
   const paths: PathAssessment[] = [];
@@ -592,6 +604,7 @@ export function assessStructural(
     endogenous.push({
       construct: construct.name,
       rSquared,
+      predictiveRelevance: relevance?.find((entry) => entry.construct === construct.name),
       adjustedRSquared: adjusted,
       band: rSquared >= 0.75 ? 'substantial' : rSquared >= 0.5 ? 'moderate' : 'weak',
       maxVif: worstVif,

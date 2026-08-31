@@ -4,6 +4,13 @@ import { AlertTriangle, ArrowRight, Check, Plus, Search, Trash2 } from 'lucide-r
 import { useTranslations } from 'next-intl';
 import { useMemo, useState } from 'react';
 
+import {
+  validateModelStructure,
+  type DraftConstruct as BuilderConstruct,
+  type MeasurementMode,
+  type PlsModelDraft,
+  type StructuralPath as BuilderPath,
+} from '@/analysis/inference/pls/schema';
 import type { ColumnSummary } from '@/components/agent/role-picker';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -31,132 +38,18 @@ import { cn } from '@/lib/cn';
  * resampling is a minute spent to be told something knowable immediately.
  */
 
-export type MeasurementMode = 'reflective' | 'formative';
-
-export interface BuilderConstruct {
-  id: string;
-  name: string;
-  indicators: string[];
-  mode: MeasurementMode;
-}
-
-export interface BuilderPath {
-  from: string;
-  to: string;
-}
-
-export interface PlsModelDraft {
-  constructs: BuilderConstruct[];
-  paths: BuilderPath[];
-}
-
-interface ValidationIssue {
-  key: string;
-  params?: Record<string, string | number>;
-}
-
-/**
- * Every rule the engine will apply, applied here first.
- *
- * Deliberately duplicated rather than shared: the server must validate
- * independently — a client check is a convenience and never a guarantee — and
- * this version can be more forgiving, reporting all the problems at once rather
- * than throwing on the first.
+/*
+ * Types and structural validation come from the canonical schema, which the
+ * engine and the API route also use. They were duplicated here, and the
+ * duplication meant a rule tightened in the engine could still pass in the
+ * builder — the researcher would be told the model was fine and then refused.
  */
-function validate(draft: PlsModelDraft): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-
-  if (draft.constructs.length < 2) {
-    issues.push({ key: 'tooFewConstructs', params: { count: draft.constructs.length } });
-  }
-
-  const names = new Set<string>();
-  const owners = new Map<string, string>();
-
-  for (const construct of draft.constructs) {
-    const name = construct.name.trim();
-
-    if (!name) {
-      issues.push({ key: 'unnamedConstruct' });
-    } else if (names.has(name)) {
-      issues.push({ key: 'duplicateName', params: { name } });
-    } else {
-      names.add(name);
-    }
-
-    if (construct.indicators.length === 0) {
-      issues.push({ key: 'noIndicators', params: { name: name || '—' } });
-    }
-
-    for (const indicator of construct.indicators) {
-      const owner = owners.get(indicator);
-      /*
-       * An indicator in two constructs makes their scores partly the same
-       * variable, which guarantees they will correlate and destroys
-       * discriminant validity by construction rather than by finding.
-       */
-      if (owner && owner !== name) {
-        issues.push({ key: 'sharedIndicator', params: { indicator, first: owner, second: name } });
-      }
-      owners.set(indicator, name);
-    }
-  }
-
-  if (draft.constructs.length >= 2 && draft.paths.length === 0) {
-    issues.push({ key: 'noPaths' });
-  }
-
-  const cycle = findCycle(draft);
-  if (cycle) issues.push({ key: 'cycle', params: { cycle: cycle.join(' → ') } });
-
-  return issues;
-}
-
-/**
- * A cycle in the path model.
- *
- * PLS requires a recursive model. A cycle does not stop the algorithm — it
- * iterates, converges, and returns coefficients for something that cannot be
- * interpreted causally — so catching it here is the only place a user learns
- * before spending a minute on it.
- */
-function findCycle(draft: PlsModelDraft): string[] | null {
-  const successors = new Map<string, string[]>();
-  for (const path of draft.paths) {
-    const list = successors.get(path.from);
-    if (list) list.push(path.to);
-    else successors.set(path.from, [path.to]);
-  }
-
-  const visiting = new Set<string>();
-  const done = new Set<string>();
-  const stack: string[] = [];
-
-  function walk(node: string): string[] | null {
-    if (visiting.has(node)) return [...stack.slice(stack.indexOf(node)), node];
-    if (done.has(node)) return null;
-
-    visiting.add(node);
-    stack.push(node);
-
-    for (const next of successors.get(node) ?? []) {
-      const found = walk(next);
-      if (found) return found;
-    }
-
-    visiting.delete(node);
-    done.add(node);
-    stack.pop();
-    return null;
-  }
-
-  for (const construct of draft.constructs) {
-    const found = walk(construct.name.trim());
-    if (found) return found;
-  }
-
-  return null;
-}
+export type {
+  DraftConstruct as BuilderConstruct,
+  MeasurementMode,
+  PlsModelDraft,
+  StructuralPath as BuilderPath,
+} from '@/analysis/inference/pls/schema';
 
 /* -------------------------------------------------------------------------- */
 
@@ -178,7 +71,7 @@ export function PlsModelBuilder({
   const t = useTranslations('pls');
   const [editing, setEditing] = useState<string | null>(null);
 
-  const issues = useMemo(() => validate(value), [value]);
+  const issues = useMemo(() => validateModelStructure(value), [value]);
   const valid = issues.length === 0;
 
   const named = value.constructs
@@ -621,4 +514,8 @@ function ModelDiagram({ draft }: { draft: PlsModelDraft }) {
   );
 }
 
-export { validate as validateDraft };
+/*
+ * Re-exported under the name the tests already use. The implementation now
+ * lives in the schema so the engine and the builder cannot diverge.
+ */
+export { validateModelStructure as validateDraft };

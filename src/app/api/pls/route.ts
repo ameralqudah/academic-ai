@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { plsModelSchema } from '@/analysis/inference/pls/schema';
 import { ok, withApi } from '@/server/http/api';
 import { runPls, startBootstrap } from '@/server/services/pls.service';
 import { ensureStaleJobsFailed } from '@/server/services/startup';
@@ -12,23 +13,18 @@ import { ensureStaleJobsFailed } from '@/server/services/startup';
  * and would time out. So this route answers with the model and its assessment,
  * and starting the resampling returns a job id to poll.
  */
-const constructSchema = z.object({
-  name: z.string().min(1).max(80),
-  indicators: z.array(z.string()).min(1).max(30),
-  mode: z.enum(['reflective', 'formative']),
-});
-
-const modelSchema = z.object({
-  constructs: z.array(constructSchema).min(2).max(20),
-  paths: z
-    .array(z.object({ from: z.string(), to: z.string() }))
-    .min(1)
-    .max(100),
-});
+/*
+ * The model schema is imported, not redeclared.
+ *
+ * This route had its own zod definition mirroring the engine's types, which
+ * meant three descriptions of one thing. A field added to the engine would pass
+ * type-checking here and be stripped at parse time — a failure that looks like
+ * the client sending the wrong shape.
+ */
 
 const runSchema = z.object({
   datasetId: z.string(),
-  model: modelSchema,
+  model: plsModelSchema,
   /** When true, the estimate is returned and a bootstrap job is started. */
   bootstrap: z.boolean().default(false),
   resamples: z.number().min(1000).max(10_000).optional(),

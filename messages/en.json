@@ -1369,7 +1369,9 @@
       "noIndicators": "The construct {name} has no indicators.",
       "sharedIndicator": "The indicator {indicator} belongs to both {first} and {second}; an indicator cannot measure two constructs.",
       "noPaths": "No paths have been defined between the constructs.",
-      "cycle": "The model contains a cycle ({cycle}); PLS requires a recursive model."
+      "cycle": "The model contains a cycle ({cycle}); PLS requires a recursive model.",
+      "selfPath": "The construct {construct} points at itself; a construct cannot affect itself.",
+      "unknownConstruct": "A path refers to an undefined construct: {construct}."
     },
     "bootstrapRunning": "Bootstrapping… {percent}%",
     "cancelBootstrap": "Cancel",

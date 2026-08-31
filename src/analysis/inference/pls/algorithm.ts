@@ -36,28 +36,26 @@
 
 import { mean, pearson, standardDeviation } from '../../stats-core';
 
+import { findCycle as findModelCycle, type LatentConstruct, type PlsModel } from './schema';
+
 /* -------------------------------------------------------------------------- */
 /*                                   Model                                    */
 /* -------------------------------------------------------------------------- */
 
-export type MeasurementMode = 'reflective' | 'formative';
-
-export interface LatentConstruct {
-  name: string;
-  /** Column names measuring it. */
-  indicators: string[];
-  mode: MeasurementMode;
-}
-
-export interface StructuralPath {
-  from: string;
-  to: string;
-}
-
-export interface PlsModel {
-  constructs: LatentConstruct[];
-  paths: StructuralPath[];
-}
+/*
+ * Model types come from `schema.ts` rather than being declared here.
+ *
+ * They were declared in three places — this file, the builder, and the API
+ * route — and converted between on the way in. That worked and invited drift:
+ * a field added to one would leave the others silently behind. One definition,
+ * imported everywhere, makes that a compile error instead.
+ */
+export type {
+  LatentConstruct,
+  MeasurementMode,
+  PlsModel,
+  StructuralPath,
+} from './schema';
 
 export interface PlsOptions {
   maxIterations?: number;
@@ -199,56 +197,19 @@ export function validateModel(model: PlsModel, availableColumns: string[]): void
     }
   }
 
-  const cycle = findCycle(model);
+  /*
+   * The cycle check is the shared implementation, not a second copy. Both the
+   * builder and the engine ask the same question, and two implementations of
+   * "is this graph acyclic" is two chances to disagree.
+   */
+  const cycle = findModelCycle({
+    constructs: model.constructs.map((construct) => ({ ...construct, id: construct.name })),
+    paths: model.paths,
+  });
+
   if (cycle) {
     throw new PlsError('analysis.pls.error.cyclicModel', { cycle: cycle.join(' → ') });
   }
-}
-
-/**
- * Finds a cycle in the path model, if there is one.
- *
- * PLS assumes a recursive model — the arrows must not lead back to where they
- * started. A cycle is not detected by the algorithm itself: it iterates, it
- * converges, and it returns coefficients for a model that cannot be interpreted
- * causally. Refusing is the only honest response.
- */
-function findCycle(model: PlsModel): string[] | null {
-  const successors = new Map<string, string[]>();
-  for (const path of model.paths) {
-    const list = successors.get(path.from);
-    if (list) list.push(path.to);
-    else successors.set(path.from, [path.to]);
-  }
-
-  const visiting = new Set<string>();
-  const done = new Set<string>();
-  const stack: string[] = [];
-
-  function walk(node: string): string[] | null {
-    if (visiting.has(node)) return [...stack.slice(stack.indexOf(node)), node];
-    if (done.has(node)) return null;
-
-    visiting.add(node);
-    stack.push(node);
-
-    for (const next of successors.get(node) ?? []) {
-      const found = walk(next);
-      if (found) return found;
-    }
-
-    visiting.delete(node);
-    done.add(node);
-    stack.pop();
-    return null;
-  }
-
-  for (const construct of model.constructs) {
-    const found = walk(construct.name);
-    if (found) return found;
-  }
-
-  return null;
 }
 
 /* -------------------------------------------------------------------------- */

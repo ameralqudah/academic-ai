@@ -1369,7 +1369,9 @@
       "noIndicators": "المتغيّر «{name}» بلا بنود قياس.",
       "sharedIndicator": "البند «{indicator}» مُسنَد إلى «{first}» و«{second}» معًا؛ لا يجوز أن ينتمي بند إلى متغيّرين.",
       "noPaths": "لم تحدّد أي مسار بين المتغيّرات.",
-      "cycle": "النموذج يحتوي دورة ({cycle})؛ نمذجة PLS تتطلّب نموذجًا غير دوري."
+      "cycle": "النموذج يحتوي دورة ({cycle})؛ نمذجة PLS تتطلّب نموذجًا غير دوري.",
+      "selfPath": "المتغيّر «{construct}» يشير إلى نفسه؛ لا يمكن لمتغيّر أن يؤثّر في ذاته.",
+      "unknownConstruct": "المسار يشير إلى متغيّر غير معرّف: «{construct}»."
     },
     "bootstrapRunning": "جارٍ Bootstrap… {percent}%",
     "cancelBootstrap": "إلغاء",

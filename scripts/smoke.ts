@@ -1296,6 +1296,60 @@ assertTrue(
 );
 
 
+
+console.log('\nPLS: one canonical model schema');
+
+/*
+ * The architectural rule, checked rather than trusted.
+ *
+ * The model was defined three times — in the engine, in the builder, and as a
+ * zod schema in the API route — with conversion between them on submit. It
+ * worked, and it meant a field added to one would leave the others silently
+ * behind: the model would validate and then behave unexpectedly, which is the
+ * worst shape a bug can take.
+ *
+ * These assertions read the source, because what must not come back is a second
+ * declaration rather than a wrong value.
+ */
+const schemaSource = await readFile('src/analysis/inference/pls/schema.ts', 'utf8');
+const algorithmSource = await readFile('src/analysis/inference/pls/algorithm.ts', 'utf8');
+const builderSourceFile = await readFile('src/components/agent/pls-builder.tsx', 'utf8');
+const plsRouteSource = await readFile('src/app/api/pls/route.ts', 'utf8');
+
+assertTrue('the canonical schema declares the model', schemaSource.includes('export const plsModelSchema'));
+
+assertTrue(
+  'the engine imports the model types rather than declaring them',
+  !algorithmSource.includes("export type MeasurementMode = 'reflective'") &&
+    algorithmSource.includes("from './schema'"),
+);
+assertTrue(
+  'the builder imports them too',
+  !builderSourceFile.includes("export type MeasurementMode = 'reflective'") &&
+    builderSourceFile.includes('@/analysis/inference/pls/schema'),
+);
+assertTrue(
+  'and the API route parses with the shared zod schema',
+  plsRouteSource.includes('plsModelSchema') && !plsRouteSource.includes('const constructSchema'),
+);
+
+/* One implementation of the structural rules, not one per consumer. */
+assertTrue(
+  'structural validation lives in the schema',
+  schemaSource.includes('export function validateModelStructure'),
+);
+assertTrue(
+  'and the engine uses the shared cycle check rather than its own',
+  algorithmSource.includes('findModelCycle'),
+);
+
+/* The draft-to-model conversion is the only boundary where looseness ends. */
+assertTrue('a draft converts to a model', schemaSource.includes('export function draftToModel'));
+assertTrue(
+  'and a model converts back, for editing a proposal',
+  schemaSource.includes('export function modelToDraft'),
+);
+
 console.log('\nPLS model builder');
 
 /*
@@ -1469,10 +1523,19 @@ check(
 );
 
 /* Every issue the builder can raise must have a message in both languages. */
-const builderSource = await readFile('src/components/agent/pls-builder.tsx', 'utf8');
-const raisedKeys = [...new Set(builderSource.match(/key: '[a-zA-Z]+'/g) ?? [])].map((match) =>
+/*
+ * Read from the schema, which is where the validation moved.
+ *
+ * This check previously scanned the builder, and when the logic moved it found
+ * nothing and asserted nothing — passing while checking zero keys. The count
+ * assertion below is what turns that silent hole into a failure.
+ */
+const issueSource = await readFile('src/analysis/inference/pls/schema.ts', 'utf8');
+const raisedKeys = [...new Set(issueSource.match(/key: '[a-zA-Z]+'/g) ?? [])].map((match) =>
   match.slice(6, -1),
 );
+
+assertTrue('the issue keys were actually found in the source', raisedKeys.length >= 7);
 
 for (const [language, messages] of [['ar', arMessages], ['en', enMessages]] as const) {
   for (const key of raisedKeys) {

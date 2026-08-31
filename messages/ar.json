@@ -1067,7 +1067,8 @@
     "send": "إرسال",
     "model": "النموذج",
     "needsFile": "يحتاج ملفًا",
-    "soon": "قريبًا"
+    "soon": "قريبًا",
+    "cancel": "إلغاء"
   },
   "knowledge": {
     "coverage": {
@@ -1133,6 +1134,38 @@
     "unavailable": {
       "webSearch": "البحث في الويب غير متاح بعد — نعمل على ربطه بمزوّد بحث حقيقي.",
       "deepResearch": "البحث المعمّق غير متاح بعد."
+    }
+  },
+  "roles": {
+    "title": "حدّد أدوار المتغيّرات",
+    "subtitle": "اختر من {count} عمودًا في ملفك",
+    "search": "ابحث بالاسم أو النوع…",
+    "noMatches": "لا يوجد عمود مطابق",
+    "confirm": "تابع التحليل",
+    "missing": "{count} مفقود",
+    "role": {
+      "dependent": "تابع",
+      "independent": "مستقل",
+      "grouping": "تجميع",
+      "covariate": "مصاحب",
+      "paired": "مزدوج"
+    },
+    "type": {
+      "likert": "ليكرت",
+      "numeric": "رقمي",
+      "integer": "عدد صحيح",
+      "binary": "ثنائي",
+      "categorical": "فئوي",
+      "text": "نص",
+      "date": "تاريخ",
+      "empty": "فارغ",
+      "id": "معرّف"
+    },
+    "scale": {
+      "nominal": "اسمي",
+      "ordinal": "ترتيبي",
+      "interval": "فترة",
+      "ratio": "نسبة"
     }
   }
 }

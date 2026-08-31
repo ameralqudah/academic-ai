@@ -6,6 +6,11 @@ import { useEffect, useRef, useState } from 'react';
 
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
+import {
+  RolePicker,
+  type ColumnSummary,
+  type RoleAssignment,
+} from '@/components/agent/role-picker';
 import { ResultCard, type StatisticalResult } from '@/components/agent/result-card';
 import { SourceList, type RetrievedSource, type SourceCoverage } from '@/components/agent/source-list';
 import { Markdown } from '@/components/chat/markdown';
@@ -26,6 +31,27 @@ import { cn } from '@/lib/cn';
  * rather than a paragraph describing one, and it is why the transport carries
  * `result` events alongside `delta`.
  */
+
+/**
+ * Whether a question from the agent is asking which variable does what.
+ *
+ * Matched on phrases rather than on a flag from the server, which is the weaker
+ * of the two designs and deliberately chosen for now: adding a structured
+ * `needsRoles` event would mean changing the orchestrator, the event union and
+ * the persisted payload, and the phrases the agent uses for this are fixed
+ * strings in two languages rather than model output. When the agent grows more
+ * ways to ask, this should become an event.
+ */
+function needsRoles(question: string): boolean {
+  return (
+    /which variable is the outcome/i.test(question) ||
+    /roles first/i.test(question) ||
+    /which scale items/i.test(question) ||
+    question.includes('أي متغيّر هو التابع') ||
+    question.includes('تحديد الأدوار') ||
+    question.includes('أي بنود المقياس')
+  );
+}
 
 /**
  * Turns a code into a translation key.
@@ -69,6 +95,14 @@ interface AttachedFile {
   name: string;
   rows: number;
   columns: number;
+  /**
+   * The column list, kept so roles can be assigned without another request.
+   *
+   * The upload response already carries the profile; discarding it and asking
+   * again when the agent wants roles would be a round trip for data the client
+   * had and threw away.
+   */
+  fields: ColumnSummary[];
 }
 
 export function AgentChat({
@@ -119,6 +153,13 @@ export function AgentChat({
   const [file, setFile] = useState<AttachedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<ModeKey>('chat');
+  /*
+   * Set when the agent asks for variable roles. Holding the question that
+   * prompted it means confirming can resend the original request with the
+   * roles attached, rather than making the user retype it.
+   */
+  const [rolePrompt, setRolePrompt] = useState<{ message: string } | null>(null);
+  const [roles, setRoles] = useState<RoleAssignment[]>([]);
   const [modelId, setModelId] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<{
     modes: ModeOption[];
@@ -226,6 +267,21 @@ export function AgentChat({
         name: json.data.dataset.originalName,
         rows: json.data.profile.rowCount,
         columns: json.data.profile.columnCount,
+        fields: (json.data.profile.columns ?? []).map(
+          (column: {
+            name: string;
+            type: string;
+            scale: string;
+            missing: number;
+            distinct: number;
+          }) => ({
+            name: column.name,
+            type: column.type,
+            scale: column.scale,
+            missing: column.missing,
+            distinct: column.distinct,
+          }),
+        ),
       });
 
       /*
@@ -305,6 +361,7 @@ export function AgentChat({
           conversationId: conversationId ?? undefined,
           mode,
           modelId: modelId ?? undefined,
+          roles: roles.length > 0 ? roles : undefined,
           history,
         }),
       });
@@ -406,9 +463,23 @@ export function AgentChat({
               }));
               break;
 
-            case 'question':
-              patch((turn) => ({ ...turn, question: event.question as string }));
+            case 'question': {
+              const question = event.question as string;
+              patch((turn) => ({ ...turn, question }));
+
+              /*
+               * A question about variable roles opens the picker rather than
+               * sitting there as text. The agent is right to refuse to guess
+               * which variable is the outcome — that decision is what the study
+               * is about — but a user with two hundred columns cannot answer in
+               * prose, and until now that refusal was a dead end.
+               */
+              if (file && needsRoles(question)) {
+                setRoles([]);
+                setRolePrompt({ message: trimmed });
+              }
               break;
+            }
 
             case 'unavailable':
               patch((turn) => ({
@@ -500,6 +571,31 @@ export function AgentChat({
             <X className="size-3.5" />
           </button>
         </div>
+      )}
+
+      {/*
+        The picker sits above the composer rather than inside the transcript.
+        
+        A panel with two hundred rows placed mid-conversation would push the
+        question that prompted it off the screen, and scrolling back to read it
+        while choosing is exactly the friction this is meant to remove.
+      */}
+      {rolePrompt && file && (
+        <RolePicker
+          columns={file.fields}
+          value={roles}
+          onChange={setRoles}
+          onCancel={() => {
+            setRolePrompt(null);
+            setRoles([]);
+          }}
+          onConfirm={() => {
+            const original = rolePrompt.message;
+            setRolePrompt(null);
+            /* Resends the request that was asked, now carrying the answer. */
+            void send(original);
+          }}
+        />
       )}
 
       <Composer

@@ -1067,7 +1067,8 @@
     "send": "Send",
     "model": "Model",
     "needsFile": "needs a file",
-    "soon": "Soon"
+    "soon": "Soon",
+    "cancel": "Cancel"
   },
   "knowledge": {
     "coverage": {
@@ -1133,6 +1134,38 @@
     "unavailable": {
       "webSearch": "Web search is not available yet — we are connecting it to a real search provider.",
       "deepResearch": "Deep research is not available yet."
+    }
+  },
+  "roles": {
+    "title": "Choose the variables",
+    "subtitle": "Pick from {count} columns in your file",
+    "search": "Search by name or type…",
+    "noMatches": "No matching column",
+    "confirm": "Run the analysis",
+    "missing": "{count} missing",
+    "role": {
+      "dependent": "Outcome",
+      "independent": "Predictor",
+      "grouping": "Group by",
+      "covariate": "Covariate",
+      "paired": "Paired"
+    },
+    "type": {
+      "likert": "Likert",
+      "numeric": "numeric",
+      "integer": "integer",
+      "binary": "binary",
+      "categorical": "categorical",
+      "text": "text",
+      "date": "date",
+      "empty": "empty",
+      "id": "identifier"
+    },
+    "scale": {
+      "nominal": "nominal",
+      "ordinal": "ordinal",
+      "interval": "interval",
+      "ratio": "ratio"
     }
   }
 }

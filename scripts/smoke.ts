@@ -1161,6 +1161,68 @@ for (const path of ['src/server/services/dataset.service.ts', 'src/server/servic
   assertTrue(`${path} resolves reason keys on the server`, source.includes('resolveReason('));
 }
 
+
+console.log('\nvariable role selection');
+
+/*
+ * The half of a refusal that was missing.
+ *
+ * The agent asks which variable is the outcome and refuses to guess, which is
+ * right — deciding that is deciding what the study is about. But a real
+ * questionnaire export arrived with a hundred and ninety-eight columns and the
+ * only way to answer was to type a name that had never been displayed. The
+ * refusal was correct and the conversation was a dead end.
+ */
+const rolePickerSource = await readFile('src/components/agent/role-picker.tsx', 'utf8');
+const chatSource2 = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+
+assertTrue(
+  'the picker searches, which is not optional at two hundred columns',
+  rolePickerSource.includes("type=\"search\"") && rolePickerSource.includes('filtered'),
+);
+assertTrue(
+  'and searches type and scale as well as name, since kind is often what is remembered',
+  rolePickerSource.includes('column.type.toLowerCase()') &&
+    rolePickerSource.includes('column.scale.toLowerCase()'),
+);
+assertTrue(
+  'each column shows its type and scale, so an unusable choice is visible before it is made',
+  rolePickerSource.includes('type.${column.type}') && rolePickerSource.includes('scale.${column.scale}'),
+);
+assertTrue(
+  'a second outcome replaces the first rather than both being kept',
+  rolePickerSource.includes("role === 'dependent' || role === 'grouping'"),
+);
+
+/* The columns must reach the client, or there is nothing to choose from. */
+assertTrue(
+  'the upload keeps the column list rather than only its count',
+  chatSource2.includes('fields:') && chatSource2.includes('profile.columns'),
+);
+assertTrue(
+  'a question about roles opens the picker',
+  chatSource2.includes('needsRoles(question)'),
+);
+assertTrue(
+  'and the chosen roles travel with the request',
+  chatSource2.includes('roles: roles.length > 0 ? roles : undefined'),
+);
+
+/*
+ * The phrases the agent actually uses, in both languages. These are fixed
+ * strings in the orchestrator rather than model output, so matching on them is
+ * sound — but if they change, this test is what says so.
+ */
+const orchestrator = await readFile('src/agents/orchestrator.ts', 'utf8');
+assertTrue(
+  'the English roles question is still the phrase the client matches',
+  orchestrator.includes('Which variable is the outcome'),
+);
+assertTrue(
+  'and the Arabic one',
+  orchestrator.includes('أي متغيّر هو التابع'),
+);
+
 console.log('\nmaths detection');
 
 /*

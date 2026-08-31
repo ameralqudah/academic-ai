@@ -29,6 +29,7 @@ import {
 } from '@/analysis/inference/pls/algorithm';
 import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
 import { blindfold, usableOmissionDistance } from '@/analysis/inference/pls/blindfolding';
+import { checkModelData } from '@/analysis/inference/pls/data-checks';
 import { buildReport } from '@/analysis/inference/pls/report';
 import { exportPlsToExcel, exportPlsToWord } from '@/server/services/pls-export.service';
 import {
@@ -3096,6 +3097,223 @@ const qModel: PlsModel = {
 
   check('one result, for the one endogenous construct', relevance.length, 1);
   check('and it is the predicted one', relevance[0]?.construct, 'B');
+}
+
+
+
+console.log('\nPLS data checks');
+
+/*
+ * Problems in the numbers, caught before the estimation rather than surfacing
+ * as a singular-matrix failure a minute into a bootstrap. Each case here is
+ * built to be broken in one specific way, because a check that fires on
+ * everything is as useless as one that fires on nothing.
+ */
+function plsColumns(spec: Record<string, number[]>): Map<string, number[]> {
+  return new Map(Object.entries(spec));
+}
+
+function plsNoise(n: number, seed = 21): number[] {
+  let state = seed;
+  const rand = () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x7fffffff;
+  };
+  return Array.from({ length: n }, () => {
+    const u = Math.max(rand(), 1e-9);
+    const v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  });
+}
+
+const checkModel: PlsModel = {
+  constructs: [
+    { name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' },
+    { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' },
+  ],
+  paths: [{ from: 'A', to: 'B' }],
+};
+
+const healthy = () => {
+  const base = plsNoise(120, 7);
+  const other = plsNoise(120, 99);
+  return plsColumns({
+    a1: base.map((value, i) => value + plsNoise(120, 11)[i]! * 0.6),
+    a2: base.map((value, i) => value + plsNoise(120, 12)[i]! * 0.6),
+    a3: base.map((value, i) => value + plsNoise(120, 13)[i]! * 0.6),
+    b1: other.map((value, i) => value + plsNoise(120, 14)[i]! * 0.6),
+    b2: other.map((value, i) => value + plsNoise(120, 15)[i]! * 0.6),
+    b3: other.map((value, i) => value + plsNoise(120, 16)[i]! * 0.6),
+  });
+};
+
+const keysOf = (result: ReturnType<typeof checkModelData>) =>
+  result.issues.map((issue) => issue.key);
+
+/* A sound dataset raises no errors. */
+{
+  const result = checkModelData(checkModel, healthy());
+  check('healthy data can be estimated', result.canEstimate, true);
+  check('and counts its complete cases', result.completeCases, 120);
+  assertTrue('with no errors', !result.issues.some((issue) => issue.severity === 'error'));
+}
+
+/*
+ * A constant indicator makes the correlation matrix singular. It is an error
+ * rather than a warning because there is nothing to estimate — and naming the
+ * column is what turns "singular matrix" into something a researcher can fix.
+ */
+{
+  const data = healthy();
+  data.set('a2', new Array(120).fill(4));
+
+  const result = checkModelData(checkModel, data);
+  check('a constant indicator blocks estimation', result.canEstimate, false);
+  assertTrue('and is reported as zero variance', keysOf(result).includes('zeroVariance'));
+
+  const issue = result.issues.find((entry) => entry.key === 'zeroVariance');
+  check('naming the column so it can be found', issue?.columns[0], 'a2');
+  check('as an error', issue?.severity, 'error');
+}
+
+/* A missing column is caught before anything else is computed. */
+{
+  const data = healthy();
+  data.delete('b3');
+
+  const result = checkModelData(checkModel, data);
+  check('a missing column blocks estimation', result.canEstimate, false);
+  check('and is the only issue reported', keysOf(result).join(), 'missingColumns');
+  assertTrue('naming it', result.issues[0]?.columns.includes('b3') ?? false);
+}
+
+/*
+ * Two indicators that are the same variable. A warning rather than an error at
+ * 0.95: the model estimates, and the weights split arbitrarily between them —
+ * which is a judgement for the researcher, not a reason to refuse.
+ */
+{
+  const data = healthy();
+  const a1 = data.get('a1') as number[];
+  data.set('a2', a1.map((value, i) => value + plsNoise(120, 55)[i]! * 0.02));
+
+  const result = checkModelData(checkModel, data);
+  assertTrue('near-identical indicators are flagged', keysOf(result).includes('redundantIndicators'));
+
+  const issue = result.issues.find((entry) => entry.key === 'redundantIndicators');
+  check('as a warning, since the model still runs', issue?.severity, 'warning');
+  assertTrue('naming both columns', issue?.columns.length === 2);
+  check('and the construct they belong to', issue?.params?.construct, 'A');
+}
+
+/*
+ * A reverse-worded item that was never recoded — among the most common problems
+ * in real questionnaire data, and one of the least visible: reliability
+ * collapses for a reason that looks statistical and is editorial.
+ */
+{
+  const data = healthy();
+  const a1 = data.get('a1') as number[];
+  data.set('a3', a1.map((value) => -value));
+
+  const result = checkModelData(checkModel, data);
+  assertTrue('a reverse-coded item is flagged', keysOf(result).includes('possiblyReverseCoded'));
+
+  const issue = result.issues.find((entry) => entry.key === 'possiblyReverseCoded');
+  check('naming the item', issue?.columns[0], 'a3');
+  check('and its construct', issue?.params?.construct, 'A');
+}
+
+/* Sample size, against the absolute floor and against the model's own size. */
+{
+  const small = plsColumns({
+    a1: plsNoise(20, 1), a2: plsNoise(20, 2), a3: plsNoise(20, 3),
+    b1: plsNoise(20, 4), b2: plsNoise(20, 5), b3: plsNoise(20, 6),
+  });
+
+  const result = checkModelData(checkModel, small);
+  check('twenty cases blocks estimation', result.canEstimate, false);
+  assertTrue('as too few cases', keysOf(result).includes('tooFewCases'));
+}
+
+{
+  /*
+   * Thirty-two cases across six indicators is 5.3 per indicator — above the
+   * threshold, so it estimates without a caveat. Written as 32 first, on the
+   * assumption that a small sample must draw a warning; the rule is a ratio,
+   * not a count, and the test was wrong rather than the code.
+   */
+  const modest = plsColumns({
+    a1: plsNoise(32, 1), a2: plsNoise(32, 2), a3: plsNoise(32, 3),
+    b1: plsNoise(32, 4), b2: plsNoise(32, 5), b3: plsNoise(32, 6),
+  });
+
+  const result = checkModelData(checkModel, modest);
+  check('thirty-two cases across six indicators estimates cleanly', result.canEstimate, true);
+  assertTrue(
+    'with no caveat, since 5.3 cases per indicator clears the threshold',
+    !keysOf(result).includes('fewCasesPerIndicator'),
+  );
+}
+
+{
+  /* Ten indicators on the same sample is 3.2 each, which does draw one. */
+  const stretched = plsColumns({
+    a1: plsNoise(32, 1), a2: plsNoise(32, 2), a3: plsNoise(32, 3),
+    a4: plsNoise(32, 7), a5: plsNoise(32, 8),
+    b1: plsNoise(32, 4), b2: plsNoise(32, 5), b3: plsNoise(32, 6),
+    b4: plsNoise(32, 9), b5: plsNoise(32, 10),
+  });
+
+  const wideModel: PlsModel = {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'a2', 'a3', 'a4', 'a5'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1', 'b2', 'b3', 'b4', 'b5'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }],
+  };
+
+  const result = checkModelData(wideModel, stretched);
+  check('a wider model on the same sample still estimates', result.canEstimate, true);
+  assertTrue('but warns about cases per indicator', keysOf(result).includes('fewCasesPerIndicator'));
+}
+
+/* Missing values are reported as a proportion, not only a count. */
+{
+  const data = healthy();
+  const a1 = [...(data.get('a1') as number[])];
+  for (let i = 0; i < 18; i += 1) a1[i] = Number.NaN;
+  data.set('a1', a1);
+
+  const result = checkModelData(checkModel, data);
+  assertTrue('missing data is reported', keysOf(result).includes('missingData'));
+
+  const issue = result.issues.find((entry) => entry.key === 'missingData');
+  check('with the count', issue?.params?.dropped, 18);
+  check('and the proportion', issue?.params?.percent, 15);
+  check('and the complete cases are what remains', result.completeCases, 102);
+}
+
+/* Every issue key must have a message in both languages. */
+{
+  const messagesAr = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>;
+  const messagesEn = JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>;
+
+  const resolve = (messages: Record<string, unknown>, path: string) =>
+    path.split('.').reduce<unknown>(
+      (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+      messages,
+    );
+
+  const source = await readFile('src/analysis/inference/pls/data-checks.ts', 'utf8');
+  const raised = [...new Set(source.match(/key: '[a-zA-Z]+'/g) ?? [])].map((match) => match.slice(6, -1));
+
+  assertTrue('the data-check keys were found in the source', raised.length >= 8);
+
+  for (const key of raised) {
+    assertTrue(`analysis.pls.data.${key} has an Arabic message`, typeof resolve(messagesAr, `analysis.pls.data.${key}`) === 'string');
+    assertTrue(`analysis.pls.data.${key} has an English message`, typeof resolve(messagesEn, `analysis.pls.data.${key}`) === 'string');
+  }
 }
 
 

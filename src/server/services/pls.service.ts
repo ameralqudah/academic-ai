@@ -40,6 +40,7 @@ import {
   type PredictiveRelevance,
 } from '@/analysis/inference/pls/blindfolding';
 import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
+import { checkModelData, type DataIssue } from '@/analysis/inference/pls/data-checks';
 import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
 import { logger } from '@/lib/logger';
 import type { AnalysisJob } from '@/server/db/schema';
@@ -55,6 +56,8 @@ const DEFAULT_RESAMPLES = 5000;
 
 export interface PlsAnalysis {
   model: PlsModel;
+  /** Data problems that did not stop the estimation but bear on reading it. */
+  dataWarnings: DataIssue[];
   measurement: ConstructAssessment[];
   discriminant: {
     htmt: { pair: string; value: number; verdict: string; explanationKey: string }[];
@@ -107,6 +110,28 @@ export async function runPls(input: {
     );
   }
 
+  /*
+   * The data is checked before the model is estimated, and the errors are
+   * returned rather than thrown one at a time. A zero-variance indicator would
+   * otherwise surface as a singular-matrix failure — technically accurate and
+   * useless to a researcher trying to work out which of forty items is the
+   * problem.
+   */
+  const dataChecks = checkModelData(input.model, columns);
+
+  if (!dataChecks.canEstimate) {
+    const first = dataChecks.issues.find((issue) => issue.severity === 'error');
+    const message = resolveReason(`analysis.pls.data.${first?.key ?? 'unknown'}`, {
+      ...(first?.params ?? {}),
+      ...(first?.columns.length ? { columns: first.columns.join(', ') } : {}),
+    });
+
+    throw new AppError('VALIDATION', message.en, message.ar, {
+      reasonKey: `analysis.pls.data.${first?.key}`,
+      issues: dataChecks.issues,
+    });
+  }
+
   try {
     validateModel(input.model, [...columns.keys()]);
     const estimate = estimatePls(input.model, columns);
@@ -154,6 +179,13 @@ export async function runPls(input: {
 
     return {
       model: input.model,
+      /*
+       * Warnings travel with the result. They did not prevent the estimation,
+       * and a researcher reading loadings from data with a possibly
+       * reverse-coded item should see that alongside the numbers rather than
+       * having to ask.
+       */
+      dataWarnings: dataChecks.issues.filter((issue) => issue.severity === 'warning'),
       measurement,
       report,
       discriminant: {
@@ -218,6 +250,39 @@ export async function startBootstrap(input: {
     validateModel(input.model, loaded.data.columns);
   } catch (error) {
     throw asAppError(error);
+  }
+
+  /*
+   * Data checked here too, and for the same reason the structure is: a problem
+   * found a minute into a background run is a minute the user waited to learn
+   * something knowable immediately.
+   */
+  const jobColumns = new Map<string, number[]>();
+  for (const name of loaded.data.columns) {
+    const index = loaded.data.columns.indexOf(name);
+    jobColumns.set(
+      name,
+      loaded.data.rows.map((row) => {
+        const value = row[index];
+        const parsed = typeof value === 'number' ? value : Number(value);
+        return Number.isFinite(parsed) ? parsed : Number.NaN;
+      }),
+    );
+  }
+
+  const preflight = checkModelData(input.model, jobColumns);
+
+  if (!preflight.canEstimate) {
+    const first = preflight.issues.find((issue) => issue.severity === 'error');
+    const message = resolveReason(`analysis.pls.data.${first?.key ?? 'unknown'}`, {
+      ...(first?.params ?? {}),
+      ...(first?.columns.length ? { columns: first.columns.join(', ') } : {}),
+    });
+
+    throw new AppError('VALIDATION', message.en, message.ar, {
+      reasonKey: `analysis.pls.data.${first?.key}`,
+      issues: preflight.issues,
+    });
   }
 
   const resamples = clampResamples(input.resamples);

@@ -1018,6 +1018,18 @@
           "attention": "Review",
           "problem": "Problem"
         }
+      },
+      "data": {
+        "missingColumns": "These columns are not in the file: {columns}.",
+        "tooFewCases": "Only {n} complete cases, below the {minimum} minimum for PLS modelling.",
+        "fewCasesPerIndicator": "Only {ratio} cases per indicator ({n} cases, {indicators} indicators); {recommended} is the usual minimum. Estimates will be less stable.",
+        "missingData": "{dropped} cases ({percent}%) were dropped for missing values on a modelled indicator.",
+        "zeroVariance": "The indicator {columns} does not vary — every respondent gave the same answer, so it cannot correlate with anything. Check whether the question was skipped or the column is a constant left in by an export.",
+        "binaryIndicator": "The indicator {columns} has only two values; it will behave as a category rather than a scale, and its loading is harder to interpret.",
+        "redundantIndicators": "The indicators {columns} correlate at {correlation} within {construct}; they are nearly the same variable, so the weight is split between them arbitrarily.",
+        "highlyCorrelated": "The indicators {columns} correlate at {correlation} within {construct}; their individual weights are less stable.",
+        "possiblyReverseCoded": "The indicator {columns} correlates negatively with the rest of {construct}; it is most likely reverse-worded and not recoded. Recode it before analysing, or reliability collapses for an editorial reason that looks statistical.",
+        "unknown": "A data problem prevents the model from being estimated."
       }
     },
     "job": {

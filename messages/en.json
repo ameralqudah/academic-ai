@@ -894,6 +894,102 @@
         "constantIndicator": "The indicator \"{indicator}\" does not vary — every response is identical.",
         "singularConstruct": "Two indicators are identical or one is a linear combination of others, so there is no unique solution.",
         "bootstrapUnstable": "{failed} of {resamples} resamples failed to converge; the model is too unstable for reliable estimates. Review the indicators and the sample."
+      },
+      "report": {
+        "section": {
+          "sample": "Sample and model",
+          "construct": "Measurement model: {construct}",
+          "discriminant": "Discriminant validity",
+          "structural": "Structural model",
+          "bootstrap": "Bootstrapping"
+        },
+        "verdict": {
+          "sound": "The measurement model meets the established criteria; nothing requires revision.",
+          "attention": "The model is broadly acceptable, with {attention} points worth reviewing before publication.",
+          "problems": "There are {problems} issues to address before publication, plus {attention} points to review."
+        },
+        "sample": {
+          "size": "The analysis ran on {n} complete cases.",
+          "dropped": "{dropped} cases ({percent}%) were dropped for missing values on a modelled indicator.",
+          "notConverged": "The algorithm did not converge; the results are not reliable."
+        },
+        "indicator": {
+          "belowCritical": "Indicator \"{indicator}\" loads at {loading}, below 0.40 — it shares almost nothing with its construct.",
+          "removalWouldFixAve": "Indicator \"{indicator}\" loads at {loading}. AVE is currently {currentAve}; removing this indicator would raise it to {aveIfRemoved}.",
+          "weakButKept": "Indicator \"{indicator}\" loads at {loading}, below 0.708, but keeping it does not breach the other criteria."
+        },
+        "ave": {
+          "met": "AVE is {value}; the construct explains {percent}% of the variance in its indicators, establishing convergent validity.",
+          "violated": "AVE is {value}; the construct explains only {percent}% of the variance in its own indicators, below the 0.50 required for convergent validity."
+        },
+        "reliability": {
+          "met": "Composite reliability is {value} (Cronbach's alpha {alpha}), above the 0.70 threshold.",
+          "violated": "Composite reliability is {value} (Cronbach's alpha {alpha}), below the 0.70 threshold; the items do not hold together well enough.",
+          "tooHigh": "Composite reliability is {value}, above 0.95 — usually a sign of redundant items rather than a better scale."
+        },
+        "construct": {
+          "singleIndicator": "This construct has a single indicator, so reliability and convergent validity are undefined for it."
+        },
+        "formative": {
+          "criteria": "This is a formative construct: its indicators cause it rather than reflect it, so it is judged by collinearity and weight significance, not by reliability or AVE.",
+          "acceptable": "No concerning collinearity among the indicators (highest VIF = {value}).",
+          "someCollinearity": "Collinearity is somewhat elevated (highest VIF = {value}); individual weights are less stable.",
+          "collinear": "Severe collinearity among the indicators (highest VIF = {value}); individual weights cannot be interpreted with confidence."
+        },
+        "htmt": {
+          "violated": "HTMT between {pair} is {value}, above 0.90; the two constructs are not empirically distinct.",
+          "borderline": "HTMT between {pair} is {value}, close to the upper bound."
+        },
+        "fornellLarcker": {
+          "violated": "Fornell-Larcker fails for \"{construct}\": the square root of its AVE ({sqrtAve}) is below its correlation with \"{with}\" ({correlation})."
+        },
+        "crossLoading": "Indicator \"{indicator}\" correlates more strongly with \"{other}\" than with its own construct \"{own}\".",
+        "discriminant": {
+          "allPass": "Discriminant validity holds on all three criteria: HTMT, Fornell-Larcker and cross-loadings."
+        },
+        "rSquared": "R² for \"{construct}\" is {value}; the model explains {percent}% of its variance.",
+        "structuralVif": {
+          "elevated": "Collinearity among the predictors of \"{construct}\" is elevated (VIF = {value}); path coefficients are less stable.",
+          "severe": "Severe collinearity among the predictors of \"{construct}\" (VIF = {value}); the path coefficients cannot be interpreted individually."
+        },
+        "path": {
+          "significant": "The path {path} is significant: β = {coefficient}, t = {t}, and the confidence interval [{lower}, {upper}] excludes zero.",
+          "notSignificant": "The path {path} is not significant: β = {coefficient}, and the confidence interval [{lower}, {upper}] includes zero.",
+          "significantButTrivial": "The path {path} is statistically significant but its effect is negligible (f² = {fSquared}); removing the predictor barely changes R²."
+        },
+        "bootstrap": {
+          "summary": "Bootstrapped with {resamples} resamples and {level}% confidence intervals, in {seconds} seconds.",
+          "failures": "{failed} resamples ({percent}%) failed to converge; a high rate indicates a fragile model.",
+          "seed": "Random seed {seed}; using it reproduces these results exactly."
+        },
+        "action": {
+          "removeIndicator": "Remove \"{indicator}\" and re-estimate. ⚠️ This is also a theoretical decision: if the item captures an essential facet of the concept, removing it changes what you are measuring.",
+          "considerRemoving": "Consider removing \"{indicator}\". ⚠️ Read the item first — the numbers cannot see what it measures conceptually.",
+          "fixAve": "To raise AVE: review the weakly loading items, or reconsider how the construct is defined.",
+          "fixReliability": "Review the item wording; low reliability often comes from ambiguity or a reverse-worded item that was not recoded.",
+          "checkRedundancy": "Check the items for repeated meaning; very high reliability with near-identical items is not better measurement.",
+          "checkMissing": "Review the missing data; dropping more than 10% of cases can bias the sample.",
+          "simplifyModel": "Simplify the model or increase the sample size.",
+          "mergeOrRespecify": "Reconsider {pair}: either merge them into one construct, or revise their items so they are theoretically distinct.",
+          "reviewIndicatorPlacement": "Review where \"{indicator}\" belongs; it may sit better with \"{other}\".",
+          "reviewFormativeItems": "Review the overlapping items. ⚠️ Removing a formative indicator removes part of the construct's definition, so do not drop it for a high VIF alone."
+        },
+        "table": {
+          "indicator": "Indicator",
+          "loading": "Loading",
+          "weight": "Weight",
+          "aveIfRemoved": "AVE if removed",
+          "pair": "Pair",
+          "htmt": "HTMT",
+          "verdict": "Verdict",
+          "path": "Path",
+          "coefficient": "β",
+          "fSquared": "f²",
+          "effect": "Effect",
+          "t": "t",
+          "p": "p",
+          "ci": "95% CI"
+        }
       }
     },
     "job": {

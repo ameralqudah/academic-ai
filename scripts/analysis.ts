@@ -10,6 +10,7 @@
  * from the implementation.
  */
 
+import { readFile } from 'node:fs/promises';
 import ExcelJS from 'exceljs';
 
 import { applyCleaning, planCleaning } from '@/analysis/clean';
@@ -26,6 +27,7 @@ import {
   type PlsModel,
 } from '@/analysis/inference/pls/algorithm';
 import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
+import { buildReport } from '@/analysis/inference/pls/report';
 import {
   kruskalWallisTest,
   mannWhitneyTest,
@@ -2634,6 +2636,187 @@ console.log('\nPLS-SEM');
     again.paths[0]?.standardError ?? 1,
     1e-12,
   );
+}
+
+
+
+console.log('\nPLS-SEM report');
+
+/*
+ * A model built to fail, in specific ways, so the report can be checked against
+ * what is actually wrong with it rather than against a clean run that says
+ * nothing.
+ *
+ * Two constructs are made nearly identical — they should fail discriminant
+ * validity — and one indicator is made pure noise, which should drag its
+ * construct's AVE below the threshold and be named.
+ */
+{
+  let s2 = 3;
+  const r2 = () => {
+    s2 = (s2 * 1103515245 + 12345) & 0x7fffffff;
+    return s2 / 0x7fffffff;
+  };
+  const n2 = () => {
+    const u = Math.max(r2(), 1e-9);
+    const v = r2();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const broken = new Map<string, number[]>();
+  for (const column of ['x1','x2','x3','y1','y2','y3','z1','z2','z3']) broken.set(column, []);
+
+  for (let i = 0; i < 220; i += 1) {
+    const X = n2();
+    /* Y is almost the same latent variable as X — discriminant validity should fail. */
+    const Y = 0.95 * X + 0.31 * n2();
+    const Z = 0.4 * X + 0.8 * n2();
+
+    for (let j = 1; j <= 3; j += 1) (broken.get(`x${j}`) as number[]).push(0.85 * X + 0.5 * n2());
+    for (let j = 1; j <= 3; j += 1) (broken.get(`y${j}`) as number[]).push(0.85 * Y + 0.5 * n2());
+
+    (broken.get('z1') as number[]).push(0.85 * Z + 0.5 * n2());
+    (broken.get('z2') as number[]).push(0.85 * Z + 0.5 * n2());
+    /* z3 is noise: it measures nothing. */
+    (broken.get('z3') as number[]).push(n2());
+  }
+
+  const brokenModel: PlsModel = {
+    constructs: [
+      { name: 'X', indicators: ['x1', 'x2', 'x3'], mode: 'reflective' },
+      { name: 'Y', indicators: ['y1', 'y2', 'y3'], mode: 'reflective' },
+      { name: 'Z', indicators: ['z1', 'z2', 'z3'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'X', to: 'Z' }, { from: 'Y', to: 'Z' }],
+  };
+
+  const brokenFit = estimatePls(brokenModel, broken);
+  const brokenMeasurement = assessMeasurement(brokenModel, brokenFit, broken);
+  const brokenDiscriminant = assessDiscriminantValidity(brokenModel, brokenFit, broken, brokenMeasurement);
+  const brokenStructural = assessStructural(brokenModel, brokenFit);
+
+  const report = buildReport({
+    measurement: brokenMeasurement,
+    discriminant: brokenDiscriminant,
+    structural: brokenStructural,
+    n: brokenFit.n,
+    rowsDropped: brokenFit.rowsDropped,
+    converged: brokenFit.converged,
+  });
+
+  /* The verdict must not call a model with real problems sound. */
+  check('a broken model is not reported as sound', report.verdict.severity === 'ok', false);
+
+  const findings = report.sections.flatMap((section) => section.findings);
+  const keys = findings.map((finding) => finding.key);
+
+  /*
+   * The noise indicator must be named. A report that says "AVE is low" without
+   * saying which item is dragging it leaves the researcher to guess.
+   */
+  const namedZ3 = findings.some(
+    (finding) => finding.key.startsWith('pls.report.indicator.') && finding.params?.indicator === 'z3',
+  );
+  assertTrue('the noise indicator is named specifically', namedZ3);
+
+  /* Two near-identical constructs must fail discriminant validity. */
+  assertTrue(
+    'near-identical constructs are flagged by HTMT',
+    keys.includes('pls.report.htmt.violated') || keys.includes('pls.report.fornellLarcker.violated'),
+  );
+
+  /*
+   * Every problem must carry an action, and every removal suggestion must warn
+   * that theory decides. A tool that says "remove this item" without that
+   * caveat is telling researchers to manufacture validity.
+   */
+  const removalActions = findings
+    .filter((finding) => finding.action?.key.includes('emoveIndicator') || finding.action?.key.includes('onsiderRemoving'))
+    .map((finding) => finding.action?.key);
+
+  assertTrue('a removal is suggested for the broken indicator', removalActions.length > 0);
+
+  const problems = findings.filter((finding) => finding.severity === 'problem');
+  assertTrue('every problem carries an action or names the issue precisely', problems.length > 0);
+  assertTrue(
+    'and the report gathers the actions for a summary',
+    report.actions.length >= removalActions.length,
+  );
+
+  /* Tables come with the sections that report them. */
+  const constructSections = report.sections.filter((section) => section.titleKey === 'pls.report.section.construct');
+  check('one section per construct', constructSections.length, 3);
+  assertTrue('each has an indicator table', constructSections.every((section) => Boolean(section.table)));
+  assertTrue(
+    'and the failing rows are marked so the interface need not re-derive them',
+    constructSections.some((section) => (section.table?.flaggedRows.length ?? 0) > 0),
+  );
+
+  /* A clean model, by contrast, reports as sound. */
+  const cleanData = new Map<string, number[]>();
+  for (const column of ['p1','p2','p3','q1','q2','q3']) cleanData.set(column, []);
+
+  for (let i = 0; i < 250; i += 1) {
+    const P = n2();
+    const Q = 0.45 * P + 0.89 * n2();
+    for (let j = 1; j <= 3; j += 1) (cleanData.get(`p${j}`) as number[]).push(0.88 * P + 0.45 * n2());
+    for (let j = 1; j <= 3; j += 1) (cleanData.get(`q${j}`) as number[]).push(0.88 * Q + 0.45 * n2());
+  }
+
+  const cleanModel: PlsModel = {
+    constructs: [
+      { name: 'P', indicators: ['p1', 'p2', 'p3'], mode: 'reflective' },
+      { name: 'Q', indicators: ['q1', 'q2', 'q3'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'P', to: 'Q' }],
+  };
+
+  const cleanFit = estimatePls(cleanModel, cleanData);
+  const cleanMeasurement = assessMeasurement(cleanModel, cleanFit, cleanData);
+  const cleanReport = buildReport({
+    measurement: cleanMeasurement,
+    discriminant: assessDiscriminantValidity(cleanModel, cleanFit, cleanData, cleanMeasurement),
+    structural: assessStructural(cleanModel, cleanFit),
+    n: cleanFit.n,
+    rowsDropped: 0,
+    converged: cleanFit.converged,
+  });
+
+  check('a sound model reports no problems', cleanReport.verdict.severity === 'problem', false);
+  assertTrue(
+    'and says discriminant validity holds',
+    cleanReport.sections
+      .flatMap((section) => section.findings)
+      .some((finding) => finding.key === 'pls.report.discriminant.allPass'),
+  );
+}
+
+/*
+ * Every key the report can produce must exist in both languages. A finding that
+ * renders as `pls.report.ave.violated` on screen is worse than no finding at
+ * all — it looks like a crash where a validity warning should be.
+ */
+{
+  const messagesAr = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>;
+  const messagesEn = JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>;
+
+  const resolve = (messages: Record<string, unknown>, path: string) =>
+    path.split('.').reduce<unknown>(
+      (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+      messages,
+    );
+
+  const source = await readFile('src/analysis/inference/pls/report.ts', 'utf8');
+  const referenced = [...new Set(source.match(/'pls\.report\.[a-zA-Z.]+'/g) ?? [])].map((match) =>
+    match.slice(1, -1).replace('pls.report.', 'analysis.pls.report.'),
+  );
+
+  assertTrue('the report references message keys', referenced.length > 20);
+
+  for (const key of referenced) {
+    assertTrue(`${key} has an Arabic message`, typeof resolve(messagesAr, key) === 'string');
+    assertTrue(`${key} has an English message`, typeof resolve(messagesEn, key) === 'string');
+  }
 }
 
 

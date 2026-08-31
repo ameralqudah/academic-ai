@@ -35,6 +35,7 @@ import {
   type PlsModel,
 } from '@/analysis/inference/pls/algorithm';
 import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
+import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
 import { logger } from '@/lib/logger';
 import type { AnalysisJob } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
@@ -56,6 +57,14 @@ export interface PlsAnalysis {
     crossLoadingIssues: DiscriminantValidity['crossLoadingIssues'];
   };
   structural: StructuralAssessment;
+  /**
+   * The findings in plain language, keyed rather than written out.
+   *
+   * Built on the server so the same conditions produce the same sentences every
+   * time, in both languages — and so a validity failure cannot go unmentioned
+   * because a model decided it was not worth raising.
+   */
+  report: PlsReport;
   n: number;
   rowsDropped: number;
   iterations: number;
@@ -109,9 +118,19 @@ export async function runPls(input: {
       iterations: estimate.iterations,
     });
 
+    const report = buildReport({
+      measurement,
+      discriminant,
+      structural,
+      n: estimate.n,
+      rowsDropped: estimate.rowsDropped,
+      converged: estimate.converged,
+    });
+
     return {
       model: input.model,
       measurement,
+      report,
       discriminant: {
         /* A Map does not survive JSON, so the pairs are flattened for transport. */
         htmt: [...discriminant.htmt.entries()].map(([pair, criterion]) => ({
@@ -277,9 +296,31 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
 
     await jobsRepo.updateProgress(jobId, 100, 'summarising');
 
+    /*
+     * The report is rebuilt with the bootstrap attached, because significance
+     * changes what several findings say — a path described only by its
+     * coefficient reads differently once its interval is known.
+     */
+    const measurement = assessMeasurement(spec.model, estimate, columns);
+    const discriminant = assessDiscriminantValidity(spec.model, estimate, columns, measurement);
+    const structural = assessStructural(spec.model, estimate);
+
+    const report = buildReport({
+      measurement,
+      discriminant,
+      structural,
+      bootstrap: result,
+      n: estimate.n,
+      rowsDropped: estimate.rowsDropped,
+      converged: estimate.converged,
+    });
+
     await jobsRepo.complete(
       jobId,
-      { bootstrap: result as unknown as Record<string, unknown> },
+      {
+        bootstrap: result as unknown as Record<string, unknown>,
+        report: report as unknown as Record<string, unknown>,
+      },
       Date.now() - startedAt,
     );
 
@@ -309,7 +350,7 @@ export interface JobView {
   stage: string | null;
   /** Resolved to a sentence on the server, in both languages. */
   error: { en: string; ar: string } | null;
-  result: { bootstrap: BootstrapResult } | null;
+  result: { bootstrap: BootstrapResult; report?: PlsReport } | null;
   durationMs: number | null;
   createdAt: string;
 }
@@ -332,7 +373,7 @@ export async function getJob(id: string, userId: string): Promise<JobView> {
      * key itself to the user.
      */
     error: job.errorReasonKey ? resolveReason(job.errorReasonKey) : null,
-    result: (job.result as { bootstrap: BootstrapResult } | null) ?? null,
+    result: (job.result as { bootstrap: BootstrapResult; report?: PlsReport } | null) ?? null,
     durationMs: job.durationMs,
     createdAt: job.createdAt.toISOString(),
   };

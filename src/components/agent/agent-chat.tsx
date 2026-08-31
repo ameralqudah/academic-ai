@@ -168,6 +168,7 @@ export function AgentChat({
   const t = useTranslations('agent');
   const te = useTranslations('errors');
   const tp = useTranslations('pls');
+  const tw = useTranslations('web');
 
   const [projectId, setProjectId] = useState<string | null>(
     initialProjectId && projects.some((project) => project.id === initialProjectId)
@@ -207,6 +208,9 @@ export function AgentChat({
   const [plsOpen, setPlsOpen] = useState(false);
   const [plsDraft, setPlsDraft] = useState<PlsModelDraft>({ constructs: [], paths: [] });
   const [plsJob, setPlsJob] = useState<{ id: string; progress: number; status: string } | null>(null);
+  const [researchJob, setResearchJob] = useState<
+    { id: string; progress: number; stage: string } | null
+  >(null);
   /*
    * Forks in the saved thread. Only ever populated from the server, because
    * whether a message has siblings is a fact about the stored tree rather than
@@ -377,6 +381,26 @@ export function AgentChat({
   async function send(text: string) {
     const trimmed = text.trim();
     if (!trimmed || busy) return;
+
+    /*
+     * Web search and deep research take their own paths rather than going
+     * through the agent.
+     *
+     * The agent classifies an intent and runs a capability; these two are a
+     * capability the user has already chosen by selecting the mode. Routing
+     * them through classification would let a phrasing the classifier reads as
+     * a general question quietly answer from the model's memory instead of from
+     * sources — which is exactly what the mode was selected to avoid.
+     */
+    if (mode === 'webSearch') {
+      void runWebSearch(trimmed);
+      return;
+    }
+
+    if (mode === 'deepResearch') {
+      void runDeepResearch(trimmed);
+      return;
+    }
 
     setError(null);
     setDraft('');
@@ -789,6 +813,151 @@ export function AgentChat({
     }
   }
 
+  /**
+   * A web search, answered from the pages it found.
+   *
+   * Fast enough to run inline — one search and up to five page fetches — so it
+   * does not need the job machinery that deep research does.
+   */
+  async function runWebSearch(query: string) {
+    setError(null);
+    setDraft('');
+    setBusy(true);
+
+    const userTurn: Turn = { id: crypto.randomUUID(), role: 'user', text: query };
+    const pending: Turn = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      stages: [{ id: 'search', status: 'running', labelKey: 'agent.stage.searching' }],
+      results: [],
+    };
+    setTurns((current) => [...current, userTurn, pending]);
+
+    try {
+      const response = await fetch('/api/web-search', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query, locale }),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok || !json.ok) {
+        setError((locale === 'ar' ? json?.error?.messageAr : json?.error?.message) ?? te('generic'));
+        setTurns((current) => current.filter((turn) => turn.id !== pending.id));
+        return;
+      }
+
+      const data = json.data as {
+        answer: string;
+        sources: { index: number; title: string; url: string; container?: string; snippet?: string; wasRead: boolean }[];
+      };
+
+      /*
+       * An empty result is a real outcome, not an error. Saying "nothing was
+       * found" is more useful than an error that suggests something broke.
+       */
+      setTurns((current) =>
+        current.map((turn) =>
+          turn.id === pending.id
+            ? {
+                ...turn,
+                stages: [{ id: 'search', status: 'done', labelKey: 'agent.stage.searching' }],
+                text: data.answer || undefined,
+                results: data.sources.length > 0 ? [{ kind: 'webSources', payload: data }] : [],
+                question: data.sources.length === 0 ? tw('noResults') : undefined,
+              }
+            : turn,
+        ),
+      );
+    } catch {
+      setError(te('network'));
+      setTurns((current) => current.filter((turn) => turn.id !== pending.id));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Deep research, which runs for minutes and reports its stage as it goes.
+   *
+   * Started as a job and polled, because fifteen searches and four model calls
+   * do not fit in a request — and because a user watching a spinner for three
+   * minutes has no way to tell progress from a hang.
+   */
+  async function runDeepResearch(question: string) {
+    setError(null);
+    setDraft('');
+
+    try {
+      const response = await fetch('/api/deep-research', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question, locale, projectId: projectId ?? undefined }),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok || !json.ok) {
+        setError((locale === 'ar' ? json?.error?.messageAr : json?.error?.message) ?? te('generic'));
+        return;
+      }
+
+      setTurns((current) => [
+        ...current,
+        { id: crypto.randomUUID(), role: 'user', text: question },
+      ]);
+
+      setResearchJob({ id: json.data.job.id as string, progress: 0, stage: 'planning' });
+      void pollResearch(json.data.job.id as string);
+    } catch {
+      setError(te('network'));
+    }
+  }
+
+  async function pollResearch(jobId: string) {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      try {
+        const response = await fetch(`/api/deep-research/${jobId}`);
+        const json = await response.json();
+        if (!json.ok) break;
+
+        const job = json.data as {
+          status: string;
+          progress: number;
+          stage: string | null;
+          error: { ar: string; en: string } | null;
+          result: { research?: unknown } | null;
+        };
+
+        setResearchJob({ id: jobId, progress: job.progress, stage: job.stage ?? '' });
+
+        if (job.status === 'COMPLETED') {
+          setTurns((current) => [
+            ...current,
+            {
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              results: [{ kind: 'research', runId: jobId, payload: job.result?.research }],
+            },
+          ]);
+          setResearchJob(null);
+          return;
+        }
+
+        if (job.status === 'FAILED' || job.status === 'CANCELLED') {
+          if (job.error) setError(locale === 'ar' ? job.error.ar : job.error.en);
+          setResearchJob(null);
+          return;
+        }
+      } catch {
+        /* A dropped poll is not a failure; the next one catches up. */
+      }
+    }
+  }
+
   function stop() {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -895,6 +1064,36 @@ export function AgentChat({
             onBootstrap={() => void runPls(true)}
             busy={busy}
           />
+        </div>
+      )}
+
+      {/*
+        Deep research takes minutes and moves through named stages. Showing the
+        stage rather than only a percentage is what tells a user the work is
+        proceeding — "reading sources" at 48% says something a bar alone does
+        not.
+      */}
+      {researchJob && (
+        <div className="flex items-center gap-3 rounded-lg border border-line bg-subtle px-3 py-2">
+          <span className="text-xs text-muted">
+            {tw(`stage.${researchJob.stage || 'planning'}`)} · {researchJob.progress}%
+          </span>
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
+            <div
+              className="h-full bg-accent transition-[width] duration-500"
+              style={{ width: `${researchJob.progress}%` }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void fetch(`/api/deep-research/${researchJob.id}`, { method: 'DELETE' });
+              setResearchJob(null);
+            }}
+            className="text-xs text-muted hover:text-danger"
+          >
+            {tp('cancelBootstrap')}
+          </button>
         </div>
       )}
 
@@ -1169,6 +1368,14 @@ function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
     return <ResultCard result={payload as StatisticalResult} />;
   }
 
+  if (kind === 'webSources') {
+    return <WebSources payload={payload} />;
+  }
+
+  if (kind === 'research') {
+    return <ResearchReport payload={payload} />;
+  }
+
   if (kind === 'pls' || kind === 'plsReport') {
     return <PlsResult payload={payload} />;
   }
@@ -1352,6 +1559,137 @@ function findingParams(section: {
 }): Record<string, string | number> {
   const construct = section.findings[0]?.params?.construct;
   return construct === undefined ? {} : { construct };
+}
+
+/**
+ * The sources a web answer was built from.
+ *
+ * Numbered to match the citations in the answer, so a reader can follow [3] to
+ * the page it came from. Whether a source was read in full or only as a snippet
+ * is shown, because an answer resting on two lines is weaker than one resting
+ * on the page and the reader should be able to tell.
+ */
+function WebSources({ payload }: { payload: unknown }) {
+  const t = useTranslations('web');
+
+  const data = payload as {
+    sources: {
+      index: number;
+      title: string;
+      url: string;
+      container?: string;
+      snippet?: string;
+      wasRead: boolean;
+    }[];
+    unreachable: number;
+  } | null;
+
+  if (!data?.sources.length) return null;
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-3">
+      <span className="text-xs font-medium text-muted">{t('sources')}</span>
+
+      {data.sources.map((source) => (
+        <a
+          key={source.index}
+          href={source.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex gap-2 rounded-lg px-2 py-1.5 hover:bg-subtle"
+        >
+          <span className="shrink-0 font-mono text-xs text-muted">[{source.index}]</span>
+          <span className="flex min-w-0 flex-col">
+            <span className="truncate text-sm text-ink">{source.title}</span>
+            <span className="truncate text-[11px] text-muted">
+              {source.container}
+              {source.wasRead ? ` · ${t('readInFull')}` : ` · ${t('snippetOnly')}`}
+            </span>
+          </span>
+        </a>
+      ))}
+
+      {data.unreachable > 0 && (
+        <span className="text-[11px] text-muted">
+          {t('unreachable', { count: data.unreachable })}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A finished deep research report.
+ *
+ * The statistics are shown because they say how much the report rests on: eight
+ * sources from three searches is a different object from forty from fifteen,
+ * and the difference is invisible in the prose.
+ */
+function ResearchReport({ payload }: { payload: unknown }) {
+  const t = useTranslations('web');
+
+  const data = payload as {
+    report: string;
+    subQuestions: string[];
+    remainingGaps: string[];
+    sources: { index: number; title: string; url: string; kind: string; container?: string }[];
+    stats: {
+      searchesRun: number;
+      sourcesFound: number;
+      duplicatesRemoved: number;
+      pagesRead: number;
+      academicSources: number;
+      webSources: number;
+    };
+  } | null;
+
+  if (!data?.report) return null;
+
+  return (
+    <div className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-4">
+      <Markdown content={data.report} compact />
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-line pt-3 text-[11px] text-muted">
+        <span>{t('stats.searches', { count: data.stats.searchesRun })}</span>
+        <span>{t('stats.academic', { count: data.stats.academicSources })}</span>
+        <span>{t('stats.web', { count: data.stats.webSources })}</span>
+        <span>{t('stats.read', { count: data.stats.pagesRead })}</span>
+        {data.stats.duplicatesRemoved > 0 && (
+          <span>{t('stats.deduplicated', { count: data.stats.duplicatesRemoved })}</span>
+        )}
+      </div>
+
+      <details className="text-xs">
+        <summary className="cursor-pointer text-muted hover:text-ink">
+          {t('sourcesCount', { count: data.sources.length })}
+        </summary>
+        <div className="mt-2 flex flex-col gap-1.5">
+          {data.sources.map((source) => (
+            <a
+              key={source.index}
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex gap-2 hover:text-accent"
+            >
+              <span className="shrink-0 font-mono text-muted">[{source.index}]</span>
+              <span className="min-w-0">
+                <span className="text-ink">{source.title}</span>
+                {/*
+                  The kind is shown on every source. A blog post and a
+                  peer-reviewed article are both "sources" and are not the same
+                  thing to a thesis committee.
+                */}
+                <span className="ms-2 rounded bg-subtle px-1.5 py-0.5 text-[10px] text-muted">
+                  {t(`kind.${source.kind}`)}
+                </span>
+              </span>
+            </a>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
 }
 
 function Welcome({ onPick }: { onPick: (text: string) => void }) {

@@ -1407,5 +1407,36 @@
     "bootstrapRunning": "Bootstrapping… {percent}%",
     "cancelBootstrap": "Cancel",
     "validationNote": "Produced by the standard PLS algorithm and validated against published benchmark results and mathematical properties."
+  },
+  "web": {
+    "sources": "Sources",
+    "sourcesCount": "{count} sources",
+    "readInFull": "read in full",
+    "snippetOnly": "snippet only",
+    "unreachable": "{count} pages could not be reached",
+    "noResults": "No results found. Try different wording or broader terms.",
+    "stage": {
+      "planning": "Planning sub-questions",
+      "searching": "Searching",
+      "collecting": "Collecting sources",
+      "reading": "Reading pages",
+      "extracting": "Extracting evidence",
+      "checking-gaps": "Checking for gaps",
+      "searching-gaps": "Searching for gaps",
+      "synthesising": "Writing the report",
+      "done": "Done"
+    },
+    "stats": {
+      "searches": "{count} searches",
+      "academic": "{count} academic",
+      "web": "{count} web",
+      "read": "{count} pages read",
+      "deduplicated": "{count} duplicates removed"
+    },
+    "kind": {
+      "academic": "academic",
+      "web": "web",
+      "news": "news"
+    }
   }
 }

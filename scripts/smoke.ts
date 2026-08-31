@@ -1641,6 +1641,94 @@ assertTrue(
   researchRoute.includes('rateLimit'),
 );
 
+
+/*
+ * The two modes reach their own endpoints rather than the agent.
+ *
+ * The agent classifies an intent and runs a capability; these are a capability
+ * the user already chose by selecting the mode. Routing them through
+ * classification would let a phrasing the classifier reads as a general
+ * question answer from the model's memory instead of from sources — which is
+ * exactly what selecting the mode was meant to prevent.
+ */
+const chatClient = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+
+assertTrue(
+  'web search mode calls the web search endpoint',
+  chatClient.includes("mode === 'webSearch'") && chatClient.includes("fetch('/api/web-search'"),
+);
+assertTrue(
+  'deep research mode starts a job',
+  chatClient.includes("mode === 'deepResearch'") && chatClient.includes("fetch('/api/deep-research'"),
+);
+assertTrue(
+  'and polls it, since it runs for minutes',
+  chatClient.includes('pollResearch'),
+);
+assertTrue(
+  'showing the stage rather than only a percentage',
+  chatClient.includes('stage.${researchJob.stage'),
+);
+assertTrue('and offering cancellation', chatClient.includes("method: 'DELETE'"));
+
+/*
+ * Sources are shown with their numbers so a reader can follow a citation, and
+ * with whether the page was read in full — an answer resting on two lines is
+ * weaker than one resting on the page.
+ */
+assertTrue('web sources are rendered', chatClient.includes('function WebSources'));
+assertTrue('with their citation numbers', chatClient.includes('[{source.index}]'));
+assertTrue('and whether each was read in full', chatClient.includes('readInFull'));
+assertTrue('the research report is rendered', chatClient.includes('function ResearchReport'));
+assertTrue(
+  'with each source labelled academic or web',
+  chatClient.includes('kind.${source.kind}'),
+);
+
+/* An empty result is an outcome, not an error. */
+assertTrue('no results is stated rather than raised as an error', chatClient.includes("tw('noResults')"));
+
+/* Every message key the two features raise must exist in both languages. */
+{
+  const arWeb = (JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>).web;
+  const enWeb = (JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>).web;
+
+  const flatten = (value: unknown, prefix = ''): string[] =>
+    value && typeof value === 'object'
+      ? Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+          typeof child === 'string' ? [`${prefix}${key}`] : flatten(child, `${prefix}${key}.`),
+        )
+      : [];
+
+  const arKeys = flatten(arWeb).sort();
+  const enKeys = flatten(enWeb).sort();
+
+  assertTrue('the web namespace has keys', arKeys.length > 15);
+  check('and both languages have the same set', arKeys.join(), enKeys.join());
+}
+
+/*
+ * Every pipeline stage must have a label, or a user watching a three-minute run
+ * sees a raw identifier where a description should be.
+ */
+{
+  const stages = [
+    'planning', 'searching', 'collecting', 'reading',
+    'extracting', 'checking-gaps', 'searching-gaps', 'synthesising', 'done',
+  ];
+
+  const arMessages = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>;
+  const enMessages = JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>;
+
+  const stageLabel = (messages: Record<string, unknown>, stage: string) =>
+    ((messages.web as Record<string, unknown> | undefined)?.stage as Record<string, unknown> | undefined)?.[stage];
+
+  for (const stage of stages) {
+    assertTrue(`the "${stage}" stage has an Arabic label`, typeof stageLabel(arMessages, stage) === 'string');
+    assertTrue(`and an English one`, typeof stageLabel(enMessages, stage) === 'string');
+  }
+}
+
 console.log('\nPLS conversational extraction');
 
 /*

@@ -1407,5 +1407,36 @@
     "bootstrapRunning": "جارٍ Bootstrap… {percent}%",
     "cancelBootstrap": "إلغاء",
     "validationNote": "النتائج مُنتَجة بخوارزمية PLS القياسية، ومتحقَّق منها مقابل نتائج منشورة وخصائص رياضية."
+  },
+  "web": {
+    "sources": "المصادر",
+    "sourcesCount": "{count} مصدرًا",
+    "readInFull": "قُرئت الصفحة كاملة",
+    "snippetOnly": "مقتطف بحث فقط",
+    "unreachable": "تعذّر الوصول إلى {count} صفحة",
+    "noResults": "لم يُعثر على نتائج. جرّب صياغة أخرى أو كلمات أعمّ.",
+    "stage": {
+      "planning": "تخطيط الأسئلة الفرعية",
+      "searching": "البحث",
+      "collecting": "جمع المصادر",
+      "reading": "قراءة الصفحات",
+      "extracting": "استخراج الأدلة",
+      "checking-gaps": "فحص الثغرات",
+      "searching-gaps": "بحث إضافي عن الثغرات",
+      "synthesising": "كتابة التقرير",
+      "done": "اكتمل"
+    },
+    "stats": {
+      "searches": "{count} عملية بحث",
+      "academic": "{count} مصدر أكاديمي",
+      "web": "{count} مصدر ويب",
+      "read": "{count} صفحة مقروءة",
+      "deduplicated": "{count} مكرّر مُزال"
+    },
+    "kind": {
+      "academic": "أكاديمي",
+      "web": "ويب",
+      "news": "خبر"
+    }
   }
 }

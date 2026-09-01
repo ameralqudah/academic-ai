@@ -381,7 +381,10 @@ export function AgentChat({
 
   /* --------------------------------- send -------------------------------- */
 
-  async function send(text: string) {
+  async function send(
+    text: string,
+    options: { regeneratedParentId?: string | null } = {},
+  ) {
     const trimmed = text.trim();
     if (!trimmed || busy) return;
 
@@ -439,6 +442,11 @@ export function AgentChat({
           datasetId: file?.datasetId,
           projectId: projectId ?? undefined,
           conversationId: conversationId ?? undefined,
+          /*
+           * Present only for a regeneration. The server attaches the answer to
+           * this message rather than recording a fresh question.
+           */
+          regeneratedParentId: options.regeneratedParentId ?? undefined,
           mode,
           modelId: modelId ?? undefined,
           roles: roles.length > 0 ? roles : undefined,
@@ -669,7 +677,14 @@ export function AgentChat({
         return index >= 0 ? current.slice(0, index) : current;
       });
 
-      void send(json.data.prompt as string);
+      /*
+       * Sent with the parent so the new answer attaches to the question already
+       * in the thread. Without it the question is written a second time and the
+       * conversation reads as the user asking twice.
+       */
+      void send(json.data.prompt as string, {
+        regeneratedParentId: json.data.parentMessageId as string | null,
+      });
     } catch {
       setError(te('network'));
     }

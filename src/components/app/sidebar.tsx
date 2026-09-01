@@ -11,6 +11,7 @@ import {
   Library,
   LogOut,
   MessageSquarePlus,
+  Pencil,
   Search,
   Settings,
   Shield,
@@ -317,6 +318,14 @@ function ConversationRow({
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [hidden, setHidden] = useState(false);
+  /*
+   * Renaming exists in the service and the route and had no control, like
+   * deletion before it. Titles come from the first message, which is right
+   * most of the time and wrong often enough — a thread that began "quick
+   * question" and became a chapter needs a name the researcher chose.
+   */
+  const [renaming, setRenaming] = useState(false);
+  const [title, setTitle] = useState(conversation.title ?? '');
 
   async function remove() {
     setDeleting(true);
@@ -343,7 +352,54 @@ function ConversationRow({
     }
   }
 
+  async function rename() {
+    const trimmed = title.trim();
+
+    if (!trimmed || trimmed === conversation.title) {
+      setRenaming(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/conversations/${conversation.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'rename', title: trimmed }),
+      });
+
+      if (!response.ok) {
+        /* Reverted, so the row never shows a name the server did not accept. */
+        setTitle(conversation.title ?? '');
+      }
+    } catch {
+      setTitle(conversation.title ?? '');
+    } finally {
+      setRenaming(false);
+      router.refresh();
+    }
+  }
+
   if (hidden) return null;
+
+  if (renaming) {
+    return (
+      <input
+        value={title}
+        onChange={(change) => setTitle(change.target.value)}
+        onBlur={() => void rename()}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') void rename();
+          if (event.key === 'Escape') {
+            setTitle(conversation.title ?? '');
+            setRenaming(false);
+          }
+        }}
+        autoFocus
+        maxLength={200}
+        className="w-full rounded-lg border border-accent bg-ground px-2 py-1.5 text-sm text-ink outline-none"
+      />
+    );
+  }
 
   return (
     <div className="group relative flex items-center">
@@ -384,21 +440,28 @@ function ConversationRow({
           </button>
         </span>
       ) : (
-        <button
-          type="button"
-          onClick={() => setConfirming(true)}
-          aria-label={t('deleteConversation')}
+        <span className="absolute end-1 flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <button
+            type="button"
+            onClick={() => setRenaming(true)}
+            aria-label={t('renameConversation')}
+            className="rounded p-1 text-muted hover:bg-subtle hover:text-ink"
+          >
+            <Pencil className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            aria-label={t('deleteConversation')}
           /*
            * Hidden until hover or focus, so the list stays readable — but
            * reachable by keyboard, which `focus-visible` is for.
            */
-          className={cn(
-            'absolute end-1 rounded p-1 text-muted opacity-0 transition-opacity',
-            'hover:bg-subtle hover:text-danger group-hover:opacity-100 focus-visible:opacity-100',
-          )}
-        >
-          <Trash2 className="size-3.5" />
-        </button>
+            className="rounded p-1 text-muted hover:bg-subtle hover:text-danger"
+          >
+            <Trash2 className="size-3.5" />
+          </button>
+        </span>
       )}
     </div>
   );

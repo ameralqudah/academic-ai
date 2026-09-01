@@ -1328,7 +1328,11 @@ assertTrue(
 );
 assertTrue(
   'and a regenerated answer is produced by the same agent as any other message',
-  chatSource3.includes('void send(json.data.prompt as string)'),
+  chatSource3.includes('void send(json.data.prompt as string'),
+);
+assertTrue(
+  'attaching to the question already in the thread rather than writing it twice',
+  chatSource3.includes('regeneratedParentId'),
 );
 assertTrue(
   'turns after the edited message are dropped before the new answer arrives',
@@ -1442,10 +1446,18 @@ assertTrue(
   sidebarSource2.includes('setHidden(true)'),
 );
 
-/* Reachable by keyboard, not only on hover. */
+/*
+ * Reachable by keyboard, not only on hover.
+ *
+ * Checked as either form: `focus-visible` on the button or `focus-within` on
+ * the group that holds it. The first version named one class, and moving the
+ * controls into a shared container — which is what made room for renaming —
+ * failed a guard that was checking the spelling rather than the property.
+ */
 assertTrue(
-  'the delete control is focusable, not hover-only',
-  sidebarSource2.includes('focus-visible:opacity-100'),
+  'the row controls are reachable by keyboard, not hover-only',
+  sidebarSource2.includes('focus-visible:opacity-100') ||
+    sidebarSource2.includes('focus-within:opacity-100'),
 );
 
 /* Every label the control needs must exist in both languages. */

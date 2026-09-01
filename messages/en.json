@@ -1335,7 +1335,8 @@
     },
     "deleteConversation": "Delete conversation",
     "confirmDelete": "Confirm delete",
-    "cancelDelete": "Cancel"
+    "cancelDelete": "Cancel",
+    "renameConversation": "Rename"
   },
   "chat": {
     "copy": "Copy",

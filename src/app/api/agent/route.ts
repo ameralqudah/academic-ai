@@ -32,6 +32,11 @@ const agentSchema = z.object({
    * whatever the composer offered, this body could say anything.
    */
   modelId: z.string().max(120).optional(),
+  /**
+   * Set when this is a regeneration: the answer attaches to that question
+   * rather than a new one being recorded.
+   */
+  regeneratedParentId: z.string().optional(),
 });
 
 type Body = z.infer<typeof agentSchema>;

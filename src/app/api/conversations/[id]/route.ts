@@ -79,7 +79,16 @@ export const PATCH = withApi<PatchBody, Params>(
          * so regeneration goes down exactly the same path as an ordinary
          * message and cannot drift from it.
          */
-        return ok({ prompt: prepared.prompt, thread: await getThread(params.id, user.id) });
+        /*
+         * The parent travels with the prompt. The client sends both back when
+         * the new answer arrives, so it attaches to the question already in the
+         * thread rather than writing the question a second time.
+         */
+        return ok({
+          prompt: prepared.prompt,
+          parentMessageId: prepared.parentMessageId,
+          thread: await getThread(params.id, user.id),
+        });
       }
     }
   },

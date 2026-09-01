@@ -31,7 +31,11 @@ import * as tasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { answerGeneralQuestion, summariseSources } from '@/server/services/ai.service';
-import { recordTurn, startConversation } from '@/server/services/chat.service';
+import {
+  recordRegeneratedAnswer,
+  recordTurn,
+  startConversation,
+} from '@/server/services/chat.service';
 import { search as searchKnowledge, type CoverageReport, type Source } from '@/server/knowledge';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 import {
@@ -52,6 +56,14 @@ export interface AgentRequest {
   userId: string;
   message: string;
   locale: 'ar' | 'en';
+  /**
+   * Set when this request regenerates an existing answer.
+   *
+   * The new answer attaches to that question rather than the question being
+   * recorded a second time — it was asked once and is already on the active
+   * path, and writing it again leaves the thread reading as a double question.
+   */
+  regeneratedParentId?: string;
   datasetId?: string | null;
   projectId?: string | null;
   conversationId?: string | null;
@@ -94,6 +106,12 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
    * lands on the right conversation.
    */
   let conversationId = request.conversationId ?? null;
+  /*
+   * A regeneration attaches its answer to the question already in the thread,
+   * rather than recording the question again. Writing it twice leaves the
+   * conversation reading as the user having asked twice.
+   */
+  const regeneratedParentId = request.regeneratedParentId ?? null;
   let assistantText = '';
   /*
    * Results, refusals and questions, kept alongside the prose.
@@ -168,6 +186,7 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
         userMessage: request.message,
         assistantText,
         structured: structuredResults,
+      regeneratedParentId,
       });
       await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: 0 });
       yield done(taskId, 0, aiRequests, startedAt);
@@ -195,6 +214,7 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
         userMessage: request.message,
         assistantText,
         structured: structuredResults,
+      regeneratedParentId,
       });
       await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: 0 });
       yield done(taskId, 0, aiRequests, startedAt);
@@ -217,6 +237,7 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
         userMessage: request.message,
         assistantText,
         structured: structuredResults,
+      regeneratedParentId,
       });
       await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: 0 });
       yield done(taskId, 0, aiRequests, startedAt);
@@ -304,6 +325,7 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
       userMessage: request.message,
       assistantText,
       structured: structuredResults,
+      regeneratedParentId,
     });
 
     await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: capability.units });
@@ -367,10 +389,23 @@ async function persist(input: {
   structured: Record<string, unknown>[];
   /** Marks a turn that ended in an error, so the thread shows what happened. */
   failed?: boolean;
+  /** A regeneration: the answer joins this question instead of a new one. */
+  regeneratedParentId?: string | null;
 }): Promise<void> {
   if (!input.conversationId) return;
 
   try {
+    if (input.regeneratedParentId) {
+      await recordRegeneratedAnswer({
+        conversationId: input.conversationId,
+        userId: input.userId,
+        parentMessageId: input.regeneratedParentId,
+        content: input.assistantText,
+        payload: input.structured.length > 0 ? { results: input.structured } : null,
+      });
+      return;
+    }
+
     await recordTurn({
       conversationId: input.conversationId,
       userId: input.userId,

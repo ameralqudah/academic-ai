@@ -77,6 +77,8 @@ import {
   editMessage,
   getThread,
   listRecent,
+  prepareRegeneration,
+  recordRegeneratedAnswer,
   recordTurn,
   renameConversation,
   startConversation,
@@ -1601,6 +1603,81 @@ async function main() {
   });
   check('an unedited thread has no forks', (await getThread(untouched.id, chatOwner)).branchPoints.length, 0);
 
+  /*
+   * Regeneration, and the two defects it had.
+   *
+   * The first was visible only on failure: an empty assistant message was
+   * created as a placeholder, so a regeneration that then failed left a blank
+   * bubble on the active path — saved, redrawn on every reload, and impossible
+   * to remove.
+   *
+   * The second was visible always: the new answer was recorded through
+   * `recordTurn`, which writes both halves, so the question appeared twice and
+   * the thread read as the user having asked it again.
+   */
+  const regenThread = await startConversation({ userId: chatOwner, firstMessage: 'Q1' });
+  await recordTurn({
+    conversationId: regenThread.id,
+    userId: chatOwner,
+    userMessage: 'Q1',
+    assistantMessage: 'A1',
+  });
+  await recordTurn({
+    conversationId: regenThread.id,
+    userId: chatOwner,
+    userMessage: 'Q2',
+    assistantMessage: 'A2',
+  });
+
+  const beforeRegen = await getThread(regenThread.id, chatOwner);
+  const lastAnswer = beforeRegen.messages.filter((message) => message.role === 'ASSISTANT').at(-1);
+
+  const prepared = await prepareRegeneration({
+    conversationId: regenThread.id,
+    userId: chatOwner,
+    messageId: lastAnswer?.id as string,
+  });
+
+  check('the question is returned to be asked again', prepared.prompt, 'Q2');
+  assertTrue('with the parent it should attach to', Boolean(prepared.parentMessageId));
+
+  const midRegen = await getThread(regenThread.id, chatOwner);
+  check('the thread now ends at the question', midRegen.messages.length, 3);
+  assertTrue(
+    'with no empty placeholder left behind',
+    !midRegen.messages.some((message) => message.content === ''),
+  );
+
+  /* The new answer attaches to the existing question. */
+  await recordRegeneratedAnswer({
+    conversationId: regenThread.id,
+    userId: chatOwner,
+    parentMessageId: prepared.parentMessageId as string,
+    content: 'A2-regenerated',
+  });
+
+  const afterRegen = await getThread(regenThread.id, chatOwner);
+  check('the thread is question then answer, not question twice', afterRegen.messages.length, 4);
+  check('the new answer is shown', afterRegen.messages[3]?.content, 'A2-regenerated');
+  check('and the question appears once', afterRegen.messages.filter((m) => m.content === 'Q2').length, 1);
+
+  /* The old answer survives on an inactive branch, so it can be returned to. */
+  const regenAll = await chatRepo.allMessages(regenThread.id);
+  assertTrue(
+    'the previous answer is kept rather than destroyed',
+    regenAll.some((message) => message.content === 'A2' && !message.isActive),
+  );
+  check('and the fork is offered', afterRegen.branchPoints.length, 1);
+
+  /* Renaming, which had a service and a route and no control until now. */
+  await renameConversation(regenThread.id, chatOwner, 'A better name');
+  const renamed = await listRecent(chatOwner);
+  check(
+    'a conversation can be renamed',
+    renamed.find((entry) => entry.id === regenThread.id)?.title,
+    'A better name',
+  );
+
   /* Only the user's own messages. An assistant reply is a record of what was said. */
   let editAssistantBlocked = false;
   try {
@@ -1647,7 +1724,7 @@ async function main() {
    * number keeps the test honest when another conversation is added above.
    */
   const recent = await listRecent(chatOwner);
-  check('every conversation appears in the sidebar', recent.length, 3);
+  check('every conversation appears in the sidebar', recent.length, 4);
   check('newest first', recent[0]?.id, second.id);
   check('and another user sees none of them', (await listRecent(chatIntruder)).length, 0);
 
@@ -1660,14 +1737,14 @@ async function main() {
 
   /* Deleting hides without destroying, and can be undone. */
   await deleteConversation(second.id, chatOwner);
-  check('a deleted conversation leaves the list', (await listRecent(chatOwner)).length, 2);
+  check('a deleted conversation leaves the list', (await listRecent(chatOwner)).length, 3);
   check(
     'but its messages are still there',
     (await chatRepo.allMessages(second.id)).length,
     2,
   );
   await chatRepo.unarchive(second.id, chatOwner);
-  check('and it can be restored', (await listRecent(chatOwner)).length, 3);
+  check('and it can be restored', (await listRecent(chatOwner)).length, 4);
 
   /* A permanent purge is a separate, deliberate act. */
   await deleteConversation(second.id, chatOwner, true);

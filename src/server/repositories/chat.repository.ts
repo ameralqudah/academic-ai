@@ -388,6 +388,37 @@ export async function switchBranch(
   });
 }
 
+/**
+ * Takes a message and everything after it off the active path.
+ *
+ * Used by regeneration, which needs the old answer set aside without a
+ * replacement being written yet. Creating a placeholder instead — an empty
+ * assistant message — leaves a blank bubble in the thread forever if the
+ * regeneration then fails.
+ *
+ * Nothing is deleted: the branch stays and can be returned to.
+ */
+export async function deactivateFrom(conversationId: string, messageId: string): Promise<void> {
+  const [target] = await db
+    .select()
+    .from(aiMessages)
+    .where(and(eq(aiMessages.id, messageId), eq(aiMessages.conversationId, conversationId)))
+    .limit(1);
+
+  if (!target) return;
+
+  await db
+    .update(aiMessages)
+    .set({ isActive: false })
+    .where(
+      and(
+        eq(aiMessages.conversationId, conversationId),
+        eq(aiMessages.isActive, true),
+        gte(aiMessages.createdAt, target.createdAt),
+      ),
+    );
+}
+
 /** Siblings of a message — how the interface knows a fork exists and offers it. */
 export async function siblingsOf(
   conversationId: string,

@@ -278,15 +278,53 @@ export async function prepareRegeneration(input: {
     );
   }
 
-  await chatRepo.switchBranch(input.conversationId, target.id);
-  await chatRepo.branchFrom({
-    conversationId: input.conversationId,
-    replacingMessageId: target.id,
-    content: '',
-    role: 'ASSISTANT',
-  });
+  /*
+   * The old answer leaves the active path; nothing takes its place yet.
+   *
+   * An earlier version created an empty assistant message here as a
+   * placeholder, and that was wrong in a way only visible on failure: if the
+   * regeneration then failed — a provider timeout, a quota refusal — the
+   * conversation was left with a blank bubble on the active path, saved and
+   * redrawn on every reload, with no way to remove it.
+   *
+   * The new answer is written by `recordTurn` when it actually exists. Until
+   * then the thread simply ends at the question, which is both true and
+   * recoverable: the user can ask again.
+   */
+  await chatRepo.deactivateFrom(input.conversationId, target.id);
 
   return { prompt: question.content, parentMessageId: question.id };
+}
+
+/**
+ * Records a regenerated answer against the question already in the thread.
+ *
+ * `recordTurn` writes both halves, which is right for a new exchange and wrong
+ * here: the question was asked once and is still on the active path, so writing
+ * it again leaves the thread reading "Q2, Q2, A2" — the user apparently asking
+ * twice.
+ *
+ * The new answer attaches to the existing question as a second child, which is
+ * exactly what the branching structure is for: two answers to one question,
+ * one of them showing.
+ */
+export async function recordRegeneratedAnswer(input: {
+  conversationId: string;
+  userId: string;
+  /** The question this answers — already in the thread. */
+  parentMessageId: string;
+  content: string;
+  payload?: Record<string, unknown> | null;
+}): Promise<AIMessageRow> {
+  await requireOwned(input.conversationId, input.userId);
+
+  return chatRepo.addMessage({
+    conversationId: input.conversationId,
+    role: 'ASSISTANT',
+    content: input.content,
+    parentMessageId: input.parentMessageId,
+    payload: input.payload ?? null,
+  });
 }
 
 export async function renameConversation(

@@ -1335,7 +1335,8 @@
     },
     "deleteConversation": "حذف المحادثة",
     "confirmDelete": "تأكيد الحذف",
-    "cancelDelete": "إلغاء"
+    "cancelDelete": "إلغاء",
+    "renameConversation": "إعادة تسمية"
   },
   "chat": {
     "copy": "نسخ",

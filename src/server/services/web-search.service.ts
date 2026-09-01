@@ -24,6 +24,8 @@ import { SerperProvider } from '@/server/knowledge/providers/serper';
 import type { Source } from '@/server/knowledge/types';
 import { AppError } from '@/server/http/errors';
 import { answerFromSources } from '@/server/services/ai.service';
+import { recordTurn } from '@/server/services/chat.service';
+import { assertCanUseAI, recordSimple } from '@/server/services/usage.service';
 
 /** Fetched in full. Beyond this the answer is padded rather than better. */
 const PAGES_TO_READ = 5;
@@ -52,8 +54,20 @@ export async function searchWeb(input: {
   locale: 'ar' | 'en';
   /** Skip fetching and answer from snippets — faster, and much shallower. */
   quick?: boolean;
+  /** The conversation to record the turn in, when there is one. */
+  conversationId?: string | null;
+  projectId?: string | null;
 }): Promise<WebSearchResult> {
   const startedAt = Date.now();
+
+  /*
+   * Metered before the work, not after.
+   *
+   * A search costs a provider credit and up to five page fetches whether or not
+   * the answer is any good, so a user who is out of quota should be told before
+   * the credit is spent rather than after.
+   */
+  await assertCanUseAI(input.userId, 800);
 
   if (!provider.isConfigured()) {
     throw new AppError(
@@ -132,6 +146,53 @@ export async function searchWeb(input: {
       full: contentByUrl.has(source.url),
     })),
   });
+
+  /*
+   * Recorded in the conversation, like any other turn.
+   *
+   * This mode bypasses the agent — deliberately, so a phrasing the classifier
+   * reads as a general question cannot answer from memory instead of sources —
+   * and in bypassing it, it bypassed persistence too. A refresh emptied the
+   * search from the thread, which is the same defect the agent had before it
+   * was wired up, reappearing in a path that went around the fix.
+   *
+   * Failures are swallowed: an answer that was delivered and then failed to
+   * save is a storage problem, not a reason to lose the answer.
+   */
+  if (input.conversationId) {
+    await recordTurn({
+      conversationId: input.conversationId,
+      userId: input.userId,
+      userMessage: input.query,
+      assistantMessage: answer,
+      payload: {
+        results: [
+          {
+            kind: 'webSources',
+            payload: { sources: numbered.slice(0, SOURCES_TO_SHOW), unreachable: failed.length },
+          },
+        ],
+      },
+    }).catch((error: unknown) => {
+      logger.error('webSearch.persistFailed', {
+        conversationId: input.conversationId,
+        error: String(error),
+      });
+    });
+  }
+
+  /*
+   * Recorded as a tool run rather than as an AI request.
+   *
+   * The model call inside is already metered by `answerFromSources`; this
+   * counts the search itself, which costs a provider credit and page fetches
+   * that no existing metric covers. Reusing `TOOL_RUN` rather than adding a
+   * metric keeps it inside the plan limits that already exist — introducing a
+   * new one would be a pricing decision, and that is not mine to make.
+   */
+  await recordSimple(input.userId, 'TOOL_RUN', 1, input.projectId ?? undefined).catch(
+    () => undefined,
+  );
 
   logger.info('webSearch.completed', {
     query: input.query.slice(0, 80),

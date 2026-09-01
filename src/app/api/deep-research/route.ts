@@ -14,6 +14,7 @@ const schema = z.object({
   question: z.string().min(10).max(500),
   locale: z.enum(['ar', 'en']).default('en'),
   projectId: z.string().optional(),
+  conversationId: z.string().optional(),
 });
 
 type Body = z.infer<typeof schema>;
@@ -26,6 +27,7 @@ export const POST = withApi<Body>(
       question: body.question,
       locale: body.locale,
       projectId: body.projectId ?? null,
+      conversationId: body.conversationId ?? null,
     });
 
     return ok({ job: { id: job.id, status: job.status, progress: 0 } }, { status: 202 });

@@ -296,14 +296,29 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
 
   /* --------------------------- advanced modelling ------------------------- */
 
+  /**
+   * Built. The engine, the assessment, bootstrapping, the report and the export
+   * all exist; this said `planned` while they did, so the agent declined a
+   * capability the product had.
+   *
+   * Free, like every other statistical capability, and for the reason they all
+   * are: it makes no model calls. PLS is arithmetic — an iterative estimation
+   * over a correlation matrix — and a guard in the smoke tests asserts that
+   * nothing under the statistics agent costs units, precisely so that an
+   * analysis quietly acquiring a dependency on a language model would fail.
+   *
+   * Pricing it at one unit was inconsistent with that and would have set a
+   * precedent for the rest. The compute cost of bootstrapping is real and is
+   * charged by the service as a tool run, which is a different meter from the
+   * AI units this field describes.
+   */
   'stats.plsSem': {
     intent: 'stats.plsSem',
-    status: 'planned',
+    status: 'available',
     agent: 'statistics',
     requiresDataset: true,
     units: 0,
     estimatedCalls: 0,
-    unavailableReason: 'agent.unavailable.plsSem',
   },
   'stats.cbSem': {
     intent: 'stats.cbSem',

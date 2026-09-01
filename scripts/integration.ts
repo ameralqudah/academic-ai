@@ -1100,18 +1100,34 @@ async function main() {
   assertTrue('and its duration', (measured?.durationMs ?? -1) >= 0);
 
   /*
-   * The refusal that matters most. PLS-SEM is understood, named, and declined —
-   * not quietly turned into a regression that would produce numbers.
+   * The refusal that matters most, now carried by CB-SEM.
+   *
+   * PLS-SEM used to stand here: it was understood, named and declined rather
+   * than quietly turned into a regression that would produce numbers. It is
+   * built now, so the assertion moved to the capability that genuinely is not
+   * — the point being unchanged, that an unbuilt method is refused by name
+   * rather than substituted.
    */
-  const plsSem = await drive('stats.plsSem');
-  const unavailable = plsSem.find(
+  const cbSem = await drive('stats.cbSem');
+  const unavailable = cbSem.find(
     (event): event is Extract<AgentEvent, { type: 'unavailable' }> => event.type === 'unavailable',
   );
-  assertTrue('PLS-SEM is declined rather than substituted', unavailable !== undefined);
-  check('by name', unavailable?.intent, 'stats.plsSem');
+  assertTrue('CB-SEM is declined rather than substituted', unavailable !== undefined);
+  check('by name', unavailable?.intent, 'stats.cbSem');
   assertTrue('with a reason', Boolean(unavailable?.reasonKey));
   assertTrue('and something else offered instead', (unavailable?.alternatives.length ?? 0) > 0);
-  assertTrue('and no analysis is produced', !kinds(plsSem).includes('result'));
+  assertTrue('and no analysis is produced', !kinds(cbSem).includes('result'));
+
+  /*
+   * And PLS-SEM now reaches the agent instead of being refused. It has its own
+   * route and builder rather than running through the orchestrator, so what is
+   * checked here is that the request is no longer turned away.
+   */
+  const plsSemNow = await drive('stats.plsSem');
+  assertTrue(
+    'PLS-SEM is no longer declined',
+    !plsSemNow.some((event) => event.type === 'unavailable'),
+  );
 
   /*
    * Logistic regression used to be declined here, and this assertion checked

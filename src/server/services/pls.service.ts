@@ -43,6 +43,8 @@ import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/boo
 import { checkModelData, type DataIssue } from '@/analysis/inference/pls/data-checks';
 import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
 import { logger } from '@/lib/logger';
+import { recordTurn } from '@/server/services/chat.service';
+import { assertCanUseAI, recordSimple } from '@/server/services/usage.service';
 import type { AnalysisJob } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { resolveReason } from '@/server/http/reasons';
@@ -94,6 +96,9 @@ export async function runPls(input: {
   datasetId: string;
   userId: string;
   model: PlsModel;
+  /** Records the result in a conversation, when the request came from one. */
+  conversationId?: string | null;
+  projectId?: string | null;
 }): Promise<PlsAnalysis> {
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
@@ -176,6 +181,49 @@ export async function runPls(input: {
       rowsDropped: estimate.rowsDropped,
       converged: estimate.converged,
     });
+
+    /*
+     * Recorded in the conversation, so a model someone spent ten minutes
+     * specifying survives a refresh.
+     *
+     * The report is stored as a structured payload rather than as prose,
+     * because reopening the thread should redraw the real tables — the same
+     * reason analysis results are stored as objects everywhere else.
+     */
+    if (input.conversationId) {
+      await recordTurn({
+        conversationId: input.conversationId,
+        userId: input.userId,
+        userMessage: describeModel(input.model),
+        assistantMessage: '',
+        payload: {
+          results: [
+            {
+              kind: 'pls',
+              datasetId: input.datasetId,
+              payload: { report } as unknown as Record<string, unknown>,
+            },
+          ],
+        },
+      }).catch((error: unknown) => {
+        logger.error('pls.persistFailed', {
+          conversationId: input.conversationId,
+          error: String(error),
+        });
+      });
+    }
+
+    /*
+     * Estimation is not metered.
+     *
+     * It is milliseconds of arithmetic, and every other statistical capability
+     * is free for that reason — charging for this one would be inconsistent
+     * with t-tests, ANOVA and reliability, which do comparable work.
+     *
+     * Bootstrapping is charged, further down, because a minute of compute is a
+     * different thing from a millisecond of it.
+     */
+
 
     return {
       model: input.model,
@@ -286,6 +334,12 @@ export async function startBootstrap(input: {
   }
 
   const resamples = clampResamples(input.resamples);
+
+  /*
+   * Checked before the job is queued. Five thousand resamples is a minute of
+   * work, and a user out of quota should learn that before waiting for it.
+   */
+  await assertCanUseAI(input.userId, 0);
 
   const job = await jobsRepo.create({
     userId: input.userId,
@@ -424,6 +478,19 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
       Date.now() - startedAt,
     );
 
+    /*
+     * Bootstrapping is charged where estimation is not, because the cost is
+     * real: five thousand full re-estimations, about a minute of the server's
+     * time, against milliseconds for a single fit.
+     *
+     * Recorded as a tool run rather than through a new metric — introducing one
+     * would change what the plans limit, and that is a pricing decision to put
+     * to the product owner rather than to make here.
+     */
+    await recordSimple(job.userId, 'TOOL_RUN', 1, job.projectId ?? undefined).catch(
+      () => undefined,
+    );
+
     logger.info('pls.bootstrapCompleted', {
       jobId,
       resamples: result.resamples,
@@ -494,6 +561,19 @@ export async function cancelJob(id: string, userId: string): Promise<void> {
 /* -------------------------------------------------------------------------- */
 /*                                  Support                                   */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The model as a sentence, for the conversation record.
+ *
+ * A stored turn needs a user message, and "the user clicked estimate" is not
+ * one. Describing the model means a reopened thread shows what was run rather
+ * than an empty question above a table of results.
+ */
+function describeModel(model: PlsModel): string {
+  const constructs = model.constructs.map((construct) => construct.name).join(', ');
+  const paths = model.paths.map((path) => `${path.from} → ${path.to}`).join('; ');
+  return `PLS-SEM: ${constructs} | ${paths}`;
+}
 
 /**
  * Keeps the resample count within what is both meaningful and affordable.

@@ -824,6 +824,17 @@ export function AgentChat({
     setDraft('');
     setBusy(true);
 
+    /*
+     * A conversation is created on the first message if there is not one yet.
+     *
+     * The agent does this server-side, inside its own flow. These two modes go
+     * around the agent, so they have to do it themselves — otherwise the first
+     * web search in a new chat has nowhere to be recorded and disappears on
+     * refresh, while the second one onward persists. That inconsistency is
+     * worse than neither working.
+     */
+    const thread = conversationId ?? (await ensureConversation(query));
+
     const userTurn: Turn = { id: crypto.randomUUID(), role: 'user', text: query };
     const pending: Turn = {
       id: crypto.randomUUID(),
@@ -837,7 +848,12 @@ export function AgentChat({
       const response = await fetch('/api/web-search', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query, locale }),
+        body: JSON.stringify({
+          query,
+          locale,
+          conversationId: thread ?? undefined,
+          projectId: projectId ?? undefined,
+        }),
       });
 
       const json = await response.json();
@@ -889,11 +905,18 @@ export function AgentChat({
     setError(null);
     setDraft('');
 
+    const thread = conversationId ?? (await ensureConversation(question));
+
     try {
       const response = await fetch('/api/deep-research', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ question, locale, projectId: projectId ?? undefined }),
+        body: JSON.stringify({
+          question,
+          locale,
+          projectId: projectId ?? undefined,
+          conversationId: thread ?? undefined,
+        }),
       });
 
       const json = await response.json();
@@ -955,6 +978,44 @@ export function AgentChat({
       } catch {
         /* A dropped poll is not a failure; the next one catches up. */
       }
+    }
+  }
+
+  /**
+   * Creates a conversation for a mode that bypasses the agent.
+   *
+   * Returns null on failure rather than throwing: a search that cannot be saved
+   * should still run and answer. Losing the record is a smaller harm than
+   * refusing the search.
+   */
+  async function ensureConversation(firstMessage: string): Promise<string | null> {
+    try {
+      const response = await fetch('/api/conversations', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          firstMessage,
+          mode: 'AGENT',
+          projectId: projectId ?? undefined,
+        }),
+      });
+
+      const json = await response.json();
+      if (!response.ok || !json.ok) return null;
+
+      const id = json.data.conversation.id as string;
+      setConversationId(id);
+
+      /* The URL follows, so a refresh mid-search returns to the right thread. */
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('c', id);
+        window.history.replaceState(null, '', url.toString());
+      }
+
+      return id;
+    } catch {
+      return null;
     }
   }
 

@@ -19,6 +19,9 @@ const schema = z.object({
   locale: z.enum(['ar', 'en']).default('en'),
   /** Answer from snippets without fetching pages: faster and much shallower. */
   quick: z.boolean().default(false),
+  /** Optional: when present, the turn is recorded in that conversation. */
+  conversationId: z.string().optional(),
+  projectId: z.string().optional(),
 });
 
 type Body = z.infer<typeof schema>;
@@ -31,6 +34,8 @@ export const POST = withApi<Body>(
       query: body.query,
       locale: body.locale,
       quick: body.quick,
+      conversationId: body.conversationId ?? null,
+      projectId: body.projectId ?? null,
     });
 
     return ok(result);

@@ -1629,6 +1629,84 @@ assertTrue(
   }
 }
 
+
+/*
+ * Both search modes must record what they produced.
+ *
+ * They bypass the agent deliberately — so a phrasing the classifier reads as a
+ * general question cannot answer from memory instead of sources — and in going
+ * around it they went around persistence too. A refresh emptied a three-minute
+ * research run from the thread: the same defect the agent had before it was
+ * wired up, reappearing in the paths built to avoid the agent.
+ */
+const webService = await readFile('src/server/services/web-search.service.ts', 'utf8');
+const researchService2 = await readFile('src/server/services/deep-research.service.ts', 'utf8');
+
+assertTrue('web search records the turn', webService.includes('recordTurn('));
+assertTrue(
+  'with the sources, so a reopened thread redraws them',
+  webService.includes("kind: 'webSources'"),
+);
+assertTrue('deep research records its report', researchService2.includes('recordTurn('));
+assertTrue(
+  'with the full report payload',
+  researchService2.includes("kind: 'research'"),
+);
+
+/*
+ * A failure to save must not lose an answer that was delivered. The user read
+ * it; a storage problem afterwards is not a reason to replace it with an error.
+ */
+assertTrue(
+  'a failed save is logged rather than thrown, in web search',
+  webService.includes('webSearch.persistFailed'),
+);
+assertTrue(
+  'and in deep research',
+  researchService2.includes('deepResearch.persistFailed'),
+);
+
+/*
+ * Both are metered. The catalogue prices them at one and five units, and
+ * nothing was deducting either — a free account could run unlimited deep
+ * research, each costing fifteen searches.
+ */
+assertTrue('web search is metered', webService.includes("recordSimple(input.userId, 'TOOL_RUN'"));
+assertTrue('deep research is metered', researchService2.includes("recordSimple(job.userId, 'TOOL_RUN'"));
+assertTrue(
+  'and quota is checked before the credit is spent, not after',
+  webService.includes('await assertCanUseAI'),
+);
+
+/*
+ * An existing metric is reused rather than a new one introduced: adding a
+ * metric would change what plans limit, which is a pricing decision and not
+ * one to make silently.
+ */
+assertTrue(
+  'no new usage metric was invented',
+  !webService.includes("'WEB_SEARCH'") && !researchService2.includes("'DEEP_RESEARCH'"),
+);
+
+/*
+ * The first search in a new chat must have somewhere to be recorded. Without
+ * this the first one vanishes on refresh and the second one onward persists,
+ * which is worse than neither working.
+ */
+const chatClient2 = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+assertTrue(
+  'a conversation is created when the mode runs in a new chat',
+  chatClient2.includes('ensureConversation'),
+);
+assertTrue(
+  'and the URL follows it, so a refresh mid-search returns to the thread',
+  chatClient2.includes("url.searchParams.set('c', id)"),
+);
+assertTrue(
+  'both modes send the conversation id',
+  chatClient2.includes('conversationId: thread ?? undefined'),
+);
+
 console.log('\ndeep research');
 
 /*

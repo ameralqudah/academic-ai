@@ -31,6 +31,8 @@ const runSchema = z.object({
   confidenceLevel: z.number().min(0.8).max(0.999).optional(),
   seed: z.number().optional(),
   projectId: z.string().optional(),
+  /** When present, the result is recorded in that conversation. */
+  conversationId: z.string().optional(),
 });
 
 type Body = z.infer<typeof runSchema>;
@@ -49,6 +51,8 @@ export const POST = withApi<Body>(
       datasetId: body.datasetId,
       userId: user.id,
       model: body.model,
+      conversationId: body.conversationId ?? null,
+      projectId: body.projectId ?? null,
     });
 
     if (!body.bootstrap) return ok({ analysis, job: null });

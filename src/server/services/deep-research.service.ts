@@ -22,6 +22,8 @@ import {
   ResearchCancelled,
   type DeepResearchReport,
 } from '@/server/research/pipeline';
+import { recordTurn } from '@/server/services/chat.service';
+import { recordSimple } from '@/server/services/usage.service';
 import { isWebSearchConfigured } from '@/server/services/web-search.service';
 
 /** More than this in flight and a user is queueing work nobody will read. */
@@ -32,6 +34,8 @@ export async function startDeepResearch(input: {
   question: string;
   locale: 'ar' | 'en';
   projectId?: string | null;
+  /** Recorded here so the finished report joins the thread that asked for it. */
+  conversationId?: string | null;
 }): Promise<AnalysisJob> {
   if (!isWebSearchConfigured()) {
     /*
@@ -60,7 +64,11 @@ export async function startDeepResearch(input: {
     projectId: input.projectId ?? null,
     kind: 'research.deep',
     status: 'QUEUED',
-    spec: { question: input.question, locale: input.locale },
+    spec: {
+      question: input.question,
+      locale: input.locale,
+      conversationId: input.conversationId ?? null,
+    },
   });
 
   /*
@@ -84,6 +92,7 @@ export async function startDeepResearch(input: {
  */
 export async function runResearchJob(jobId: string): Promise<void> {
   const startedAt = Date.now();
+  const runId = jobId;
   const job = await jobsRepo.findOwnedAny(jobId);
 
   if (!job || job.status !== 'QUEUED') return;
@@ -91,7 +100,11 @@ export async function runResearchJob(jobId: string): Promise<void> {
   await jobsRepo.markRunning(jobId);
 
   try {
-    const spec = job.spec as { question: string; locale: 'ar' | 'en' };
+    const spec = job.spec as {
+      question: string;
+      locale: 'ar' | 'en';
+      conversationId?: string | null;
+    };
 
     let cancelled = false;
     let lastCheck = 0;
@@ -126,6 +139,39 @@ export async function runResearchJob(jobId: string): Promise<void> {
       jobId,
       { research: report as unknown as Record<string, unknown> },
       Date.now() - startedAt,
+    );
+
+    /*
+     * The finished report joins the conversation that asked for it.
+     *
+     * Without this a three-minute research run vanishes on refresh — the same
+     * defect the agent had, reappearing in a path that deliberately bypassed
+     * the agent and bypassed persistence with it.
+     *
+     * Written after the job is marked complete, so a storage failure cannot
+     * lose a report that was successfully produced.
+     */
+    if (spec.conversationId) {
+      await recordTurn({
+        conversationId: spec.conversationId,
+        userId: job.userId,
+        userMessage: spec.question,
+        assistantMessage: report.report,
+        payload: {
+          results: [{ kind: 'research', runId, payload: report as unknown as Record<string, unknown> }],
+        },
+      }).catch((error: unknown) => {
+        logger.error('deepResearch.persistFailed', { jobId, error: String(error) });
+      });
+    }
+
+    /*
+     * Charged as several tool runs, matching the catalogue's estimate of five
+     * units. The searches and page fetches are real cost that no other metric
+     * covers; the model calls inside are metered separately by the AI service.
+     */
+    await recordSimple(job.userId, 'TOOL_RUN', 5, job.projectId ?? undefined).catch(
+      () => undefined,
     );
   } catch (error) {
     if (error instanceof ResearchCancelled) {

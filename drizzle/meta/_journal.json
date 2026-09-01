@@ -36,6 +36,13 @@
       "when": 1788187407798,
       "tag": "0004_analysis_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788284974595,
+      "tag": "0005_detach_conversations_from_projects",
+      "breakpoints": true
     }
   ]
 }

@@ -274,6 +274,17 @@
       "PAPER": "بحث علمي",
       "PROPOSAL": "خطة بحث (Proposal)",
       "THESIS": "رسالة جامعية"
+    },
+    "rename": "إعادة تسمية",
+    "renameHint": "Enter للحفظ · Esc للإلغاء",
+    "delete": "حذف المشروع",
+    "confirmDelete": "احذف",
+    "cancelDelete": "إلغاء",
+    "deleteWarning": "سيُحذف هذا المشروع. ملفاتك ومحادثاتك تبقى، لكنها لن تعود مرتبطة به.",
+    "deleteWarningWithContent": "سيُحذف هذا المشروع بفصوله ومراجعه. ملفاتك ومحادثاتك تبقى، لكنها لن تعود مرتبطة به.",
+    "error": {
+      "renameFailed": "تعذّرت إعادة التسمية.",
+      "deleteFailed": "تعذّر حذف المشروع."
     }
   },
   "sections": {

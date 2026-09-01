@@ -274,6 +274,17 @@
       "PAPER": "Research paper",
       "PROPOSAL": "Research proposal",
       "THESIS": "Thesis / dissertation"
+    },
+    "rename": "Rename",
+    "renameHint": "Enter to save · Esc to cancel",
+    "delete": "Delete project",
+    "confirmDelete": "Delete",
+    "cancelDelete": "Cancel",
+    "deleteWarning": "This project will be deleted. Your files and conversations stay, but will no longer be linked to it.",
+    "deleteWarningWithContent": "This project and its chapters and references will be deleted. Your files and conversations stay, but will no longer be linked to it.",
+    "error": {
+      "renameFailed": "The project could not be renamed.",
+      "deleteFailed": "The project could not be deleted."
     }
   },
   "sections": {

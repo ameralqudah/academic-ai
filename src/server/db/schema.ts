@@ -502,7 +502,20 @@ export const aiConversations = pgTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'cascade' }),
+    /*
+     * Detached rather than destroyed when a project is deleted.
+     *
+     * This cascaded, alone among the tables that reference a project — datasets,
+     * analysis runs and agent tasks all detach. A conversation can hold an
+     * analysis that took minutes to produce and a discussion the researcher
+     * relies on, and deleting the container it happened to sit in is not a
+     * decision to delete that.
+     *
+     * The inconsistency was almost certainly unintended: nothing distinguishes
+     * a conversation from a dataset here except that one was written with a
+     * different default.
+     */
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
     title: text('title'),
     scope: conversationScopeEnum('scope').default('PROJECT').notNull(),
     sectionKey: varchar('section_key', { length: 64 }).$type<SectionKey | null>(),

@@ -30,7 +30,7 @@ import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
-import { users, analysisJobs } from '@/server/db/schema';
+import { users, analysisJobs, researchProjects } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
 import * as adminRepo from '@/server/repositories/admin.repository';
@@ -1749,6 +1749,58 @@ async function main() {
   /* A permanent purge is a separate, deliberate act. */
   await deleteConversation(second.id, chatOwner, true);
   check('purging removes the messages too', (await chatRepo.allMessages(second.id)).length, 0);
+
+  /* ------------------------------------------------- deleting a project */
+
+  section('deleting a project detaches rather than destroys');
+
+  /*
+   * Conversations cascaded on project deletion, alone among the tables that
+   * reference a project — datasets, analysis runs and agent tasks all detach.
+   * A conversation can hold an analysis that took minutes and a discussion the
+   * researcher relies on; deleting the container it happened to sit in is not a
+   * decision to delete that.
+   */
+  const detachOwner = await newUser('detach-owner');
+
+  const [detachProject] = await db
+    .insert(researchProjects)
+    .values({
+      userId: detachOwner,
+      title: 'A project with things in it',
+      degree: 'MASTER',
+      researchType: 'QUANTITATIVE',
+      academicField: 'EDUCATION',
+      language: 'AR',
+    } as never)
+    .returning();
+
+  const attachedConversation = await startConversation({
+    userId: detachOwner,
+    projectId: detachProject?.id,
+    firstMessage: 'A discussion worth keeping',
+  });
+
+  await recordTurn({
+    conversationId: attachedConversation.id,
+    userId: detachOwner,
+    userMessage: 'A discussion worth keeping',
+    assistantMessage: 'An answer worth keeping',
+  });
+
+  await db.delete(researchProjects).where(eq(researchProjects.id, detachProject?.id as string));
+
+  const survivor = await chatRepo.findOwned(attachedConversation.id, detachOwner);
+  assertTrue('the conversation survives its project', survivor !== undefined);
+  check('and is detached rather than deleted', survivor?.projectId, null);
+
+  const survivingMessages = await chatRepo.allMessages(attachedConversation.id);
+  check('with its messages intact', survivingMessages.length, 2);
+
+  assertTrue(
+    'and it still appears in the sidebar',
+    (await listRecent(detachOwner)).some((entry) => entry.id === attachedConversation.id),
+  );
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

@@ -85,6 +85,23 @@ export async function fetchSources(urls: string[]): Promise<FetchOutcome> {
 async function fetchOne(url: string): Promise<FetchedContent | FetchFailure> {
   if (!isPublicUrl(url)) return { url, reason: 'blocked' };
 
+  /*
+   * The name is resolved and its addresses checked before the request.
+   *
+   * The textual check above stops `http://10.0.0.1/`; it cannot stop
+   * `internal.example.com` resolving to the same place, and a name is precisely
+   * what someone who gets a page indexed controls. Without this, a search
+   * result can point the server at an internal service.
+   *
+   * A gap remains that this does not close: the address could change between
+   * the check and the request. Closing that needs a custom agent that pins the
+   * resolved address, which is more machinery than this warrants — the window
+   * is milliseconds and the attack needs control of the DNS response timing.
+   */
+  if (!(await isPublicHost(new URL(url).hostname))) {
+    return { url, reason: 'blocked' };
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -186,10 +203,10 @@ async function readBounded(response: Response, limit: number): Promise<string | 
  * cloud metadata endpoints, or localhost — so private ranges are refused
  * outright.
  *
- * This checks the hostname as written. A DNS name resolving to a private
- * address would pass, which is a real gap that a full defence closes by
- * resolving first and checking the address. That is worth doing and is noted
- * here rather than silently omitted.
+ * This checks the hostname as written, which stops the obvious attempts. The
+ * name is also resolved and its addresses checked in `isPublicHost` below,
+ * because `internal.example.com` pointing at 10.0.0.5 passes every textual
+ * test — and a name is exactly what an attacker controls.
  */
 export function isPublicUrl(url: string): boolean {
   let parsed: URL;
@@ -219,6 +236,73 @@ export function isPublicUrl(url: string): boolean {
     if (a === 192 && b === 168) return false;
     if (a === 169 && b === 254) return false;
   }
+
+  return true;
+}
+
+
+/**
+ * Whether every address a hostname resolves to is public.
+ *
+ * Every, not any: a name resolving to both a public and a private address is
+ * refused, because which one the request reaches is not something this can
+ * control.
+ *
+ * A resolution failure is refused too. A name that does not resolve is not a
+ * page worth fetching, and treating the failure as permission would let a
+ * temporary DNS outage open the check.
+ */
+export async function isPublicHost(hostname: string): Promise<boolean> {
+  /* An IP literal was already checked textually; resolving it adds nothing. */
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(':')) {
+    return isPublicUrl(`http://${hostname}`);
+  }
+
+  try {
+    const { lookup } = await import('node:dns/promises');
+    const addresses = await lookup(hostname, { all: true });
+
+    if (addresses.length === 0) return false;
+
+    return addresses.every((address) =>
+      address.family === 6 ? isPublicIpv6(address.address) : isPublicIpv4(address.address),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPublicIpv4(address: string): boolean {
+  const parts = address.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return false;
+
+  const [a, b] = parts as [number, number, number, number];
+
+  if (a === 0 || a === 127 || a === 10) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  /* Link-local, which includes the cloud metadata endpoint. */
+  if (a === 169 && b === 254) return false;
+  /* Carrier-grade NAT and the reserved blocks above it. */
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a >= 224) return false;
+
+  return true;
+}
+
+function isPublicIpv6(address: string): boolean {
+  const normalised = address.toLowerCase();
+
+  if (normalised === '::1' || normalised === '::') return false;
+  /* Unique local and link-local ranges. */
+  if (normalised.startsWith('fc') || normalised.startsWith('fd')) return false;
+  if (normalised.startsWith('fe80')) return false;
+
+  /*
+   * IPv4-mapped addresses carry an IPv4 address in the last segment, so the
+   * IPv4 rules apply — `::ffff:10.0.0.1` is 10.0.0.1.
+   */
+  if (normalised.startsWith('::ffff:')) return isPublicIpv4(normalised.slice(7));
 
   return true;
 }

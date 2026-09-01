@@ -27,7 +27,7 @@ import {
   parseModelId,
   shouldOfferModelChoice,
 } from '@/agents/modes';
-import { isPublicUrl } from '@/server/knowledge/fetch-content';
+import { isPublicHost, isPublicUrl } from '@/server/knowledge/fetch-content';
 import { SerperProvider } from '@/server/knowledge/providers/serper';
 import { deduplicate, normaliseUrl } from '@/server/research/dedupe';
 import { containsMath } from '@/components/chat/markdown';
@@ -1575,6 +1575,76 @@ assertTrue(
 assertTrue(
   'the tier comes from the plan on record, not from the request',
   accessService.includes('resolvePlanForUser'),
+);
+
+
+console.log('\nsecurity hardening');
+
+/*
+ * The DNS gap, closed.
+ *
+ * The textual check stops `http://10.0.0.1/`. It cannot stop
+ * `internal.example.com` resolving to the same place — and a hostname is
+ * precisely what someone who gets a page indexed controls. Without resolution,
+ * a search result can point the server at an internal service.
+ */
+check('a name resolving to loopback is refused', await isPublicHost('localhost'), false);
+check('and an explicit loopback address', await isPublicHost('127.0.0.1'), false);
+check('a private range is refused', await isPublicHost('10.0.0.5'), false);
+check('IPv6 loopback is refused', await isPublicHost('::1'), false);
+check('a public name is allowed', await isPublicHost('example.com'), true);
+
+/*
+ * A name that does not resolve is refused rather than allowed. Treating a
+ * resolution failure as permission would let a temporary DNS outage open the
+ * check entirely.
+ */
+check(
+  'an unresolvable name is refused, not permitted by default',
+  await isPublicHost('this-name-does-not-exist-anywhere-12345.invalid'),
+  false,
+);
+
+/*
+ * Security headers. CSP is the one that turns an injected script from a
+ * compromise into a blocked request, and HSTS closes the window where a first
+ * plain-HTTP request can be intercepted.
+ */
+const nextConfig = await readFile('next.config.ts', 'utf8');
+
+assertTrue('a content security policy is set', nextConfig.includes('Content-Security-Policy'));
+assertTrue('HSTS is set', nextConfig.includes('Strict-Transport-Security'));
+assertTrue('with a long max-age', nextConfig.includes('max-age=63072000'));
+
+assertTrue("plugins are blocked", nextConfig.includes("object-src 'none'"));
+assertTrue('the base tag cannot be rewritten', nextConfig.includes("base-uri 'self'"));
+assertTrue('forms cannot post elsewhere', nextConfig.includes("form-action 'self'"));
+assertTrue('framing is restricted', nextConfig.includes("frame-ancestors 'self'"));
+assertTrue(
+  'and the browser may only call this origin',
+  nextConfig.includes("connect-src 'self'"),
+);
+
+/*
+ * The one weakening, stated rather than hidden: Next inlines a hydration script
+ * without a nonce in this configuration, so `unsafe-inline` is required. The
+ * comment says so; a policy that quietly permits it without explanation is how
+ * a temporary compromise becomes permanent.
+ */
+assertTrue(
+  'the unsafe-inline requirement is explained rather than silently present',
+  nextConfig.includes('hydration'),
+);
+
+/* Internal errors must not reach the client. */
+const apiWrapper = await readFile('src/server/http/api.ts', 'utf8');
+assertTrue(
+  'an unexpected error becomes a generic message',
+  apiWrapper.includes('Something went wrong on our side'),
+);
+assertTrue(
+  'and is logged with the path rather than the payload',
+  apiWrapper.includes("logger.error('api.error'"),
 );
 
 console.log('\nfiles page');

@@ -61,7 +61,15 @@ export const POST = withApi<Body>(
      * model than the interface showed would leave the user unable to say which
      * one produced their result.
      */
-    await resolveRequestedModel(user.id, body.modelId);
+    /*
+     * The result is kept, not discarded.
+     *
+     * This was `await resolveRequestedModel(...)` with no assignment: the model
+     * was validated against the user's plan and then thrown away, so a user
+     * could pick one, be told they were entitled to it, and be answered by a
+     * different one. Validation without use is theatre.
+     */
+    const chosenModel = await resolveRequestedModel(user.id, body.modelId);
 
     const stream = agentStream({
       userId: user.id,
@@ -72,6 +80,9 @@ export const POST = withApi<Body>(
       conversationId: body.conversationId ?? null,
       history: body.history,
       roles: body.roles,
+      regeneratedParentId: body.regeneratedParentId,
+      /* Already checked against the plan above; the agent does not re-check. */
+      chosenModel,
       test: body.test as Parameters<typeof agentStream>[0]['test'],
     });
 

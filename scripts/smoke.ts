@@ -1487,6 +1487,96 @@ assertTrue(
 
 
 
+
+console.log('\nmodel selection reaches the completion');
+
+/*
+ * The selection was validated and then thrown away.
+ *
+ * The route read `await resolveRequestedModel(...)` with no assignment: the
+ * model was checked against the user's plan, the check passed, and nothing
+ * carried it any further. A paid user could select a model, be told they were
+ * entitled to it, and be answered by whichever one the admin setting named.
+ *
+ * Validation without use is theatre, and it is invisible: the request
+ * succeeds, the answer arrives, and only the bill or the output quality would
+ * eventually show that a different model produced it.
+ */
+const agentRouteModel = await readFile('src/app/api/agent/route.ts', 'utf8');
+const orchestratorModel = await readFile('src/agents/orchestrator.ts', 'utf8');
+const aiServiceModel = await readFile('src/server/services/ai.service.ts', 'utf8');
+const registryModel = await readFile('src/ai/registry.ts', 'utf8');
+
+assertTrue(
+  'the route keeps the validated model rather than discarding it',
+  agentRouteModel.includes('const chosenModel = await resolveRequestedModel'),
+);
+assertTrue('and passes it to the agent', agentRouteModel.includes('chosenModel,'));
+assertTrue('the agent carries it', orchestratorModel.includes('chosenModel?:'));
+assertTrue('and hands it to the answer', orchestratorModel.includes('chosenModel: request.chosenModel'));
+assertTrue(
+  'which passes it to the provider resolver',
+  aiServiceModel.includes('resolveProvider(input.chosenModel'),
+);
+assertTrue(
+  'and the resolver builds that provider',
+  registryModel.includes('build(chosen.provider, chosen.model)'),
+);
+
+/*
+ * The plan check happens once, at the boundary. Re-checking inside the agent
+ * would create a second place for the rule to drift from the first.
+ */
+assertTrue(
+  'the agent does not re-validate what the route already checked',
+  !orchestratorModel.includes('canUseModel'),
+);
+
+/*
+ * A chosen provider without a key falls through rather than failing. The list
+ * is built from configured keys, so this should not occur — but a key removed
+ * between the list being served and the request arriving would otherwise turn
+ * a working request into an error.
+ */
+assertTrue(
+  'an unconfigured choice degrades instead of failing',
+  registryModel.includes('ai.provider.chosenUnavailable'),
+);
+
+/* Enforcement, which is the part a client cannot be trusted with. */
+check('a free tier gets at most one model', modelsFor('free').length <= 1, true);
+check('an unconfigured model is refused to a free user', canUseModel('free', 'openai:gpt-5'), false);
+check('and to a paid one', canUseModel('paid', 'openai:gpt-5'), false);
+check('and to an admin — the list is what is configured', canUseModel('admin', 'openai:gpt-5'), false);
+check('a malformed id is refused', canUseModel('paid', 'garbage'), false);
+check('an empty id is refused', canUseModel('paid', ''), false);
+
+/*
+ * The selector appears only where there is a real choice. A dropdown holding
+ * one option implies a decision the user does not have.
+ */
+check(
+  'no selector without a second provider',
+  shouldOfferModelChoice('paid'),
+  modelsFor('paid').length > 1,
+);
+
+/*
+ * The refusal is logged. A request naming a model outside the caller's plan did
+ * not come from the interface, which offers only what is permitted — so either
+ * something is out of step or someone is probing, and both are worth seeing.
+ */
+const accessService = await readFile('src/server/services/model-access.service.ts', 'utf8');
+assertTrue('a denied model is logged', accessService.includes('model.accessDenied'));
+assertTrue(
+  'and refused rather than quietly downgraded',
+  accessService.includes('not included in your plan'),
+);
+assertTrue(
+  'the tier comes from the plan on record, not from the request',
+  accessService.includes('resolvePlanForUser'),
+);
+
 console.log('\nfiles page');
 
 /*

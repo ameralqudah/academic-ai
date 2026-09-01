@@ -64,6 +64,12 @@ export interface AgentRequest {
    * path, and writing it again leaves the thread reading as a double question.
    */
   regeneratedParentId?: string;
+  /**
+   * A provider and model the user selected, already validated against their
+   * plan by the route. The agent passes it through and never re-checks — a
+   * second check here would be a second place for the rule to drift.
+   */
+  chosenModel?: { provider: 'anthropic' | 'openai' | 'google'; model: string } | null;
   datasetId?: string | null;
   projectId?: string | null;
   conversationId?: string | null;
@@ -847,6 +853,7 @@ async function executeStep(input: {
         userId: request.userId,
         message: request.message,
         locale,
+        chosenModel: request.chosenModel ?? null,
         projectId: request.projectId ?? null,
         projectTitle,
         history: (request.history ?? []).map((turn) => ({

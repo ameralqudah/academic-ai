@@ -62,15 +62,48 @@ function build(name: ProviderName, modelOverride?: string): AIProvider {
 }
 
 /**
- * Resolution order: admin setting → environment variable → anthropic.
+ * Resolution order: the caller's choice → admin setting → environment → anthropic.
+ *
+ * The caller's choice comes first because it is the user's, and it has already
+ * been checked against their plan by `resolveRequestedModel` — this function
+ * does not re-check, and must never be passed a choice that has not been.
+ *
  * If the chosen provider has no key, fall back to any provider that does, so a
  * misconfigured override degrades instead of taking the product down.
  */
-export async function resolveProvider(): Promise<AIProvider> {
+export async function resolveProvider(
+  /**
+   * A provider and model the user selected.
+   *
+   * The selection was being validated in the API route and then discarded —
+   * `await resolveRequestedModel(...)` with no assignment. A user could pick a
+   * model, be told they were entitled to it, and receive an answer from a
+   * different one. Threading it through is what makes the selector mean
+   * something.
+   */
+  chosen?: { provider: ProviderName; model: string } | null,
+): Promise<AIProvider> {
   const env = getEnv();
   const settings = await loadSettings();
-  const preferred = settings?.provider ?? env.AI_PROVIDER;
 
+  if (chosen) {
+    const selected = build(chosen.provider, chosen.model);
+
+    /*
+     * Falls through to the default when the chosen provider has no key. That
+     * combination should not occur — the model list is built from configured
+     * keys — but a key removed between the list being served and the request
+     * arriving would otherwise fail the request rather than answering it.
+     */
+    if (selected.isConfigured()) return selected;
+
+    logger.warn('ai.provider.chosenUnavailable', {
+      provider: chosen.provider,
+      model: chosen.model,
+    });
+  }
+
+  const preferred = settings?.provider ?? env.AI_PROVIDER;
   const primary = build(preferred, settings?.models?.[preferred]);
   if (primary.isConfigured()) return primary;
 

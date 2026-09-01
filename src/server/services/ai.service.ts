@@ -416,6 +416,14 @@ export interface ChatStreamHandle {
  * writing a chapter and wrong for answering a question.
  */
 export async function answerGeneralQuestion(input: {
+  /**
+   * A model the user selected, already checked against their plan.
+   *
+   * Passed through to the provider resolver rather than re-validated: the check
+   * belongs at the boundary, and doing it twice creates two places for the rule
+   * to diverge.
+   */
+  chosenModel?: { provider: 'anthropic' | 'openai' | 'google'; model: string } | null;
   userId: string;
   message: string;
   locale: 'ar' | 'en';
@@ -425,7 +433,7 @@ export async function answerGeneralQuestion(input: {
 }): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
   await assertCanUseAI(input.userId, 400);
 
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(input.chosenModel ?? null);
 
   const result = await runCompletion({
     userId: input.userId,

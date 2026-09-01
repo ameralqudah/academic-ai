@@ -1313,7 +1313,10 @@
       "billing": "الاشتراك",
       "settings": "الإعدادات",
       "admin": "الإدارة"
-    }
+    },
+    "deleteConversation": "حذف المحادثة",
+    "confirmDelete": "تأكيد الحذف",
+    "cancelDelete": "إلغاء"
   },
   "chat": {
     "copy": "نسخ",

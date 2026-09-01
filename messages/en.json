@@ -1313,7 +1313,10 @@
       "billing": "Billing",
       "settings": "Settings",
       "admin": "Admin"
-    }
+    },
+    "deleteConversation": "Delete conversation",
+    "confirmDelete": "Confirm delete",
+    "cancelDelete": "Cancel"
   },
   "chat": {
     "copy": "Copy",

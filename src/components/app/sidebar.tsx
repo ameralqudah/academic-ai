@@ -3,6 +3,7 @@
 import {
   BarChart3,
   BookOpen,
+  Check,
   ChevronLeft,
   ChevronRight,
   FolderKanban,
@@ -10,20 +11,21 @@ import {
   Library,
   LogOut,
   MessageSquarePlus,
-  MoreHorizontal,
   Search,
   Settings,
   Shield,
   Sparkles,
   Telescope,
+  Trash2,
   Wallet,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import { signOut } from 'next-auth/react';
 import { useTranslations } from 'next-intl';
 import { useState } from 'react';
 
-import { Link, usePathname } from '@/i18n/navigation';
+import { Link, usePathname, useRouter } from '@/i18n/navigation';
 import { cn } from '@/lib/cn';
 
 /**
@@ -216,27 +218,11 @@ export function Sidebar({
           <section className="flex flex-col gap-1">
             <h2 className="px-2 text-xs font-medium text-muted">{t('recent')}</h2>
             {conversations.map((conversation) => (
-              <Link
+              <ConversationRow
                 key={conversation.id}
-                /*
-                 * An object, not a template string.
-                 *
-                 * next-intl's Link treats a string href as a whole pathname and
-                 * percent-encodes the `?` inside it, producing
-                 * `/en/chat%3Fc%3D…` — a URL that resolves to nothing, which is
-                 * why clicking a recent conversation did not open it. Passing
-                 * pathname and query separately lets it build the link properly.
-                 */
-                href={{ pathname: '/chat', query: { c: conversation.id } }}
-                onClick={onNavigate}
-                className={cn(
-                  'group flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm',
-                  'text-ink-soft hover:bg-subtle hover:text-ink',
-                )}
-              >
-                <span className="truncate">{conversation.title ?? t('untitled')}</span>
-                <MoreHorizontal className="ms-auto size-3.5 shrink-0 opacity-0 group-hover:opacity-60" />
-              </Link>
+                conversation={conversation}
+                onNavigate={onNavigate}
+              />
             ))}
           </section>
         )}
@@ -295,6 +281,120 @@ export function Sidebar({
           {!collapsed && tn('logout')}
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One conversation in the sidebar, with a way to delete it.
+ *
+ * There was a `MoreHorizontal` icon here that appeared on hover and did
+ * nothing. It looked like an actions menu, which is worse than no affordance at
+ * all: a user reported being unable to delete old chats, and the reason was an
+ * icon promising a menu that had never been built. The deletion itself — the
+ * service, the route, the soft delete — had existed since conversations were
+ * first persisted.
+ *
+ * **Deleting archives rather than destroys.** A researcher who deletes a thread
+ * and then realises the answer mattered should be able to get it back, and an
+ * accidental click should not be irreversible. The messages stay; the
+ * conversation leaves the list.
+ */
+function ConversationRow({
+  conversation,
+  onNavigate,
+}: {
+  conversation: ConversationSummary;
+  onNavigate?: () => void;
+}) {
+  const t = useTranslations('sidebar');
+  const router = useRouter();
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [hidden, setHidden] = useState(false);
+
+  async function remove() {
+    setDeleting(true);
+
+    try {
+      const response = await fetch(`/api/conversations/${conversation.id}`, { method: 'DELETE' });
+
+      if (!response.ok) {
+        setDeleting(false);
+        setConfirming(false);
+        return;
+      }
+
+      /*
+       * Hidden immediately, then the server list is refreshed. Waiting for the
+       * refresh leaves the row on screen for a moment after the click, which
+       * reads as the button not working — the complaint that led here.
+       */
+      setHidden(true);
+      router.refresh();
+    } catch {
+      setDeleting(false);
+      setConfirming(false);
+    }
+  }
+
+  if (hidden) return null;
+
+  return (
+    <div className="group relative flex items-center">
+      <Link
+        href={{ pathname: '/chat', query: { c: conversation.id } }}
+        onClick={onNavigate}
+        className={cn(
+          'flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm',
+          'text-ink-soft hover:bg-subtle hover:text-ink',
+        )}
+      >
+        <span className="truncate">{conversation.title ?? t('untitled')}</span>
+      </Link>
+
+      {confirming ? (
+        /*
+         * Confirmation inline rather than in a dialog. A modal for a reversible
+         * action is heavier than the action deserves, and the two buttons here
+         * are unambiguous.
+         */
+        <span className="flex shrink-0 items-center gap-1 pe-1">
+          <button
+            type="button"
+            onClick={() => void remove()}
+            disabled={deleting}
+            aria-label={t('confirmDelete')}
+            className="rounded p-1 text-danger hover:bg-subtle disabled:opacity-50"
+          >
+            <Check className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            aria-label={t('cancelDelete')}
+            className="rounded p-1 text-muted hover:bg-subtle hover:text-ink"
+          >
+            <X className="size-3.5" />
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          aria-label={t('deleteConversation')}
+          /*
+           * Hidden until hover or focus, so the list stays readable — but
+           * reachable by keyboard, which `focus-visible` is for.
+           */
+          className={cn(
+            'absolute end-1 rounded p-1 text-muted opacity-0 transition-opacity',
+            'hover:bg-subtle hover:text-danger group-hover:opacity-100 focus-visible:opacity-100',
+          )}
+        >
+          <Trash2 className="size-3.5" />
+        </button>
+      )}
     </div>
   );
 }

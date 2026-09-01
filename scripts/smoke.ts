@@ -1360,6 +1360,81 @@ assertTrue(
 
 
 
+
+console.log('\nconversation deletion');
+
+/*
+ * A user reported being unable to delete old chats. Everything behind the
+ * button existed — the service, the route, the soft delete, twenty-six passing
+ * integration assertions — and there was no button. What the sidebar had
+ * instead was a `MoreHorizontal` icon that appeared on hover and did nothing,
+ * which is worse than no affordance: it promises a menu that was never built.
+ *
+ * These read the source, because what must not come back is a missing control
+ * rather than a wrong value.
+ */
+const sidebarSource2 = await readFile('src/components/app/sidebar.tsx', 'utf8');
+
+assertTrue(
+  'a conversation row offers deletion',
+  sidebarSource2.includes('deleteConversation') && sidebarSource2.includes('Trash2'),
+);
+assertTrue(
+  'and calls the endpoint that performs it',
+  sidebarSource2.includes("method: 'DELETE'") && sidebarSource2.includes('/api/conversations/'),
+);
+/*
+ * Checked as an import rather than as any mention: the comment above the fix
+ * names the icon, which is the point of the comment. A guard that cannot tell
+ * an import from an explanation would force the explanation out.
+ */
+assertTrue(
+  'the decorative icon that promised a menu is no longer imported',
+  !/^\s*MoreHorizontal,/m.test(sidebarSource2),
+);
+
+/*
+ * Confirmation before deleting. Not a modal — a reversible action does not earn
+ * one — but not a single click either, since the row is small and sits next to
+ * the link that opens it.
+ */
+assertTrue('deletion is confirmed first', sidebarSource2.includes('confirming'));
+assertTrue(
+  'and the row disappears immediately rather than after a refresh',
+  sidebarSource2.includes('setHidden(true)'),
+);
+
+/* Reachable by keyboard, not only on hover. */
+assertTrue(
+  'the delete control is focusable, not hover-only',
+  sidebarSource2.includes('focus-visible:opacity-100'),
+);
+
+/* Every label the control needs must exist in both languages. */
+{
+  const arSide = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>;
+  const enSide = JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>;
+
+  const label = (messages: Record<string, unknown>, key: string) =>
+    (messages.sidebar as Record<string, unknown> | undefined)?.[key];
+
+  for (const key of ['deleteConversation', 'confirmDelete', 'cancelDelete']) {
+    assertTrue(`sidebar.${key} has an Arabic label`, typeof label(arSide, key) === 'string');
+    assertTrue(`sidebar.${key} has an English label`, typeof label(enSide, key) === 'string');
+  }
+}
+
+/*
+ * The route archives by default and destroys only when asked. A researcher who
+ * deletes a thread and then realises the answer mattered should be able to get
+ * it back.
+ */
+const deleteRouteSource = await readFile('src/app/api/conversations/[id]/route.ts', 'utf8');
+assertTrue(
+  'the default delete is reversible',
+  deleteRouteSource.includes("permanent: z.enum(['true', 'false']).default('false')"),
+);
+
 console.log('\nweb search');
 
 /*

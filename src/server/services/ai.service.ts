@@ -814,6 +814,39 @@ Rules:
 }
 
 /**
+ * Writes questionnaire items to a specification.
+ *
+ * A thin wrapper: the measurement knowledge is in the prompt the caller builds,
+ * not here. Temperature is low but not zero — item wording benefits from some
+ * variation, since four items on one construct should not read as four
+ * rephrasings of the same sentence, which is what a deterministic run produces.
+ */
+export async function generateSurveyItems(input: {
+  userId: string;
+  prompt: string;
+  locale: 'ar' | 'en';
+  maxTokens: number;
+}): Promise<string> {
+  await assertCanUseAI(input.userId, Math.round(input.maxTokens / 2));
+
+  const provider = await resolveProvider();
+
+  const result = await runCompletion({
+    userId: input.userId,
+    projectId: '',
+    provider,
+    task: 'chat',
+    locale: input.locale,
+    system: input.prompt,
+    messages: [{ role: 'user', content: 'Generate the instrument now.' }],
+    maxTokens: input.maxTokens,
+    temperature: 0.6,
+  });
+
+  return result.text;
+}
+
+/**
  * Describes academic sources that were actually retrieved.
  *
  * The rules given to the model are the same ones the results chapter uses for

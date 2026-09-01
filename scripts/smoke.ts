@@ -36,6 +36,11 @@ import {
   parseProposedStructure,
   STRUCTURE_EXTRACTION_PROMPT,
 } from '@/analysis/inference/pls/extract';
+import {
+  buildSurveyPrompt,
+  parseGeneratedSurvey,
+  scaleLabels,
+} from '@/server/survey/generator';
 import { validateDraft } from '@/components/agent/pls-builder';
 import { resolveReason } from '@/server/http/reasons';
 import { mergeSources } from '@/server/knowledge/merge';
@@ -1466,6 +1471,186 @@ assertTrue(
   'the default delete is reversible',
   deleteRouteSource.includes("permanent: z.enum(['true', 'false']).default('false')"),
 );
+
+
+console.log('\nsurvey generator');
+
+/*
+ * The model writes the items; everything checkable without it is checked here —
+ * the parsing, the codes, the scales, and the refusals that stop a malformed
+ * reply becoming an instrument for a study the researcher is not running.
+ */
+const surveyRequest = {
+  topic: 'Employee engagement in remote teams',
+  constructs: [
+    { name: 'Job Satisfaction', definition: 'How content an employee is with their role' },
+    { name: 'Team Trust' },
+  ],
+  itemsPerConstruct: 3,
+  scaleType: 'likert-agreement' as const,
+  points: 5 as const,
+  locale: 'en' as const,
+  includeReversed: true,
+  includeDemographics: true,
+};
+
+/* The prompt must carry the rules that prevent the failures, not describe them. */
+const surveyPrompt = buildSurveyPrompt(surveyRequest);
+
+assertTrue('the prompt forbids double-barrelled items', surveyPrompt.includes('One idea per item'));
+assertTrue('and leading wording', surveyPrompt.includes('No leading wording'));
+assertTrue('and mixing scales within a construct', surveyPrompt.includes('do not mix agreement with frequency'));
+assertTrue(
+  'and requires reverse items to be marked, since an unmarked one wrecks reliability',
+  surveyPrompt.includes('nobody recodes it'),
+);
+assertTrue('the item count is stated exactly', surveyPrompt.includes('Exactly 3 items per subscale'));
+assertTrue('and both constructs are named', surveyPrompt.includes('Job Satisfaction') && surveyPrompt.includes('Team Trust'));
+
+/* Arabic instructions are Arabic, not a translation wrapper around English. */
+const arabicPrompt = buildSurveyPrompt({ ...surveyRequest, locale: 'ar' });
+assertTrue('the Arabic prompt is written in Arabic', arabicPrompt.includes('كل بند يقيس فكرة واحدة'));
+assertTrue('and carries the same reverse-coding warning', arabicPrompt.includes('يُفسد حساب الثبات'));
+
+/* A well-formed reply becomes an instrument. */
+const goodReply = JSON.stringify({
+  title: 'Remote Team Engagement Survey',
+  introduction: 'This survey asks about your experience working remotely. Responses are anonymous and take about five minutes.',
+  constructs: [
+    {
+      name: 'Job Satisfaction',
+      items: [
+        { text: 'I find my current role fulfilling.', reversed: false },
+        { text: 'I would recommend this role to a friend.', reversed: false },
+        { text: 'I often think about leaving this position.', reversed: true },
+      ],
+    },
+    {
+      name: 'Team Trust',
+      items: [
+        { text: 'I can rely on my teammates to meet deadlines.', reversed: false },
+        { text: 'My teammates keep me informed about their work.', reversed: false },
+        { text: 'I hesitate to depend on my colleagues.', reversed: true },
+      ],
+    },
+  ],
+});
+
+const survey = parseGeneratedSurvey(goodReply, surveyRequest);
+
+assertTrue('a well-formed reply parses', survey !== null);
+check('both subscales are present', survey?.constructs.length, 2);
+check('with the requested item count', survey?.constructs[0]?.items.length, 3);
+
+/*
+ * Item codes follow the SAT1 convention the PLS builder already recognises, so
+ * a researcher who generates an instrument here gets automatic construct
+ * matching when they analyse the responses.
+ */
+check('items are coded by construct', survey?.constructs[0]?.items[0]?.code, 'JS1');
+check('and numbered within it', survey?.constructs[0]?.items[2]?.code, 'JS3');
+check('the second construct gets its own prefix', survey?.constructs[1]?.items[0]?.code, 'TT1');
+
+/* Reverse items are collected, so the analysis stage can recode them. */
+check('reverse-coded items are gathered', survey?.reversedCodes.length, 2);
+assertTrue('naming them by code', survey?.reversedCodes.includes('JS3') ?? false);
+
+/* The definition the researcher gave survives onto the subscale. */
+check(
+  'the construct definition is carried through',
+  survey?.constructs[0]?.definition,
+  'How content an employee is with their role',
+);
+
+/* Scale labels are fixed, not generated, so they read conventionally. */
+check('the scale has five points', survey?.scale.labels.length, 5);
+check('with conventional wording', survey?.scale.labels[0], 'Strongly disagree');
+
+const arabicLabels = scaleLabels('likert-agreement', 5, 'ar');
+check('and the Arabic scale uses the established form', arabicLabels[0], 'لا أوافق بشدة');
+assertTrue(
+  'frequency and agreement scales differ, since one cannot substitute for the other',
+  scaleLabels('likert-frequency', 5, 'en')[0] !== scaleLabels('likert-agreement', 5, 'en')[0],
+);
+
+/* Every scale type and length must have labels in both languages. */
+for (const type of ['likert-agreement', 'likert-frequency', 'likert-extent', 'likert-quality'] as const) {
+  for (const points of [5, 7] as const) {
+    for (const language of ['ar', 'en'] as const) {
+      const labels = scaleLabels(type, points, language);
+      check(`${type} ${points}-point ${language} has the right number of labels`, labels.length, points);
+      assertTrue(`and none is empty`, labels.every((label) => label.trim().length > 0));
+    }
+  }
+}
+
+/* Demographics are fixed rather than generated, so results stay comparable. */
+assertTrue('demographics are included when asked', (survey?.demographics.length ?? 0) >= 4);
+assertTrue(
+  'and gender offers a prefer-not-to-say option',
+  survey?.demographics
+    .find((item) => item.code === 'D1')
+    ?.options?.some((option) => option.includes('Prefer not')) ?? false,
+);
+
+const withoutDemographics = parseGeneratedSurvey(goodReply, {
+  ...surveyRequest,
+  includeDemographics: false,
+});
+check('and omitted when not', withoutDemographics?.demographics.length, 0);
+
+/*
+ * The steps before use are specific actions rather than a disclaimer, because
+ * "this is a draft" gets read as boilerplate and skipped.
+ */
+assertTrue('the instrument states what must happen before use', (survey?.beforeUse.length ?? 0) >= 5);
+assertTrue(
+  'starting with the fact that it is not validated',
+  survey?.beforeUse[0]?.includes('not a validated instrument') ?? false,
+);
+assertTrue(
+  'and naming the reverse-coding step',
+  survey?.beforeUse.some((step) => step.includes('Recode the reverse-worded')) ?? false,
+);
+
+const arabicSurvey = parseGeneratedSurvey(goodReply, { ...surveyRequest, locale: 'ar' });
+assertTrue(
+  'the Arabic version says the same about validation',
+  arabicSurvey?.beforeUse[0]?.includes('ليست أداة مُقنَّنة') ?? false,
+);
+
+/* Malformed and mismatched replies are refused rather than half-accepted. */
+check('a fenced reply still parses', parseGeneratedSurvey('```json\n' + goodReply + '\n```', surveyRequest) !== null, true);
+check('malformed JSON is refused', parseGeneratedSurvey('not json', surveyRequest), null);
+check('an empty reply is refused', parseGeneratedSurvey('', surveyRequest), null);
+
+/*
+ * A construct the researcher did not ask for means the reply was not followed.
+ * Accepting it would hand back an instrument for a different study.
+ */
+const wrongConstructs = JSON.stringify({
+  title: 'x',
+  introduction: 'A short introduction for respondents.',
+  constructs: [{ name: 'Something Else', items: [{ text: 'An item here.', reversed: false }] }],
+});
+check('a reply naming the wrong construct is refused', parseGeneratedSurvey(wrongConstructs, surveyRequest), null);
+
+/* A subscale short of the requested count is not usable as specified. */
+const tooFewItems = JSON.stringify({
+  title: 'x',
+  introduction: 'A short introduction for respondents.',
+  constructs: [
+    { name: 'Job Satisfaction', items: [{ text: 'Only one item here.', reversed: false }] },
+    { name: 'Team Trust', items: [{ text: 'Only one item here.', reversed: false }] },
+  ],
+});
+check('a short subscale is refused', parseGeneratedSurvey(tooFewItems, surveyRequest), null);
+
+/* Extra items are trimmed rather than refused: unequal subscales complicate every comparison. */
+const tooManyItems = JSON.parse(goodReply) as { constructs: { name: string; items: unknown[] }[] };
+(tooManyItems.constructs[0] as { items: unknown[] }).items.push({ text: 'A fourth item.', reversed: false });
+const trimmed = parseGeneratedSurvey(JSON.stringify(tooManyItems), surveyRequest);
+check('an over-long subscale is trimmed to the requested count', trimmed?.constructs[0]?.items.length, 3);
 
 console.log('\nweb search');
 

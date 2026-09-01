@@ -284,9 +284,17 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
     estimatedCalls: 8,
   },
 
+  /**
+   * Built. Produces a questionnaire draft with coded items, a consistent scale,
+   * demographics and the steps a researcher must take before administering it.
+   *
+   * Priced like other writing capabilities because it is one: a model writes
+   * the items, and the measurement rules live in the prompt around them. What
+   * it does not produce is a validated instrument, and the output says so.
+   */
   'research.survey': {
     intent: 'research.survey',
-    status: 'planned',
+    status: 'available',
     agent: 'research',
     requiresDataset: false,
     units: 2,

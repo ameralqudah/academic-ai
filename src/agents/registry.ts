@@ -320,9 +320,20 @@ export const CAPABILITIES: Record<IntentKey, Capability> = {
     units: 0,
     estimatedCalls: 0,
   },
+  /**
+   * Built as confirmatory factor analysis — the measurement half of CB-SEM.
+   *
+   * The structural half, where latent factors predict one another with fit
+   * indices, is not built. That is a real limitation and is stated to the
+   * researcher rather than implied by the capability being listed: what this
+   * runs is a measurement model, and a request for a full structural CB-SEM
+   * gets the measurement model plus a note about what is missing.
+   *
+   * Free, like every statistical capability, because it makes no model calls.
+   */
   'stats.cbSem': {
     intent: 'stats.cbSem',
-    status: 'planned',
+    status: 'available',
     agent: 'statistics',
     requiresDataset: true,
     units: 0,

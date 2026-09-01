@@ -1037,6 +1037,25 @@
         "interrupted": "This analysis stopped because the server restarted. Please run it again.",
         "failed": "The analysis could not be completed. Check the model and the data, then try again."
       }
+    },
+    "cbsem": {
+      "error": {
+        "noConstructs": "The model has no latent constructs.",
+        "tooFewIndicators": "{construct} has only {indicators} indicators; confirmatory factor analysis needs at least three per factor, or the model is not identified.",
+        "tooFewCases": "Only {n} cases, below the {minimum} minimum for covariance-based modelling. Use PLS-SEM for smaller samples.",
+        "constantIndicator": "The indicator {indicator} does not vary, so it has no covariance with anything."
+      },
+      "warning": {
+        "few-cases-per-parameter": "{ratio} cases per estimated parameter ({n} cases, {parameters} parameters); {recommended} is the usual minimum. Estimates are less stable.",
+        "non-normal-indicators": "{count} indicators clearly violate normality (worst is {worst}, skew {skew}). Covariance-based modelling assumes multivariate normality; consider PLS-SEM instead.",
+        "did-not-converge": "Estimation did not converge after {iterations} iterations; the results are not reliable.",
+        "heywood-case": "{count} negative error variances (a Heywood case); the model is probably misspecified, the sample too small, or an indicator belongs to another factor."
+      },
+      "fit": {
+        "good": "Fit is good: the model reproduces the observed covariance matrix closely enough to publish.",
+        "acceptable": "Fit is acceptable but below the preferred level. Review the weakly loading indicators.",
+        "poor": "Fit is poor: the model does not reproduce the observed covariance matrix. It should not be published in this form."
+      }
     }
   },
   "agent": {

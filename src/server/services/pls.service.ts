@@ -39,6 +39,11 @@ import {
   usableOmissionDistance,
   type PredictiveRelevance,
 } from '@/analysis/inference/pls/blindfolding';
+import {
+  confirmatoryFactorAnalysis,
+  CbSemError,
+  type CbSemResult,
+} from '@/analysis/inference/cbsem/cfa';
 import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
 import { checkModelData, type DataIssue } from '@/analysis/inference/pls/data-checks';
 import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
@@ -255,6 +260,80 @@ export async function runPls(input: {
     };
   } catch (error) {
     throw asAppError(error);
+  }
+}
+
+/**
+ * Runs a confirmatory factor analysis on the same model specification.
+ *
+ * Deliberately in this service rather than its own: it takes the identical
+ * model shape, loads the data the same way, and a researcher asked for CB-SEM
+ * confirmation of a PLS result should be able to run both without
+ * re-specifying anything. Splitting them would mean two copies of the loading
+ * and validation code that would drift.
+ *
+ * Not metered, like every other statistical capability: it is arithmetic, not a
+ * model call.
+ */
+export async function runCbSem(input: {
+  datasetId: string;
+  userId: string;
+  model: PlsModel;
+  conversationId?: string | null;
+}): Promise<CbSemResult> {
+  const loaded = await loadForAnalysis(input.datasetId, input.userId);
+
+  const columns = new Map<string, number[]>();
+  for (const name of loaded.data.columns) {
+    const index = loaded.data.columns.indexOf(name);
+    columns.set(
+      name,
+      loaded.data.rows.map((row) => {
+        const value = row[index];
+        const parsed = typeof value === 'number' ? value : Number(value);
+        return Number.isFinite(parsed) ? parsed : Number.NaN;
+      }),
+    );
+  }
+
+  try {
+    const result = confirmatoryFactorAnalysis(input.model, columns);
+
+    if (input.conversationId) {
+      await recordTurn({
+        conversationId: input.conversationId,
+        userId: input.userId,
+        userMessage: `CB-SEM: ${input.model.constructs.map((c) => c.name).join(', ')}`,
+        assistantMessage: '',
+        payload: {
+          results: [{ kind: 'cbsem', payload: result as unknown as Record<string, unknown> }],
+        },
+      }).catch((error: unknown) => {
+        logger.error('cbsem.persistFailed', {
+          conversationId: input.conversationId,
+          error: String(error),
+        });
+      });
+    }
+
+    logger.info('cbsem.estimated', {
+      datasetId: input.datasetId,
+      n: result.n,
+      cfi: result.fit.cfi,
+      rmsea: result.fit.rmsea,
+      verdict: result.fit.verdict,
+    });
+
+    return result;
+  } catch (error) {
+    if (error instanceof CbSemError) {
+      const message = resolveReason(error.reasonKey, error.params);
+      throw new AppError('VALIDATION', message.en, message.ar, {
+        reasonKey: error.reasonKey,
+        params: error.params,
+      });
+    }
+    throw error;
   }
 }
 

@@ -1100,34 +1100,25 @@ async function main() {
   assertTrue('and its duration', (measured?.durationMs ?? -1) >= 0);
 
   /*
-   * The refusal that matters most, now carried by CB-SEM.
+   * Both structural equation methods now reach the agent rather than being
+   * refused.
    *
-   * PLS-SEM used to stand here: it was understood, named and declined rather
-   * than quietly turned into a regression that would produce numbers. It is
-   * built now, so the assertion moved to the capability that genuinely is not
-   * — the point being unchanged, that an unbuilt method is refused by name
-   * rather than substituted.
+   * This assertion used to check the opposite for each in turn — that an
+   * unbuilt method was declined by name rather than turned into a regression
+   * that would produce numbers. That rule still holds and is checked in the
+   * smoke tests against whatever remains planned; what belongs here is that the
+   * two that shipped are no longer turned away.
+   *
+   * They run through their own routes rather than the orchestrator, so what is
+   * verified is the absence of a refusal rather than the presence of a result.
    */
-  const cbSem = await drive('stats.cbSem');
-  const unavailable = cbSem.find(
-    (event): event is Extract<AgentEvent, { type: 'unavailable' }> => event.type === 'unavailable',
-  );
-  assertTrue('CB-SEM is declined rather than substituted', unavailable !== undefined);
-  check('by name', unavailable?.intent, 'stats.cbSem');
-  assertTrue('with a reason', Boolean(unavailable?.reasonKey));
-  assertTrue('and something else offered instead', (unavailable?.alternatives.length ?? 0) > 0);
-  assertTrue('and no analysis is produced', !kinds(cbSem).includes('result'));
-
-  /*
-   * And PLS-SEM now reaches the agent instead of being refused. It has its own
-   * route and builder rather than running through the orchestrator, so what is
-   * checked here is that the request is no longer turned away.
-   */
-  const plsSemNow = await drive('stats.plsSem');
-  assertTrue(
-    'PLS-SEM is no longer declined',
-    !plsSemNow.some((event) => event.type === 'unavailable'),
-  );
+  for (const intent of ['stats.plsSem', 'stats.cbSem'] as const) {
+    const events = await drive(intent);
+    assertTrue(
+      `${intent} is no longer declined`,
+      !events.some((event) => event.type === 'unavailable'),
+    );
+  }
 
   /*
    * Logistic regression used to be declined here, and this assertion checked

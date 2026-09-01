@@ -29,6 +29,7 @@ import {
 } from '@/analysis/inference/pls/algorithm';
 import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
 import { blindfold, usableOmissionDistance } from '@/analysis/inference/pls/blindfolding';
+import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
 import { checkModelData } from '@/analysis/inference/pls/data-checks';
 import { buildReport } from '@/analysis/inference/pls/report';
 import { exportPlsToExcel, exportPlsToWord } from '@/server/services/pls-export.service';
@@ -3314,6 +3315,200 @@ const keysOf = (result: ReturnType<typeof checkModelData>) =>
     assertTrue(`analysis.pls.data.${key} has an Arabic message`, typeof resolve(messagesAr, `analysis.pls.data.${key}`) === 'string');
     assertTrue(`analysis.pls.data.${key} has an English message`, typeof resolve(messagesEn, `analysis.pls.data.${key}`) === 'string');
   }
+}
+
+
+
+console.log('\nCB-SEM: confirmatory factor analysis');
+
+/*
+ * Where PLS asks whether items hang together, CB-SEM asks a stricter question:
+ * could the covariance matrix we observed have been produced by the model we
+ * specified? A model can be rejected by that standard, which PLS has no way to
+ * say — and that difference is the reason for building this rather than
+ * duplicating what exists.
+ *
+ * Validated against mathematical properties and models built to known
+ * structure. Not benchmarked against AMOS, LISREL or lavaan; nothing here
+ * claims to match them.
+ */
+function cfaData(n: number, wellSpecified: boolean, seed = 17) {
+  let state = seed;
+  const rand = () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x7fffffff;
+  };
+  const normal = () => {
+    const u = Math.max(rand(), 1e-9);
+    const v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  const data = new Map<string, number[]>();
+  for (const column of ['a1', 'a2', 'a3', 'b1', 'b2', 'b3']) data.set(column, []);
+
+  for (let i = 0; i < n; i += 1) {
+    const A = normal();
+    const B = 0.5 * A + Math.sqrt(0.75) * normal();
+
+    for (let j = 1; j <= 3; j += 1) (data.get(`a${j}`) as number[]).push(0.8 * A + 0.6 * normal());
+
+    for (let j = 1; j <= 3; j += 1) {
+      /* When misspecified, b3 is really an indicator of A, which the model forbids. */
+      const latent = !wellSpecified && j === 3 ? A : B;
+      (data.get(`b${j}`) as number[]).push(0.8 * latent + 0.6 * normal());
+    }
+  }
+
+  return data;
+}
+
+const cfaModel: PlsModel = {
+  constructs: [
+    { name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' },
+    { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' },
+  ],
+  paths: [{ from: 'A', to: 'B' }],
+};
+
+/* A correctly specified model must fit, and the indices must say so together. */
+{
+  const result = confirmatoryFactorAnalysis(cfaModel, cfaData(400, true));
+
+  assertTrue('a correct model converges', result.converged);
+  check('and is judged to fit well', result.fit.verdict, 'good');
+
+  assertTrue('CFI is high', result.fit.cfi >= 0.95);
+  assertTrue('RMSEA is low', result.fit.rmsea <= 0.06);
+  assertTrue('SRMR is low', result.fit.srmr <= 0.08);
+  assertTrue('and chi-square is near its degrees of freedom', result.fit.normedChiSquare < 3);
+
+  /* The loadings recover the 0.8 they were built with. */
+  for (const loading of result.loadings) {
+    assertTrue(
+      `${loading.indicator} recovers its loading`,
+      Math.abs(loading.standardised - 0.8) < 0.15,
+    );
+    assertTrue(`and its R² follows`, Math.abs(loading.rSquared - loading.standardised ** 2) < 1e-9);
+  }
+
+  /* One indicator per factor is fixed to set the scale; without it, no unique solution. */
+  const references = result.loadings.filter((loading) => loading.isReference);
+  check('one reference indicator per factor', references.length, 2);
+
+  /* The factor correlation recovers the 0.5 it was built with. */
+  const correlation = result.factorCorrelations[0];
+  assertTrue('the factor correlation is recovered', Math.abs((correlation?.estimate ?? 0) - 0.5) < 0.15);
+  check('and one pair is reported for two factors', result.factorCorrelations.length, 1);
+
+  /* Reliability follows from the standardised loadings, as in PLS. */
+  for (const entry of result.reliability) {
+    assertTrue(`${entry.construct} is reliable`, entry.compositeReliability >= 0.7);
+    assertTrue(`and its AVE clears 0.5`, entry.ave >= 0.5);
+  }
+}
+
+/*
+ * The assertion that matters most: a misspecified model must be rejected.
+ *
+ * An engine that reports good fit for everything is worse than no engine, since
+ * the whole value of CB-SEM is that it can say no.
+ */
+{
+  const result = confirmatoryFactorAnalysis(cfaModel, cfaData(400, false));
+
+  check('a misspecified model is judged poor', result.fit.verdict, 'poor');
+  assertTrue('RMSEA rises above the threshold', result.fit.rmsea > 0.08);
+  assertTrue('and chi-square far exceeds its degrees of freedom', result.fit.normedChiSquare > 3);
+
+  /*
+   * And it converges. A badly fitting model that reports "did not converge"
+   * conflates two different findings — the model does not fit, versus the
+   * software gave up — and the researcher needs the first.
+   */
+  assertTrue('the optimiser still converges on a poor model', result.converged);
+
+  /* The cross-loading item shows a visibly weaker loading on its stated factor. */
+  const misfit = result.loadings.find((loading) => loading.indicator === 'b1');
+  assertTrue('the affected indicators load lower', (misfit?.standardised ?? 1) < 0.7);
+}
+
+/* Identification and data requirements are refused rather than fitted around. */
+{
+  const twoIndicators: PlsModel = {
+    constructs: [
+      { name: 'A', indicators: ['a1', 'a2'], mode: 'reflective' },
+      { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' },
+    ],
+    paths: [{ from: 'A', to: 'B' }],
+  };
+
+  let refused = false;
+  try {
+    confirmatoryFactorAnalysis(twoIndicators, cfaData(300, true));
+  } catch (error) {
+    refused = (error as { reasonKey?: string }).reasonKey === 'analysis.cbsem.error.tooFewIndicators';
+  }
+  assertTrue('a factor with two indicators is refused as unidentified', refused);
+
+  let tooSmall = false;
+  try {
+    confirmatoryFactorAnalysis(cfaModel, cfaData(60, true));
+  } catch (error) {
+    tooSmall = (error as { reasonKey?: string }).reasonKey === 'analysis.cbsem.error.tooFewCases';
+  }
+  assertTrue('a sample below one hundred is refused', tooSmall);
+
+  const constant = cfaData(300, true);
+  constant.set('a2', new Array(300).fill(3));
+
+  let constantRefused = false;
+  try {
+    confirmatoryFactorAnalysis(cfaModel, constant);
+  } catch (error) {
+    constantRefused = (error as { reasonKey?: string }).reasonKey === 'analysis.cbsem.error.constantIndicator';
+  }
+  assertTrue('a constant indicator is refused', constantRefused);
+}
+
+/*
+ * Non-normal data is warned about rather than refused. CB-SEM assumes
+ * multivariate normality and Likert items violate it; the honest response is to
+ * say so and let the researcher decide between this and PLS.
+ */
+{
+  const skewed = cfaData(300, true);
+  const a1 = skewed.get('a1') as number[];
+  /* Exponentiating produces the heavy right tail of a floor-effect item. */
+  skewed.set('a1', a1.map((value) => Math.exp(value * 1.5)));
+
+  const result = confirmatoryFactorAnalysis(cfaModel, skewed);
+  assertTrue(
+    'non-normal indicators are reported',
+    result.warnings.some((warning) => warning.code === 'non-normal-indicators'),
+  );
+  assertTrue('but the model still runs', result.loadings.length === 6);
+}
+
+/* Mathematical identities that must hold whatever the data. */
+{
+  const result = confirmatoryFactorAnalysis(cfaModel, cfaData(400, true));
+
+  assertTrue('degrees of freedom are positive', result.fit.df > 0);
+  assertTrue('chi-square is non-negative', result.fit.chiSquare >= 0);
+  assertTrue('CFI is bounded by one', result.fit.cfi <= 1);
+  assertTrue('RMSEA is non-negative', result.fit.rmsea >= 0);
+  assertTrue('SRMR is non-negative', result.fit.srmr >= 0);
+  assertTrue(
+    'the p-value is a probability',
+    result.fit.pValue >= 0 && result.fit.pValue <= 1,
+  );
+
+  /* Residual variances must be positive, or the solution is a Heywood case. */
+  assertTrue(
+    'no negative residual variance in a well-fitting model',
+    result.loadings.every((loading) => loading.residualVariance > 0),
+  );
 }
 
 

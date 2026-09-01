@@ -418,11 +418,43 @@ for (const capability of plannedCapabilities()) {
  * is recognised so it can be declined by name rather than misrouted to
  * something that would run.
  */
-for (const intent of ['stats.plsSem', 'stats.cbSem'] as const) {
-  check(`${intent} is recognised`, isKnownIntent(intent), true);
-  check(`${intent} is not offered as available`, isAvailable(intent), false);
-  check(`${intent} is marked planned`, capabilityFor(intent).status, 'planned');
+/*
+ * This list is now empty: PLS-SEM and CB-SEM are both built.
+ *
+ * What the assertion protected was never the specific names — it was the rule
+ * that an unbuilt capability is recognised and declined by name rather than
+ * misrouted to something that would produce numbers. That rule is checked below
+ * against whatever remains planned, so it keeps working as the list changes
+ * rather than needing an edit each time something ships.
+ */
+for (const capability of plannedCapabilities()) {
+  check(`${capability.intent} is recognised`, isKnownIntent(capability.intent), true);
+  check(`${capability.intent} is not offered as available`, isAvailable(capability.intent), false);
+  assertTrue(
+    `${capability.intent} can still be classified, so it is declined precisely`,
+    classifiableIntents().some((entry) => entry.intent === capability.intent),
+  );
 }
+
+check('CB-SEM is available', capabilityFor('stats.cbSem').status, 'available');
+check(
+  'and free, because it makes no model calls',
+  capabilityFor('stats.cbSem').units,
+  0,
+);
+
+/*
+ * PLS-SEM has left that list: the engine, assessment, bootstrapping, report and
+ * export all exist. It stayed marked `planned` while they did, so the agent
+ * declined a capability the product had — the opposite of the failure the list
+ * guards against, and just as misleading.
+ */
+check('PLS-SEM is available', capabilityFor('stats.plsSem').status, 'available');
+check(
+  'and free, like every other statistical capability, because it calls no model',
+  capabilityFor('stats.plsSem').units,
+  0,
+);
 
 /* The classifier is given planned intents too: declining precisely beats misrouting. */
 const classifiable = classifiableIntents().map((entry) => entry.intent);

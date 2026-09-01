@@ -145,6 +145,7 @@ export function AgentChat({
   conversationId: initialConversationId,
   initialTurns,
   initialBranches,
+  initialFile,
 }: {
   locale: 'ar' | 'en';
   projects: ProjectOption[];
@@ -164,6 +165,8 @@ export function AgentChat({
   initialTurns?: Turn[];
   /** Where the thread forks, and which version is showing at each fork. */
   initialBranches?: BranchPoint[];
+  /** A dataset attached on arrival, from the files page. */
+  initialFile?: AttachedFile;
 }) {
   const t = useTranslations('agent');
   const te = useTranslations('errors');
@@ -187,7 +190,7 @@ export function AgentChat({
   const [draft, setDraft] = useState(initialDraft ?? '');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [file, setFile] = useState<AttachedFile | null>(null);
+  const [file, setFile] = useState<AttachedFile | null>(initialFile ?? null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<ModeKey>('chat');
   /*

@@ -1461,5 +1461,27 @@
       "web": "web",
       "news": "news"
     }
+  },
+  "files": {
+    "title": "Files",
+    "subtitle": "{count} files uploaded",
+    "search": "Search by name or project…",
+    "noMatches": "No matching file",
+    "summary": "{rows} rows · {columns} columns · {size}",
+    "analyse": "Analyse",
+    "download": "Download",
+    "delete": "Delete file",
+    "confirmDelete": "Confirm delete",
+    "cancelDelete": "Cancel",
+    "deleteWarning": "This removes the file, any cleaned copies, and the analyses saved from it.",
+    "cleaned": "cleaned copy",
+    "empty": {
+      "title": "No files yet",
+      "hint": "Upload a data file in a chat and it will appear here.",
+      "action": "Open the chat"
+    },
+    "error": {
+      "deleteFailed": "The file could not be deleted. Please try again."
+    }
   }
 }

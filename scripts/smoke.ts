@@ -41,6 +41,7 @@ import {
   parseGeneratedSurvey,
   scaleLabels,
 } from '@/server/survey/generator';
+import { formatSize } from '@/components/files/file-list';
 import { validateDraft } from '@/components/agent/pls-builder';
 import { resolveReason } from '@/server/http/reasons';
 import { mergeSources } from '@/server/knowledge/merge';
@@ -1472,6 +1473,94 @@ assertTrue(
   deleteRouteSource.includes("permanent: z.enum(['true', 'false']).default('false')"),
 );
 
+
+
+console.log('\nfiles page');
+
+/*
+ * There was no files page. Datasets were stored, listed by an API nobody
+ * called, and reachable only by uploading the same file again — so a researcher
+ * who uploaded ten files over a month could see none of them. The sidebar's
+ * "Library" pointed at the analysis tool, which inspects one file: a different
+ * question from "what do I have".
+ */
+const filesPage = await readFile('src/app/[locale]/(app)/files/page.tsx', 'utf8');
+const fileList = await readFile('src/components/files/file-list.tsx', 'utf8');
+const sidebarFiles = await readFile('src/components/app/sidebar.tsx', 'utf8');
+
+assertTrue('the files page lists the user\'s datasets', filesPage.includes('listByUser'));
+assertTrue(
+  'loaded on the server, so the page does not flash empty',
+  !filesPage.includes("'use client'"),
+);
+assertTrue(
+  'project titles are resolved in one pass, not one query per file',
+  filesPage.includes('projectIds.map'),
+);
+
+assertTrue('the sidebar Library points at the files page', sidebarFiles.includes("href: '/files'"));
+
+/* Each row carries the actions, rather than opening a detail page first. */
+assertTrue('a file can be analysed from its row', fileList.includes("pathname: '/chat', query: { dataset:"));
+assertTrue('downloaded', fileList.includes('/download'));
+assertTrue('and deleted', fileList.includes("method: 'DELETE'"));
+
+/*
+ * Deletion is confirmed and says what it costs. A dataset with saved analyses
+ * is not the same as an unused upload.
+ */
+assertTrue('deletion is confirmed', fileList.includes('confirming'));
+assertTrue('and states what goes with it', fileList.includes('deleteWarning'));
+
+/* A failed delete is reported rather than leaving the row apparently stuck. */
+assertTrue('a delete failure is shown', fileList.includes('error.deleteFailed'));
+
+/* Cleaned copies are marked: deleting an original takes them with it. */
+assertTrue('cleaned copies are distinguishable', fileList.includes("dataset.kind === 'CLEANED'"));
+
+/* The empty state points somewhere rather than just being empty. */
+assertTrue('an empty library offers a way forward', fileList.includes('empty.action'));
+
+/*
+ * "Analyse" must reach the chat with the file attached. Reaching the chat and
+ * making the researcher upload it again would defeat the point of the button.
+ */
+const chatPageFiles = await readFile('src/app/[locale]/(app)/chat/page.tsx', 'utf8');
+assertTrue('the chat accepts a dataset id', chatPageFiles.includes('dataset?: string'));
+assertTrue('and attaches it on arrival', chatPageFiles.includes('initialFile='));
+assertTrue(
+  'checking ownership through the repository rather than trusting the id',
+  chatPageFiles.includes('findOwnedDataset(dataset, user.id)'),
+);
+assertTrue(
+  'and only the column list travels, not the whole profile',
+  chatPageFiles.includes('function columnsOf'),
+);
+
+/* Sizes read the way an operating system reports them. */
+check('bytes stay bytes', formatSize(512), '512 B');
+check('kilobytes round', formatSize(2048), '2 KB');
+check('megabytes carry one decimal', formatSize(3 * 1024 * 1024), '3.0 MB');
+check('and the boundary is binary, not decimal', formatSize(1024), '1 KB');
+
+/* Every label the page needs must exist in both languages. */
+{
+  const arFiles = (JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>).files;
+  const enFiles = (JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>).files;
+
+  const flatten = (value: unknown, prefix = ''): string[] =>
+    value && typeof value === 'object'
+      ? Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+          typeof child === 'string' ? [`${prefix}${key}`] : flatten(child, `${prefix}${key}.`),
+        )
+      : [];
+
+  const arKeys = flatten(arFiles).sort();
+  const enKeys = flatten(enFiles).sort();
+
+  assertTrue('the files namespace has keys', arKeys.length > 10);
+  check('and both languages match', arKeys.join(), enKeys.join());
+}
 
 console.log('\nsurvey generator');
 

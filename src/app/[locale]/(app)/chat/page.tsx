@@ -3,6 +3,7 @@ import { getTranslations } from 'next-intl/server';
 
 import { AgentChat } from '@/components/agent/agent-chat';
 import { requirePageUser } from '@/server/auth/guards';
+import { findOwned as findOwnedDataset } from '@/server/repositories/datasets.repository';
 import { getThread } from '@/server/services/chat.service';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 
@@ -61,16 +62,49 @@ function toTurns(
   });
 }
 
+/**
+ * Column summaries from a stored profile.
+ *
+ * The profile is a large object and only its column list is needed to attach a
+ * file; pulling the rest into the page payload would send the whole profile of
+ * a two-hundred-column dataset to the browser for a list of names.
+ */
+function columnsOf(profile: unknown) {
+  const columns = (profile as { columns?: unknown[] } | null)?.columns ?? [];
+
+  return (columns as { name: string; type: string; scale: string; missing: number; distinct: number }[]).map(
+    (column) => ({
+      name: column.name,
+      type: column.type,
+      scale: column.scale,
+      missing: column.missing,
+      distinct: column.distinct,
+    }),
+  );
+}
+
 export default async function ChatPage({
   params,
   searchParams,
 }: {
   params: Promise<{ locale: string }>;
-  searchParams: Promise<{ project?: string; prompt?: string; c?: string }>;
+  searchParams: Promise<{ project?: string; prompt?: string; c?: string; dataset?: string }>;
 }) {
   const { locale } = await params;
   const user = await requirePageUser(locale);
-  const { project, prompt, c: conversationId } = await searchParams;
+  const { project, prompt, c: conversationId, dataset } = await searchParams;
+
+  /*
+   * A dataset carried in from the files page.
+   *
+   * Loaded here so the chat opens with the file already attached — the point of
+   * "Analyse" on a file row is not to reach the chat, it is to reach the chat
+   * with that file ready. Ownership is checked by the loader; an id belonging
+   * to someone else, or a deleted one, simply opens an empty chat.
+   */
+  const attached = dataset
+    ? await findOwnedDataset(dataset, user.id).catch(() => null)
+    : null;
 
   /*
    * A saved conversation, when the URL names one.
@@ -113,6 +147,17 @@ export default async function ChatPage({
         conversationId={thread?.conversation.id ?? null}
         initialTurns={thread ? toTurns(thread.messages) : undefined}
         initialBranches={thread?.branchPoints ?? []}
+        initialFile={
+          attached
+            ? {
+                datasetId: attached.id,
+                name: attached.originalName,
+                rows: attached.rowCount ?? 0,
+                columns: attached.columnCount ?? 0,
+                fields: columnsOf(attached.profile),
+              }
+            : undefined
+        }
         /*
          * A starting phrase, when the user arrived from a sidebar entry like
          * "Academic search". The key is resolved to text here rather than

@@ -67,7 +67,12 @@ const SECTIONS: NavSection[] = [
     key: 'workspace',
     items: [
       { href: '/projects', key: 'projects', icon: FolderKanban },
-      { href: '/analysis', key: 'library', icon: Library },
+      /*
+       * Points at the files page, which is what "Library" means to a
+       * researcher. It pointed at the analysis tool, which inspects a single
+       * file — a different question from "what do I have".
+       */
+      { href: '/files', key: 'library', icon: Library },
       { href: '/analysis', key: 'dataAnalysis', icon: BarChart3 },
     ],
   },

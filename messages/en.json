@@ -349,7 +349,9 @@
     "score": "Score",
     "recommendation": "Recommended",
     "batch": "Set {number}",
-    "afterSelect": "Title selected. The research wizard is now unlocked."
+    "afterSelect": "Title selected. The research wizard is now unlocked.",
+    "discard": "Discard suggestion",
+    "clearRejected": "Clear rejected"
   },
   "wizard": {
     "title": "Research wizard",

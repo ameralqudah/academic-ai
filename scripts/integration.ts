@@ -37,6 +37,7 @@ import * as adminRepo from '@/server/repositories/admin.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
+import * as titlesRepo from '@/server/repositories/titles.repository';
 import * as chatRepo from '@/server/repositories/chat.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
@@ -85,6 +86,7 @@ import {
   switchToBranch,
 } from '@/server/services/chat.service';
 import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
+import { clearUnselectedTitles, deleteTitle, listTitles } from '@/server/services/ai.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -1800,6 +1802,72 @@ async function main() {
   assertTrue(
     'and it still appears in the sidebar',
     (await listRecent(detachOwner)).some((entry) => entry.id === attachedConversation.id),
+  );
+
+  /* --------------------------------------------------- discarding titles */
+
+  section('title suggestions can be removed');
+
+  /*
+   * There was no way to remove a title suggestion — not in the repository, the
+   * service, the route or the interface. Three batches of five leaves fifteen
+   * candidates, most rejected on sight, and the useful ones end up buried under
+   * the discarded.
+   */
+  const titleOwner = await newUser('title-owner');
+
+  const [titleProject] = await db
+    .insert(researchProjects)
+    .values({
+      userId: titleOwner,
+      title: 'A project needing a title',
+      degree: 'MASTER',
+      researchType: 'QUANTITATIVE',
+      academicField: 'EDUCATION',
+      language: 'AR',
+    } as never)
+    .returning();
+
+  await titlesRepo.insertMany([
+    { projectId: titleProject?.id as string, title: 'First suggestion', batch: 1, selected: false },
+    { projectId: titleProject?.id as string, title: 'The chosen one', batch: 1, selected: true },
+    { projectId: titleProject?.id as string, title: 'Third suggestion', batch: 1, selected: false },
+  ] as never);
+
+  check('three suggestions to begin with', (await listTitles(titleOwner, titleProject?.id as string)).length, 3);
+
+  const candidates = await titlesRepo.listForProject(titleProject?.id as string);
+  const rejected = candidates.find((candidate) => !candidate.selected);
+
+  await deleteTitle(titleOwner, titleProject?.id as string, rejected?.id as string);
+  check('one can be discarded', (await listTitles(titleOwner, titleProject?.id as string)).length, 2);
+
+  /*
+   * The chosen title is kept when the rejected ones are cleared: it is the
+   * project's working title, and removing it would leave the project without
+   * one — a different action from clearing suggestions.
+   */
+  const clearedTitles = await clearUnselectedTitles(titleOwner, titleProject?.id as string);
+  check('clearing removes the rest of the rejected', clearedTitles, 1);
+
+  const remaining = await listTitles(titleOwner, titleProject?.id as string);
+  check('leaving only the chosen title', remaining.length, 1);
+  check('and it is the selected one', remaining[0]?.selected, true);
+
+  /* Ownership: a candidate id alone must not reach another user's project. */
+  const titleIntruder = await newUser('title-intruder');
+
+  await expectAppError('another user cannot discard a title', 'NOT_FOUND', () =>
+    deleteTitle(titleIntruder, titleProject?.id as string, remaining[0]?.id as string),
+  );
+
+  await expectAppError('nor clear a project they do not own', 'NOT_FOUND', () =>
+    clearUnselectedTitles(titleIntruder, titleProject?.id as string),
+  );
+
+  /* Discarding something already gone is reported rather than silently passing. */
+  await expectAppError('discarding a missing title is refused', 'NOT_FOUND', () =>
+    deleteTitle(titleOwner, titleProject?.id as string, 'no-such-candidate'),
   );
 
   /* --------------------------------------------------------------- cleanup */

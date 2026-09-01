@@ -26,6 +26,42 @@ export async function insertMany(
   return db.insert(titleCandidates).values(rows).returning();
 }
 
+/**
+ * Removes one title candidate.
+ *
+ * There was no way to remove one. A researcher generating three batches of five
+ * accumulated fifteen suggestions, most of them rejected on sight, with no way
+ * to clear any of them — so the list grew until the useful ones were buried.
+ *
+ * Scoped to the project as well as the id, so a candidate id alone cannot
+ * delete from someone else's project. Ownership of the project itself is
+ * checked by the caller.
+ */
+export async function remove(projectId: string, candidateId: string): Promise<boolean> {
+  const rows = await db
+    .delete(titleCandidates)
+    .where(and(eq(titleCandidates.id, candidateId), eq(titleCandidates.projectId, projectId)))
+    .returning({ id: titleCandidates.id });
+
+  return rows.length > 0;
+}
+
+/**
+ * Removes every candidate that has not been chosen.
+ *
+ * The bulk case, for a researcher who has settled on a title and wants the
+ * rejected suggestions gone. The selected one is kept deliberately: it is the
+ * project's working title, and deleting it would leave the project without one.
+ */
+export async function removeUnselected(projectId: string): Promise<number> {
+  const rows = await db
+    .delete(titleCandidates)
+    .where(and(eq(titleCandidates.projectId, projectId), eq(titleCandidates.selected, false)))
+    .returning({ id: titleCandidates.id });
+
+  return rows.length;
+}
+
 export async function select(projectId: string, candidateId: string): Promise<TitleCandidate> {
   await db
     .update(titleCandidates)

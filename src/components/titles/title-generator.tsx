@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, Loader2, Scale, Sparkles, Wand2 } from 'lucide-react';
+import { Check, Loader2, Scale, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { useState } from 'react';
 
@@ -23,7 +23,7 @@ interface Comparison {
   recommendation: { title: string; reason: string };
 }
 
-type Busy = 'generate' | 'improve' | 'compare' | 'select' | null;
+type Busy = 'generate' | 'improve' | 'compare' | 'select' | 'discard' | null;
 
 export function TitleGenerator({
   projectId,
@@ -95,6 +95,61 @@ export function TitleGenerator({
     setBusy(null);
   }
 
+  /**
+   * Removes one suggestion.
+   *
+   * Removed from the list immediately and restored if the request fails, rather
+   * than waiting for the server: a card that lingers after a click reads as a
+   * button that did not work.
+   */
+  async function discard(candidate: TitleCandidate) {
+    setBusy('discard');
+    setBusyId(candidate.id);
+
+    const previous = titles;
+    setTitles((current) => current.filter((title) => title.id !== candidate.id));
+
+    try {
+      const response = await fetch(
+        `/api/ai/titles?projectId=${encodeURIComponent(projectId)}&candidateId=${encodeURIComponent(candidate.id)}`,
+        { method: 'DELETE' },
+      );
+
+      if (!response.ok) setTitles(previous);
+    } catch {
+      setTitles(previous);
+    } finally {
+      setBusy(null);
+      setBusyId(null);
+    }
+  }
+
+  /**
+   * Clears every suggestion that was not chosen.
+   *
+   * For a researcher who has settled and wants the rejected ones gone. The
+   * selected title stays, which is why this is not "delete all".
+   */
+  async function clearRejected() {
+    setBusy('discard');
+
+    const previous = titles;
+    setTitles((current) => current.filter((title) => title.selected));
+
+    try {
+      const response = await fetch(
+        `/api/ai/titles?projectId=${encodeURIComponent(projectId)}`,
+        { method: 'DELETE' },
+      );
+
+      if (!response.ok) setTitles(previous);
+    } catch {
+      setTitles(previous);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function select(candidate: TitleCandidate) {
     setBusy('select');
     setBusyId(candidate.id);
@@ -163,6 +218,27 @@ export function TitleGenerator({
         </Button>
 
         <p className="text-xs text-muted">{t('compareHint')}</p>
+
+        {/*
+          Clearing the rejected suggestions, offered once there are enough for
+          the list to be in the way. Below that threshold the button is clutter
+          solving a problem nobody has.
+        */}
+        {titles.filter((title) => !title.selected).length >= 3 && (
+          <Button
+            variant="ghost"
+            onClick={() => void clearRejected()}
+            disabled={busy !== null}
+            className="ms-auto text-muted hover:text-danger"
+          >
+            {busy === 'discard' && busyId === null ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden />
+            ) : (
+              <Trash2 className="size-4" aria-hidden />
+            )}
+            {t('clearRejected')}
+          </Button>
+        )}
       </div>
 
       {comparison ? (
@@ -329,6 +405,32 @@ export function TitleGenerator({
                   >
                     {inComparison ? t('removeFromCompare') : t('selectForCompare')}
                   </Button>
+
+                  {/*
+                    Removing a suggestion. There was no way to: three batches of
+                    five leaves fifteen candidates, most rejected on sight, and
+                    the useful ones end up buried under the discarded.
+
+                    The chosen title has no delete — it is the project's working
+                    title, and removing it would leave the project without one.
+                    Choosing a different title is the way to change it.
+                  */}
+                  {!candidate.selected && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void discard(candidate)}
+                      disabled={busy !== null}
+                      aria-label={t('discard')}
+                      className="ms-auto text-muted hover:text-danger"
+                    >
+                      {busy === 'discard' && busyId === candidate.id ? (
+                        <Loader2 className="size-4 animate-spin" aria-hidden />
+                      ) : (
+                        <Trash2 className="size-4" aria-hidden />
+                      )}
+                    </Button>
+                  )}
                 </div>
               </article>
             );

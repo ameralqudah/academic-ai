@@ -305,6 +305,42 @@ export async function listTitles(userId: string, projectId: string): Promise<Tit
   return titlesRepo.listForProject(projectId);
 }
 
+/**
+ * Removes a title suggestion.
+ *
+ * Ownership through `getOwnedProject`, which throws if the project is not the
+ * caller's — the same guard every other title operation uses, rather than a
+ * second check that could drift from it.
+ */
+export async function deleteTitle(
+  userId: string,
+  projectId: string,
+  candidateId: string,
+): Promise<void> {
+  await getOwnedProject(projectId, userId);
+
+  const removed = await titlesRepo.remove(projectId, candidateId);
+
+  if (!removed) {
+    throw new AppError('NOT_FOUND', 'That title was not found.', 'لم يُعثر على هذا العنوان.');
+  }
+}
+
+/**
+ * Clears the suggestions that were not chosen.
+ *
+ * For a researcher who has settled on a title. The selected one stays: it is
+ * the project's working title, and removing it would leave the project without
+ * one — which is a different action from clearing rejected suggestions.
+ */
+export async function clearUnselectedTitles(
+  userId: string,
+  projectId: string,
+): Promise<number> {
+  await getOwnedProject(projectId, userId);
+  return titlesRepo.removeUnselected(projectId);
+}
+
 /* -------------------------------------------------------------------------- */
 /*                            Section generation                              */
 /* -------------------------------------------------------------------------- */

@@ -1061,6 +1061,137 @@ export const artifacts = pgTable(
 export type Artifact = typeof artifacts.$inferSelect;
 export type NewArtifact = typeof artifacts.$inferInsert;
 
+/**
+ * A long-running task and its plan.
+ *
+ * Separate from `analysis_jobs`, which holds one unit of work with a known
+ * shape. A task is a *plan* — a sequence of steps that may grow while it runs,
+ * with dependencies between them and a budget across them. Forcing that into a
+ * table designed for "run this bootstrap" would mean storing the plan in a JSON
+ * blob nobody can query, and the first question anyone asks is "which step is
+ * it on".
+ */
+export const tasks = pgTable(
+  'tasks',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    conversationId: text('conversation_id').references(() => aiConversations.id, {
+      onDelete: 'set null',
+    }),
+
+    /** The request, as the user wrote it. */
+    request: text('request').notNull(),
+    locale: varchar('locale', { length: 2 }).default('en').notNull(),
+
+    /**
+     * QUEUED, PLANNING, RUNNING, PAUSED, WAITING_FOR_INPUT, COMPLETED, FAILED,
+     * CANCELLED.
+     *
+     * PAUSED and WAITING_FOR_INPUT are different states with different
+     * remedies: one is the system stopping at a budget limit, the other is the
+     * system needing an answer. Collapsing them would leave the user unable to
+     * tell "you have hit a limit" from "I need to know something".
+     */
+    status: varchar('status', { length: 20 }).default('QUEUED').notNull(),
+
+    /** The question, when waiting for input. */
+    pendingQuestion: text('pending_question'),
+    /** Why it paused, when paused at a limit. */
+    pauseReasonKey: varchar('pause_reason_key', { length: 128 }),
+
+    /**
+     * Facts gathered as the task runs, keyed so a later step can read them.
+     *
+     * Deliberately not the whole conversation: passing everything between steps
+     * costs tokens on every call and makes a step's behaviour depend on
+     * anything that happened earlier, which is untestable.
+     */
+    context: jsonb('context').$type<Record<string, unknown>>().default({}).notNull(),
+
+    /** Ceilings, resolved at creation so a change does not affect a running task. */
+    budget: jsonb('budget').$type<Record<string, number>>().default({}).notNull(),
+    /** What has been consumed against them. */
+    spent: jsonb('spent').$type<Record<string, number>>().default({}).notNull(),
+
+    errorReasonKey: varchar('error_reason_key', { length: 128 }),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index('tasks_user_idx').on(table.userId, table.createdAt),
+    /* The recovery query: tasks that were running when the process stopped. */
+    index('tasks_status_idx').on(table.status),
+  ],
+);
+
+/**
+ * One step of a plan.
+ *
+ * Rows rather than a JSON array, because the executor asks questions of them —
+ * which steps are ready, which are blocked, which have retries left — and those
+ * are queries, not array scans. Steps added while the task runs are the same
+ * shape as planned ones, so a dynamically added step is as traceable as any
+ * other.
+ */
+export const taskSteps = pgTable(
+  'task_steps',
+  {
+    id: id(),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+
+    /** Position in the plan. Not execution order — dependencies decide that. */
+    ordinal: integer('ordinal').notNull(),
+    /** The capability this step runs: 'web.search', 'document.generate', … */
+    capability: varchar('capability', { length: 64 }).notNull(),
+    /** What the step is for, in the user's language, for the progress display. */
+    label: text('label').notNull(),
+
+    /** PENDING, RUNNING, COMPLETED, FAILED, SKIPPED, BLOCKED. */
+    status: varchar('status', { length: 16 }).default('PENDING').notNull(),
+
+    /** Step ids this one needs. Empty means it can start immediately. */
+    dependsOn: jsonb('depends_on').$type<string[]>().default([]).notNull(),
+
+    /** Structured input, assembled from the task context and prior outputs. */
+    input: jsonb('input').$type<Record<string, unknown>>().default({}).notNull(),
+    /** Structured output, which dependent steps read by key. */
+    output: jsonb('output').$type<Record<string, unknown> | null>(),
+    /** Artifacts this step produced. */
+    artifactIds: jsonb('artifact_ids').$type<string[]>().default([]).notNull(),
+
+    attempts: integer('attempts').default(0).notNull(),
+    errorReasonKey: varchar('error_reason_key', { length: 128 }),
+    /** True when the planner added it after execution began. */
+    dynamic: boolean('dynamic').default(false).notNull(),
+
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+    durationMs: integer('duration_ms'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [index('task_steps_task_idx').on(table.taskId, table.ordinal)],
+);
+
+export type Task = typeof tasks.$inferSelect;
+export type NewTask = typeof tasks.$inferInsert;
+export type TaskStep = typeof taskSteps.$inferSelect;
+export type NewTaskStep = typeof taskSteps.$inferInsert;
+
+
 export type NewAnalysisJob = typeof analysisJobs.$inferInsert;
 export type AIConversation = typeof aiConversations.$inferSelect;
 export type NewAIConversation = typeof aiConversations.$inferInsert;

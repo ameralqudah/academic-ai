@@ -76,7 +76,14 @@ async function prepare(
   return { project, sections, context, provider };
 }
 
-async function runCompletion(input: {
+/**
+ * Exported for the task planner, which needs the same metering, provider
+ * resolution and usage recording as every other model call.
+ *
+ * A second implementation would be a second place for the quota check to be
+ * forgotten.
+ */
+export async function runCompletion(input: {
   userId: string;
   projectId: string;
   provider: AIProvider;

@@ -39,6 +39,14 @@ import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
 import { generateMarkdown } from '@/server/generators/documents';
+import * as tasksRepo from '@/server/repositories/tasks.repository';
+import {
+  capabilityFor,
+  registerCapability,
+  DEFAULT_BUDGET,
+  type TaskBudget,
+} from '@/server/tasks/capabilities';
+import { registerHandler, runTask } from '@/server/tasks/executor';
 import {
   deleteArtifact,
   listArtifacts,
@@ -2025,6 +2033,456 @@ async function main() {
   await deleteArtifact(thirdVersion.id, artifactOwner);
   check('a deleted version leaves the lineage', (await versionsOf(firstVersion.id, artifactOwner)).length, 2);
   assertTrue('and the earlier ones remain readable', (await readArtifact(firstVersion.id, artifactOwner)).artifact.version === 1);
+
+  /* ---------------------------------------------------- task orchestration */
+
+  section('the task executor');
+
+  /*
+   * The planner needs a model, so these register fake handlers and drive the
+   * executor directly. What is being tested is the machinery — dependencies,
+   * retries, budgets, resumption — which is where the failures live and which
+   * does not need a language model to exercise.
+   */
+  const taskOwner = await newUser('task-owner');
+
+  /** Records which handlers ran, so ordering and skipping are observable. */
+  const executed: string[] = [];
+
+  registerHandler('general.answer', async ({ input }) => {
+    executed.push(`general.answer:${String(input.marker ?? '')}`);
+    return { output: { answered: true, marker: input.marker ?? null }, modelCalls: 1 };
+  });
+
+  registerHandler('web.search', async ({ input }) => {
+    executed.push('web.search');
+
+    /* A handler that fails on demand, for the dependency and retry tests. */
+    if (input.fail) throw new Error('search failed');
+
+    return { output: { results: ['a', 'b'] }, modelCalls: 1 };
+  });
+
+  registerHandler('document.write', async ({ dependencies }) => {
+    executed.push('document.write');
+
+    /*
+     * Reads what the search produced. If a dependency did not run, this would
+     * see nothing — which is exactly what the blocking test asserts cannot
+     * happen.
+     */
+    return {
+      output: { wrote: true, usedResults: (dependencies['web.search']?.results as string[])?.length ?? 0 },
+      modelCalls: 1,
+    };
+  });
+
+  registerHandler('quality.check', async () => {
+    executed.push('quality.check');
+    return { output: { status: 'pass' } };
+  });
+
+  registerHandler('academic.search', async ({ input }) => {
+    executed.push('academic.search');
+
+    if (input.needsInput) return { output: {}, needsUserInput: 'Which discipline?' };
+    if (input.suggests) {
+      return { output: { found: 2 }, suggestsMoreWork: 'Contradictory findings need checking' };
+    }
+
+    return { output: { found: 5 }, modelCalls: 1 };
+  });
+
+  registerHandler('statistics.run', async () => {
+    executed.push('statistics.run');
+    return { output: { alpha: 0.87 } };
+  });
+
+  /** Builds a task with steps already planned, bypassing the model. */
+  async function makeTask(
+    steps: { key: string; capability: string; dependsOn?: string[]; input?: Record<string, unknown> }[],
+    budget: Partial<TaskBudget> = {},
+  ) {
+    const task = await tasksRepo.create({
+      userId: taskOwner,
+      request: 'test request',
+      locale: 'en',
+      status: 'QUEUED',
+      context: {},
+      budget: { ...DEFAULT_BUDGET, ...budget } as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const rows = await tasksRepo.addSteps(
+      steps.map((step, index) => ({
+        taskId: task.id,
+        ordinal: index,
+        capability: step.capability,
+        label: step.key,
+        status: 'PENDING',
+        dependsOn: [],
+        input: step.input ?? {},
+      })),
+    );
+
+    const byKey = new Map(steps.map((step, index) => [step.key, rows[index]?.id as string]));
+
+    for (const [index, step] of steps.entries()) {
+      const dependencies = (step.dependsOn ?? [])
+        .map((key) => byKey.get(key))
+        .filter((id): id is string => Boolean(id));
+
+      if (dependencies.length > 0) {
+        await tasksRepo.updateDependencies(rows[index]?.id as string, dependencies);
+      }
+    }
+
+    return task;
+  }
+
+  /* ---- 2 & 3: a failed step blocks dependants; independents continue ---- */
+
+  {
+    executed.length = 0;
+
+    /*
+     * The search fails. The chapter that depends on it must not run — writing
+     * a literature review from a search that returned nothing is the failure
+     * this whole dependency mechanism exists to prevent. The unrelated
+     * statistics step has no reason to stop.
+     */
+    const task = await makeTask([
+      { key: 'search', capability: 'web.search', input: { fail: true } },
+      { key: 'write', capability: 'document.write', dependsOn: ['search'] },
+      { key: 'stats', capability: 'statistics.run' },
+    ]);
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    const byLabel = new Map(steps.map((step) => [step.label, step]));
+
+    check('the failing step is marked failed', byLabel.get('search')?.status, 'FAILED');
+    check('its dependant is blocked', byLabel.get('write')?.status, 'BLOCKED');
+    assertTrue('and never ran', !executed.includes('document.write'));
+
+    check('the independent step completes', byLabel.get('stats')?.status, 'COMPLETED');
+    assertTrue('and did run', executed.includes('statistics.run'));
+
+    const finished = await tasksRepo.findAny(task.id);
+    check('the task reports failure', finished?.status, 'FAILED');
+  }
+
+  /* ------------------------- 13: artifacts flow ------------------------- */
+
+  {
+    executed.length = 0;
+
+    const task = await makeTask([
+      { key: 'search', capability: 'web.search' },
+      { key: 'write', capability: 'document.write', dependsOn: ['search'] },
+    ]);
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    const write = steps.find((step) => step.label === 'write');
+
+    check('both steps complete', steps.filter((s) => s.status === 'COMPLETED').length, 2);
+    /*
+     * The dependent step received the earlier step's structured output — not
+     * the conversation, not the whole context, just what it needs.
+     */
+    check('the dependent step read its dependency output', write?.output?.usedResults, 2);
+  }
+
+  /* ------------------- 5: completed steps are not rerun ------------------ */
+
+  {
+    executed.length = 0;
+
+    const task = await makeTask([
+      { key: 'first', capability: 'general.answer', input: { marker: 'one' } },
+      { key: 'second', capability: 'general.answer', dependsOn: ['first'], input: { marker: 'two' } },
+    ]);
+
+    await runTask(task.id);
+    const afterFirst = [...executed];
+
+    /* Running again must do nothing: everything is already complete. */
+    executed.length = 0;
+    await runTask(task.id);
+
+    check('the first run executed both steps', afterFirst.length, 2);
+    check('a second run reruns nothing', executed.length, 0);
+  }
+
+  /* ------------------ 4: a task survives a restart ---------------------- */
+
+  {
+    executed.length = 0;
+
+    const task = await makeTask([
+      { key: 'first', capability: 'general.answer', input: { marker: 'a' } },
+      { key: 'second', capability: 'general.answer', dependsOn: ['first'], input: { marker: 'b' } },
+      { key: 'third', capability: 'quality.check', dependsOn: ['second'] },
+    ]);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    /*
+     * The state a crash leaves behind: one step completed, one stranded at
+     * RUNNING with nothing driving it. Without recovery the task hangs
+     * forever, which is what every deploy would do to running work.
+     */
+    await tasksRepo.claimStep(steps[0]?.id as string);
+    await tasksRepo.completeStep(steps[0]?.id as string, { answered: true });
+    await tasksRepo.claimStep(steps[1]?.id as string);
+    await tasksRepo.setStatus(task.id, 'RUNNING');
+
+    executed.length = 0;
+    await runTask(task.id);
+
+    const recovered = await tasksRepo.stepsOf(task.id);
+
+    check('the task completes after recovery', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+    check('the completed step was not rerun', executed.filter((e) => e.includes(':a')).length, 0);
+    assertTrue('the stranded step ran', executed.some((e) => e.includes(':b')));
+    check('and everything finished', recovered.filter((s) => s.status === 'COMPLETED').length, 3);
+  }
+
+  /* ------------------ 6 & 7: waiting for input and resuming -------------- */
+
+  {
+    executed.length = 0;
+
+    const task = await makeTask([
+      { key: 'search', capability: 'academic.search', input: { needsInput: true } },
+      { key: 'write', capability: 'document.write', dependsOn: ['search'] },
+    ]);
+
+    await runTask(task.id);
+
+    const waiting = await tasksRepo.findAny(task.id);
+    check('the task waits for input', waiting?.status, 'WAITING_FOR_INPUT');
+    check('with the question', waiting?.pendingQuestion, 'Which discipline?');
+    assertTrue('and the dependent step did not run', !executed.includes('document.write'));
+
+    /*
+     * The answer resumes from where it stopped. Completed steps stay completed
+     * — the difference between asking a question and losing an hour of work.
+     */
+    await tasksRepo.mergeContext(task.id, { discipline: 'management' });
+    await tasksRepo.stepsOf(task.id).then(async (steps) => {
+      const search = steps.find((step) => step.label === 'search');
+      await tasksRepo.updateStepInput(search?.id as string, { needsInput: false });
+    });
+
+    executed.length = 0;
+    await runTask(task.id);
+
+    check('the task resumes and completes', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+    assertTrue('running the step that asked', executed.includes('academic.search'));
+    assertTrue('and the one that waited on it', executed.includes('document.write'));
+  }
+
+  /* ------------------------ 9: the step ceiling ------------------------- */
+
+  {
+    /*
+     * Fifty by default rather than a dozen: a thesis workflow legitimately
+     * needs more. A limit set for a short task would refuse the work this
+     * exists to do.
+     */
+    check('the default ceiling accommodates long workflows', DEFAULT_BUDGET.maxSteps, 50);
+
+    const task = await makeTask(
+      [
+        { key: 'a', capability: 'general.answer', input: { marker: 'a' } },
+        { key: 'b', capability: 'general.answer', dependsOn: ['a'], input: { marker: 'b' } },
+        { key: 'c', capability: 'general.answer', dependsOn: ['b'], input: { marker: 'c' } },
+      ],
+      { maxSteps: 2 },
+    );
+
+    await runTask(task.id);
+
+    const paused = await tasksRepo.findAny(task.id);
+    check('a task at its step limit pauses', paused?.status, 'PAUSED');
+    check('naming the limit', paused?.pauseReasonKey, 'task.paused.maxSteps');
+
+    /* Paused, not failed: the work done is kept and the user may continue. */
+    const steps = await tasksRepo.stepsOf(task.id);
+    check('with the completed work preserved', steps.filter((s) => s.status === 'COMPLETED').length, 2);
+  }
+
+  /* -------------------- 12: the model-call ceiling ---------------------- */
+
+  {
+    const task = await makeTask(
+      [
+        { key: 'a', capability: 'general.answer', input: { marker: 'a' } },
+        { key: 'b', capability: 'general.answer', dependsOn: ['a'], input: { marker: 'b' } },
+        { key: 'c', capability: 'general.answer', dependsOn: ['b'], input: { marker: 'c' } },
+      ],
+      { maxModelCalls: 2 },
+    );
+
+    await runTask(task.id);
+
+    const paused = await tasksRepo.findAny(task.id);
+    check('a task at its model-call limit pauses', paused?.status, 'PAUSED');
+    assertTrue(
+      'naming a call or step limit',
+      (paused?.pauseReasonKey ?? '').includes('maxModelCalls') ||
+        (paused?.pauseReasonKey ?? '').includes('maxSteps'),
+    );
+  }
+
+  /* --------------------------- 11: retries ------------------------------ */
+
+  {
+    executed.length = 0;
+
+    /*
+     * A search is retryable up to three attempts. A step that fails every time
+     * must stop rather than retry forever — retries consume budget a later
+     * step needs.
+     */
+    const task = await makeTask([{ key: 'search', capability: 'web.search', input: { fail: true } }]);
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    check('a repeatedly failing step is marked failed', steps[0]?.status, 'FAILED');
+    check('after its maximum attempts', steps[0]?.attempts, 3);
+    check('and ran that many times', executed.filter((e) => e === 'web.search').length, 3);
+  }
+
+  /* --------------------- 10: the per-capability timeout ----------------- */
+
+  {
+    /*
+     * Timeouts are per capability, not uniform. A uniform limit is wrong in
+     * both directions: two minutes kills a deep research run that legitimately
+     * takes ten, and gives a Markdown export a hundred and nineteen seconds it
+     * will never use.
+     */
+    const deep = capabilityFor('deep.research');
+    const generate = capabilityFor('document.generate');
+
+    assertTrue('deep research gets a long timeout', (deep?.timeoutMs ?? 0) >= 300_000);
+    assertTrue('file generation gets a short one', (generate?.timeoutMs ?? 0) <= 60_000);
+    assertTrue('and they differ', deep?.timeoutMs !== generate?.timeoutMs);
+
+    /* A handler that never returns must be stopped by its timeout. */
+    registerHandler('survey.generate', async ({ signal }) => {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 30_000);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('aborted'));
+        });
+      });
+
+      return { output: {} };
+    });
+
+    registerCapability({
+      id: 'survey.generate' as never,
+      labelKey: 'x',
+      timeoutMs: 150,
+      estimatedModelCalls: 0,
+      retryable: false,
+      maxAttempts: 1,
+      requiresDataset: false,
+      parallelSafe: true,
+    });
+
+    const task = await makeTask([{ key: 'slow', capability: 'survey.generate' }]);
+    const startedAt = Date.now();
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    check('a hanging step times out', steps[0]?.status, 'FAILED');
+    check('with a timeout reason', steps[0]?.errorReasonKey, 'task.error.timeout');
+    assertTrue('and does not wait for the handler', Date.now() - startedAt < 5000);
+  }
+
+  /* ----------------------- 8: dynamic step addition --------------------- */
+
+  {
+    executed.length = 0;
+
+    const task = await makeTask([
+      { key: 'search', capability: 'academic.search', input: { suggests: true } },
+    ]);
+
+    let suggestion: string | null = null;
+
+    await runTask(task.id, {
+      onSuggestion: async (current, trigger) => {
+        suggestion = trigger;
+
+        /* The planner would call this; here the step is added directly. */
+        const added = await tasksRepo.addSteps([
+          {
+            taskId: current.id,
+            ordinal: 99,
+            capability: 'quality.check',
+            label: 'follow-up',
+            status: 'PENDING',
+            dependsOn: [],
+            input: {},
+            dynamic: true,
+          },
+        ]);
+
+        return added.length;
+      },
+    });
+
+    assertTrue('a step can suggest more work', suggestion !== null);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    const dynamic = steps.filter((step) => step.dynamic);
+
+    check('the added step is persisted', dynamic.length, 1);
+    /* Traceable: marked as added during execution rather than planned. */
+    check('and marked as dynamic', dynamic[0]?.dynamic, true);
+    check('and it ran', dynamic[0]?.status, 'COMPLETED');
+  }
+
+  /* ---------------- 14 & 15: plans size themselves to the work ----------- */
+
+  {
+    /*
+     * A plan is not padded to a ceiling and not compressed to look efficient.
+     * Fifteen steps is a real research workflow; one step is a real answer to a
+     * question. Both must be expressible.
+     */
+    const long = await makeTask(
+      Array.from({ length: 15 }, (_, index) => ({
+        key: `s${index}`,
+        capability: 'quality.check',
+        dependsOn: index > 0 ? [`s${index - 1}`] : [],
+      })),
+    );
+
+    await runTask(long.id);
+
+    const steps = await tasksRepo.stepsOf(long.id);
+    check('a fifteen-step workflow runs to completion', steps.filter((s) => s.status === 'COMPLETED').length, 15);
+    assertTrue('exceeding twelve steps', steps.length > 12);
+
+    const short = await makeTask([{ key: 'one', capability: 'general.answer', input: { marker: 'x' } }]);
+    await runTask(short.id);
+
+    const shortSteps = await tasksRepo.stepsOf(short.id);
+    check('and a one-step task needs only one', shortSteps.length, 1);
+    check('completing normally', (await tasksRepo.findAny(short.id))?.status, 'COMPLETED');
+  }
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

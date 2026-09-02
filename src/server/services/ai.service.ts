@@ -23,6 +23,7 @@ import { AIProviderError, type AIChatMessage, type AITask, type ProjectContext }
 import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
 import { countWords } from '@/lib/text';
 import { logger } from '@/lib/logger';
+import { looksTruncated, stripTrailingArtefact } from '@/server/services/output-cleanup';
 import type { ResearchProject, ResearchSection, TitleCandidate } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
@@ -599,7 +600,23 @@ Rules:
     temperature: 0.3,
   });
 
-  return result.text;
+  /*
+   * Cleaned before it reaches the reader.
+   *
+   * A model near its budget can leave a few characters of an interrupted
+   * token after its answer — a user saw `ID; V]` at the end of an
+   * otherwise correct reply. The transport was verified intact, so it
+   * came from the model, and a correct answer that looks broken costs
+   * more trust than the fragment is worth.
+   */
+  if (looksTruncated(result.text)) {
+    logger.warn('ai.possiblyTruncated', {
+      task: 'answerFromSources',
+      length: result.text.length,
+    });
+  }
+
+  return stripTrailingArtefact(result.text);
 }
 
 /**
@@ -717,7 +734,23 @@ Rules:
     temperature: 0.2,
   });
 
-  return result.text;
+  /*
+   * Cleaned before it reaches the reader.
+   *
+   * A model near its budget can leave a few characters of an interrupted
+   * token after its answer — a user saw `ID; V]` at the end of an
+   * otherwise correct reply. The transport was verified intact, so it
+   * came from the model, and a correct answer that looks broken costs
+   * more trust than the fragment is worth.
+   */
+  if (looksTruncated(result.text)) {
+    logger.warn('ai.possiblyTruncated', {
+      task: 'extractEvidence',
+      length: result.text.length,
+    });
+  }
+
+  return stripTrailingArtefact(result.text);
 }
 
 /**
@@ -854,7 +887,23 @@ Rules:
     temperature: 0.4,
   });
 
-  return result.text;
+  /*
+   * Cleaned before it reaches the reader.
+   *
+   * A model near its budget can leave a few characters of an interrupted
+   * token after its answer — a user saw `ID; V]` at the end of an
+   * otherwise correct reply. The transport was verified intact, so it
+   * came from the model, and a correct answer that looks broken costs
+   * more trust than the fragment is worth.
+   */
+  if (looksTruncated(result.text)) {
+    logger.warn('ai.possiblyTruncated', {
+      task: 'synthesiseReport',
+      length: result.text.length,
+    });
+  }
+
+  return stripTrailingArtefact(result.text);
 }
 
 /**
@@ -979,7 +1028,23 @@ ${listed}`;
     temperature: 0.4,
   });
 
-  return result.text;
+  /*
+   * Cleaned before it reaches the reader.
+   *
+   * A model near its budget can leave a few characters of an interrupted
+   * token after its answer — a user saw `ID; V]` at the end of an
+   * otherwise correct reply. The transport was verified intact, so it
+   * came from the model, and a correct answer that looks broken costs
+   * more trust than the fragment is worth.
+   */
+  if (looksTruncated(result.text)) {
+    logger.warn('ai.possiblyTruncated', {
+      task: 'summariseSources',
+      length: result.text.length,
+    });
+  }
+
+  return stripTrailingArtefact(result.text);
 }
 
 export async function streamChat(

@@ -28,6 +28,7 @@ import {
   shouldOfferModelChoice,
 } from '@/agents/modes';
 import { isPublicHost, isPublicUrl } from '@/server/knowledge/fetch-content';
+import { looksTruncated, stripTrailingArtefact } from '@/server/services/output-cleanup';
 import { SerperProvider } from '@/server/knowledge/providers/serper';
 import { deduplicate, normaliseUrl } from '@/server/research/dedupe';
 import { containsMath } from '@/components/chat/markdown';
@@ -1985,6 +1986,91 @@ assertTrue(
 assertTrue(
   'and is logged with the path rather than the payload',
   apiWrapper.includes("logger.error('api.error'"),
+);
+
+
+console.log('\nmodel output cleanup');
+
+/*
+ * A user asked where Jordan is, got a correct answer, and found `ID; V]` on the
+ * end of it. The SSE transport was verified intact across chunk boundaries
+ * mid-character, so the fragment came from the model — a few characters of an
+ * interrupted token after it had finished answering.
+ *
+ * A correct answer that looks broken costs more trust than the fragment is
+ * worth: a researcher who sees garbage once stops believing the answers that
+ * do not have it.
+ */
+check('a token marker is removed', stripTrailingArtefact('Done.\n\n<|end|>'), 'Done.');
+check('inline too', stripTrailingArtefact('Done.<|im_end|>'), 'Done.');
+check('and a sentence-end marker', stripTrailingArtefact('Done.\n\n</s>'), 'Done.');
+check(
+  'a trailing bracket fragment goes',
+  stripTrailingArtefact('The answer is here.\n\n]}'),
+  'The answer is here.',
+);
+check(
+  'and an unfinished JSON block',
+  stripTrailingArtefact('نص كامل.\n\n{"'),
+  'نص كامل.',
+);
+
+/*
+ * What must survive, and this is the more important half.
+ *
+ * A general rule was tried first — "a short trailing line with no words" — and
+ * it removed `p < .001` and `[0.12, 0.45]`. Every patch produced another false
+ * positive, because a statistic and a stray fragment look alike out of context.
+ * Losing a confidence interval from a researcher's results is a far worse
+ * failure than leaving five odd characters on screen.
+ */
+for (const [text, note] of [
+  ['R² = 0.87\n\np < .001', 'a significance value'],
+  ['CI:\n\n[0.12, 0.45]', 'a confidence interval'],
+  ['Result:\n\n- 12\n- 15', 'a list item'],
+  ['Total:\n\n42', 'a bare number'],
+  ['Rate:\n\n15%', 'a percentage'],
+  ['السؤال واضح.\n\nنعم.', 'a one-word Arabic answer'],
+  ['Is it valid?\n\nYes.', 'a one-word English answer'],
+  ['Steps:\n\n1. First\n2. Second', 'a numbered list'],
+  ['Table:\n\n| a | b |', 'a table row'],
+  ['Answer.\n\n...', 'an ellipsis'],
+  ['تقع الأردن في آسيا.', 'a clean answer'],
+] as const) {
+  check(`${note} survives untouched`, stripTrailingArtefact(text), text);
+}
+
+/*
+ * Truncation is logged rather than patched over. An answer cut off mid-sentence
+ * is a budget or provider fault, and silently repairing the text would hide a
+ * problem that needs fixing at its source.
+ */
+assertTrue(
+  'an answer stopping mid-sentence is detected',
+  looksTruncated('This is a long answer that stops abruptly without any ending mark'),
+);
+assertTrue(
+  'a finished one is not',
+  !looksTruncated('This is a long answer that ends properly with a full stop.'),
+);
+assertTrue(
+  'nor a finished Arabic one',
+  !looksTruncated('هذه إجابة عربية كاملة تنتهي بعلامة ترقيم صحيحة.'),
+);
+assertTrue(
+  'and a short reply is not judged at all',
+  !looksTruncated('نعم'),
+);
+
+/* Applied where prose reaches the reader, not to JSON that gets parsed. */
+const aiForCleanup = await readFile('src/server/services/ai.service.ts', 'utf8');
+assertTrue(
+  'the general answer is cleaned',
+  aiForCleanup.includes('return stripTrailingArtefact(result.text);'),
+);
+assertTrue(
+  'and truncation is logged where it happens',
+  aiForCleanup.includes("logger.warn('ai.possiblyTruncated'"),
 );
 
 console.log('\nfiles page');

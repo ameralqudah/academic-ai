@@ -30,6 +30,15 @@ import {
 import { bootstrapPls } from '@/analysis/inference/pls/bootstrap';
 import { blindfold, usableOmissionDistance } from '@/analysis/inference/pls/blindfolding';
 import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
+import { analyseClaims, findCitations } from '@/server/quality/claims';
+import { isWellFormedDoi, normaliseDoi } from '@/server/quality/sources';
+import { checkQuality } from '@/server/quality/engine';
+import {
+  checkReferenceShape,
+  fabricationSignals,
+  inferKind,
+  type Reference,
+} from '@/server/quality/sources';
 import { checkModelData } from '@/analysis/inference/pls/data-checks';
 import { buildReport } from '@/analysis/inference/pls/report';
 import { exportPlsToExcel, exportPlsToWord } from '@/server/services/pls-export.service';
@@ -3509,6 +3518,448 @@ const cfaModel: PlsModel = {
     'no negative residual variance in a well-fitting model',
     result.loadings.every((loading) => loading.residualVariance > 0),
   );
+}
+
+
+
+console.log('\nquality engine');
+
+/*
+ * Checking academic work before a supervisor sees it.
+ *
+ * The design constraint that shaped all of this: **it reports, it never edits**.
+ * A checker that rewrites removes a real reference it misjudged and the
+ * researcher never learns it was there. A flag they dismiss costs a second; a
+ * source silently deleted costs a viva.
+ *
+ * The second constraint: **a missing DOI is not a finding**. Books, reports,
+ * theses and government statistics mostly have none, and an early version that
+ * demanded them would have flagged most of any real bibliography — training
+ * researchers to ignore the report, including the parts that matter.
+ */
+
+const reference = (over: Partial<Reference> = {}): Reference => ({
+  id: '1',
+  kind: 'journal-article',
+  title: 'Digital transformation and organisational performance',
+  authors: ['Smith, J.', 'Ahmad, R.'],
+  year: 2021,
+  container: 'Journal of Management Studies',
+  provenance: 'retrieved',
+  ...over,
+});
+
+/* --------------------------------- DOI shape ------------------------------ */
+
+assertTrue('a real DOI is well formed', isWellFormedDoi('10.1016/j.chb.2019.04.011'));
+assertTrue('with a URL prefix too', isWellFormedDoi('https://doi.org/10.1016/j.chb.2019.04.011'));
+assertTrue('and with a doi: label', isWellFormedDoi('doi:10.1108/JEIM-01-2020-0033'));
+assertTrue('a bare title is not a DOI', !isWellFormedDoi('Smith 2021 digital transformation'));
+assertTrue('nor a number', !isWellFormedDoi('12345'));
+assertTrue('nor a truncated one', !isWellFormedDoi('10.1016/'));
+
+check('a URL prefix is stripped', normaliseDoi('https://doi.org/10.1016/ABC'), '10.1016/abc');
+
+/* ------------------------- a legitimate source without a DOI -------------- */
+
+/*
+ * The case the first design got wrong. A book has an ISBN, not a DOI, and
+ * flagging it would put a mark on most of any real bibliography.
+ */
+{
+  const book = reference({
+    id: 'b1',
+    kind: 'book',
+    title: 'Research Design',
+    authors: ['Creswell, J.'],
+    year: 2014,
+    publisher: 'SAGE',
+    container: undefined,
+  });
+
+  const issues = checkReferenceShape(book);
+  check('a complete book raises nothing', issues.length, 0);
+  assertTrue('and no DOI is expected of it', !issues.some((issue) => issue.code === 'doi-expected'));
+}
+
+{
+  const thesis = reference({
+    id: 't1',
+    kind: 'thesis',
+    title: 'Adoption of e-learning in Jordanian universities',
+    authors: ['Al-Qudah, A.'],
+    year: 2019,
+    publisher: 'University of Jordan',
+    container: undefined,
+  });
+
+  check('a thesis without a DOI is fine', checkReferenceShape(thesis).length, 0);
+}
+
+{
+  const report = reference({
+    id: 'r1',
+    kind: 'report',
+    title: 'Education statistics 2023',
+    year: 2023,
+    publisher: 'Department of Statistics',
+    url: 'https://dosweb.dos.gov.jo/education',
+    authors: undefined,
+    container: undefined,
+  });
+
+  check('a report with a URL is fine', checkReferenceShape(report).length, 0);
+}
+
+{
+  /* But a report nobody can reach is worth a note. */
+  const unreachable = reference({
+    id: 'r2',
+    kind: 'report',
+    title: 'Internal review',
+    year: 2022,
+    publisher: 'Ministry',
+    url: undefined,
+    authors: undefined,
+    container: undefined,
+  });
+
+  const issues = checkReferenceShape(unreachable);
+  assertTrue('a report with no locator is flagged', issues.some((issue) => issue.code === 'no-locator'));
+  check('as a warning, not an error', issues.find((i) => i.code === 'no-locator')?.severity, 'warning');
+}
+
+/* ------------------------------ a missing DOI ----------------------------- */
+
+{
+  /*
+   * A journal article without a DOI is worth a glance and is not a problem —
+   * plenty predate registration. Reported as info so it does not crowd out the
+   * findings that matter.
+   */
+  const issues = checkReferenceShape(reference({ doi: undefined }));
+  const note = issues.find((issue) => issue.code === 'doi-expected');
+
+  assertTrue('a journal article without a DOI is noted', note !== undefined);
+  check('at the lowest severity', note?.severity, 'info');
+}
+
+/* ------------------------------ an invalid DOI ---------------------------- */
+
+{
+  const issues = checkReferenceShape(reference({ doi: 'not-a-doi-at-all' }));
+  const bad = issues.find((issue) => issue.code === 'malformed-doi');
+
+  assertTrue('a malformed DOI is caught', bad !== undefined);
+  check('as an error, since it cannot be right', bad?.severity, 'error');
+}
+
+/* ---------------------------- fabrication signals ------------------------- */
+
+{
+  /*
+   * The strongest signal: a model asked for references produces a plausible
+   * title, plausible authors, and nothing anyone can look up.
+   */
+  const invented = reference({
+    id: 'f1',
+    provenance: 'generated',
+    doi: undefined,
+    url: undefined,
+  });
+
+  assertTrue(
+    'a generated reference with no locator is flagged',
+    fabricationSignals(invented).includes('generated-without-locator'),
+  );
+}
+
+{
+  const placeholder = reference({ id: 'f2', title: 'Untitled article', provenance: 'generated' });
+  assertTrue('a placeholder title is flagged', fabricationSignals(placeholder).includes('placeholder-title'));
+}
+
+{
+  const implausible = reference({ id: 'f3', doi: '10.0000/fake' });
+  assertTrue('an implausible DOI prefix is flagged', fabricationSignals(implausible).includes('implausible-doi'));
+}
+
+{
+  /* A retrieved reference with a real DOI raises nothing. */
+  const genuine = reference({ doi: '10.1016/j.chb.2019.04.011', provenance: 'retrieved' });
+  check('a retrieved reference is not flagged', fabricationSignals(genuine).length, 0);
+}
+
+/* ------------------------------ kind inference ---------------------------- */
+
+check('an ISBN implies a book', inferKind({ isbn: '978-1-4522-2609-5', title: 'X' }), 'book');
+check(
+  'proceedings imply a conference paper',
+  inferKind({ container: 'Proceedings of the ACM Conference', title: 'X' }),
+  'conference-paper',
+);
+check('a journal name implies an article', inferKind({ container: 'Journal of Marketing' }), 'journal-article');
+check('a bare URL implies a website', inferKind({ url: 'https://example.org/page' }), 'website');
+/*
+ * Falls back to unknown rather than guessing journal-article: guessing that
+ * would apply the DOI expectation to books and fill the report with noise.
+ */
+check('and nothing else implies nothing', inferKind({ title: 'Something' }), 'unknown');
+
+/* ------------------------ which sentences need a source ------------------- */
+
+/*
+ * The rule that was rejected — every sentence must cite something — would flag
+ * every transition a person writes. What matters is whether a sentence asserts
+ * something external.
+ */
+{
+  const connective = analyseClaims(
+    'This chapter presents the methodology. The following section describes the sample.',
+  );
+
+  check('connective writing needs no source', connective.claims.filter((c) => c.needsSource).length, 0);
+  check('and is classified as such', connective.claims[0]?.kind, 'connective');
+}
+
+{
+  const authorial = analyseClaims(
+    'We argue that this pattern reflects a deeper structural issue. Our findings suggest a different reading.',
+  );
+
+  check("the author's own reasoning needs no source", authorial.claims.filter((c) => c.needsSource).length, 0);
+  check('and is classified as authorial', authorial.claims[0]?.kind, 'authorial');
+}
+
+{
+  const empirical = analyseClaims('Prior research found that engagement increased by 34% after the intervention.');
+
+  check('an empirical claim needs a source', empirical.claims.filter((c) => c.needsSource).length, 1);
+  check('and is unsupported without one', empirical.unsupported.length, 1);
+}
+
+{
+  const cited = analyseClaims('Prior research found that engagement increased by 34% after the intervention [3].');
+
+  check('the same claim with a citation is supported', cited.unsupported.length, 0);
+  check('and the citation is recorded', cited.citedIds.join(), '3');
+}
+
+{
+  const arabic = analyseClaims('أظهرت الدراسات أن نسبة الاستجابة بلغت 68%.');
+  check('an Arabic empirical claim needs a source', arabic.unsupported.length, 1);
+
+  const arabicConnective = analyseClaims('يتناول هذا الفصل منهجية الدراسة. وفي الختام تُعرض النتائج.');
+  check('and Arabic connective writing does not', arabicConnective.claims.filter((c) => c.needsSource).length, 0);
+}
+
+{
+  /*
+   * The user's own content is not the generator's to justify. A researcher
+   * stating what their data showed needs no citation for it.
+   */
+  const text = 'Our survey found a 68% response rate. Prior work reported lower figures.';
+  const withRange = analyseClaims(text, { userProvidedRanges: [{ start: 0, end: 35 }] });
+
+  check('user-provided content is marked as such', withRange.claims[0]?.kind, 'user-provided');
+  check('and needs no source', withRange.claims[0]?.needsSource, false);
+}
+
+/* Citation parsing across styles. */
+check('numeric citations parse', findCitations('as shown [3]').join(), '3');
+check('a list parses into several', findCitations('as shown [1, 4]').join(), '1,4');
+check('a range expands', findCitations('as shown [2-4]').join(), '2,3,4');
+check('author-year parses', findCitations('as shown (Smith, 2020)').join(), 'Smith, 2020');
+check('and et al.', findCitations('as shown (Smith et al., 2020)').join(), 'Smith et al., 2020');
+
+/* --------------------------- the whole engine ----------------------------- */
+
+/*
+ * Network verification is skipped throughout: these check the logic, and a test
+ * suite that depends on Crossref being reachable fails for reasons that have
+ * nothing to do with the code.
+ */
+
+{
+  /* A citation pointing at no reference: an error, and a broken document. */
+  const report = await checkQuality({
+    text: 'Engagement rose sharply after the change [7].',
+    references: [reference({ id: '1' })],
+    skipNetwork: true,
+  });
+
+  check('a citation with no reference fails', report.citationReferenceConsistency.status, 'fail');
+  check('naming the missing one', report.citationReferenceConsistency.citedButMissing.join(), '7');
+  assertTrue('as an error', report.errors.some((error) => error.code === 'citation.noReference'));
+  check('and the overall status follows', report.overallStatus, 'fail');
+}
+
+{
+  /* A reference nobody cited: untidy rather than wrong. */
+  const report = await checkQuality({
+    text: 'Engagement rose sharply after the change [1].',
+    references: [reference({ id: '1' }), reference({ id: '2' })],
+    skipNetwork: true,
+  });
+
+  check('an uncited reference draws attention', report.citationReferenceConsistency.status, 'attention');
+  check('naming it', report.citationReferenceConsistency.listedButUncited.join(), '2');
+  assertTrue(
+    'as a warning rather than an error',
+    report.warnings.some((warning) => warning.code === 'reference.neverCited'),
+  );
+  assertTrue('so the document does not fail', report.overallStatus !== 'fail');
+}
+
+{
+  /* Duplicates, by DOI. */
+  const report = await checkQuality({
+    text: 'A claim [1]. Another claim [2].',
+    references: [
+      reference({ id: '1', doi: '10.1016/j.chb.2019.04.011' }),
+      reference({ id: '2', doi: '10.1016/J.CHB.2019.04.011' }),
+    ],
+    skipNetwork: true,
+  });
+
+  assertTrue(
+    'the same DOI twice is flagged as a duplicate',
+    report.warnings.some((warning) => warning.code === 'reference.duplicate'),
+  );
+}
+
+{
+  /* A bibliography of books and reports must come back clean. */
+  const report = await checkQuality({
+    text: 'This chapter presents the methodology [1]. The sample is described below [2].',
+    references: [
+      /*
+       * Written out rather than spread from the template: the template is a
+       * journal article, and inheriting its `container` made the inferred kind
+       * disagree with the declared one. A book is a book because of what it
+       * carries, not because a field says so.
+       */
+      {
+        id: '1',
+        kind: 'book' as const,
+        title: 'Research Design',
+        authors: ['Creswell, J.'],
+        year: 2014,
+        publisher: 'SAGE',
+        provenance: 'retrieved' as const,
+      },
+      {
+        id: '2',
+        kind: 'report' as const,
+        title: 'Education statistics 2023',
+        year: 2023,
+        publisher: 'Department of Statistics',
+        url: 'https://example.gov/report',
+        provenance: 'retrieved' as const,
+      },
+    ],
+    skipNetwork: true,
+  });
+
+  check('sources without DOIs are valid', report.sourceValidity.status, 'pass');
+  check('and DOI verification does not apply', report.doiVerification.status, 'not-applicable');
+  check('so nothing fails', report.overallStatus, 'pass');
+}
+
+{
+  /* Impossible statistics. */
+  const report = await checkQuality({
+    text: 'The analysis is reported below.',
+    references: [],
+    skipNetwork: true,
+    statistics: [
+      { label: 'p', value: 1.4, kind: 'p' },
+      { label: 'r', value: 0.62, kind: 'r' },
+    ],
+  });
+
+  check('a p-value above one fails', report.statisticalConsistency.status, 'fail');
+  assertTrue(
+    'naming the statistic',
+    report.errors.some((error) => error.code === 'statistic.outOfRange'),
+  );
+}
+
+{
+  /* A negative alpha has a specific, fixable cause worth naming. */
+  const report = await checkQuality({
+    text: 'Reliability was assessed.',
+    references: [],
+    skipNetwork: true,
+    statistics: [{ label: 'alpha', value: -0.3, kind: 'alpha' }],
+  });
+
+  assertTrue(
+    'a negative alpha points at reverse coding',
+    report.warnings.some((warning) => warning.code === 'statistic.negativeAlpha'),
+  );
+}
+
+{
+  /* Two different sample sizes in one document. */
+  const report = await checkQuality({
+    text: 'The study surveyed 300 participants. Analysis was conducted on the sample of 250.',
+    references: [],
+    skipNetwork: true,
+  });
+
+  assertTrue(
+    'conflicting sample sizes are flagged',
+    report.internalConsistency.findings.some((finding) => finding.code === 'consistency.sampleSize'),
+  );
+}
+
+{
+  /* Placeholders and broken citations left in a draft. */
+  const report = await checkQuality({
+    text: 'The results are presented here [TODO]. Further detail appears in [12 and elsewhere.',
+    references: [],
+    skipNetwork: true,
+  });
+
+  assertTrue(
+    'a placeholder is flagged',
+    report.formattingIssues.findings.some((finding) => finding.code === 'format.placeholder'),
+  );
+  assertTrue(
+    'and an unclosed citation',
+    report.formattingIssues.findings.some((finding) => finding.code === 'format.malformedCitation'),
+  );
+}
+
+{
+  /*
+   * Nothing is removed or rewritten. The report describes; the researcher
+   * decides — including dismissing a flag because it is their own data.
+   */
+  const original = 'Engagement rose by 34%. This chapter presents the methodology.';
+  const report = await checkQuality({ text: original, references: [], skipNetwork: true });
+
+  assertTrue('unsupported claims are reported', report.unsupportedClaims.count > 0);
+  assertTrue(
+    'with the sentence, so the researcher can judge it',
+    (report.unsupportedClaims.claims[0]?.text.length ?? 0) > 0,
+  );
+  check('and the status asks for attention rather than failing', report.unsupportedClaims.status, 'attention');
+}
+
+{
+  /*
+   * A methodology chapter that cites little is not thereby wrong. Reporting it
+   * as a problem would push researchers to add citations where none belong.
+   */
+  const report = await checkQuality({
+    text: 'This chapter presents the methodology. The following section describes the instrument.',
+    references: [],
+    skipNetwork: true,
+  });
+
+  check('a document needing no citations is not marked down', report.citationCoverage.status, 'not-applicable');
 }
 
 

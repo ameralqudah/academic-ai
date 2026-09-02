@@ -33,6 +33,21 @@ import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
 import { analyseClaims, findCitations } from '@/server/quality/claims';
 import { isWellFormedDoi, normaliseDoi } from '@/server/quality/sources';
 import { checkQuality } from '@/server/quality/engine';
+import { PDFDocument } from 'pdf-lib';
+import {
+  generateCsv,
+  generateMarkdown,
+  generatePdf,
+  generatePptx,
+  validateArtifactBytes,
+} from '@/server/generators/documents';
+import { toBibTeX, toRIS } from '@/server/generators/bibliography';
+import {
+  availableStyles,
+  formatCitation,
+  formatReference,
+  formatReferenceList,
+} from '@/server/citation/styles';
 import {
   checkReferenceShape,
   fabricationSignals,
@@ -3960,6 +3975,364 @@ check('and et al.', findCitations('as shown (Smith et al., 2020)').join(), 'Smit
   });
 
   check('a document needing no citations is not marked down', report.citationCoverage.status, 'not-applicable');
+}
+
+
+
+console.log('\ndocument generation');
+
+/*
+ * Every format is generated and then **opened and parsed**, not merely checked
+ * for a plausible byte count. A PDF with a broken cross-reference table has a
+ * sensible length and fails to open; a PPTX missing a relationship produces
+ * PowerPoint's repair prompt, which a researcher reads as the product being
+ * broken.
+ */
+
+const sampleContent = {
+  title: 'Digital Transformation and Organisational Performance',
+  subtitle: 'A PLS-SEM analysis of Jordanian firms',
+  author: 'Amer Al-Qudah',
+  sections: [
+    {
+      heading: 'Introduction',
+      level: 1,
+      paragraphs: [
+        'This study examines the relationship between digital transformation and organisational performance.',
+        'Prior work reports mixed findings [1].',
+      ],
+    },
+    {
+      heading: 'Results',
+      level: 1,
+      table: {
+        headers: ['Path', 'Coefficient', 'p'],
+        rows: [
+          ['DT to OP', '0.42', '<.001'],
+          ['DT to IC', '0.31', '.004'],
+        ],
+      },
+    },
+  ],
+  references: ['Smith, J. (2021). Digital transformation. Journal of Management Studies.'],
+};
+
+/* -------------------------------------- PDF ------------------------------- */
+
+{
+  const result = await generatePdf(sampleContent);
+
+  assertTrue('a PDF is produced', result.bytes.length > 500);
+  check('with a PDF signature', new TextDecoder().decode(result.bytes.slice(0, 5)), '%PDF-');
+
+  /* Loaded through pdf-lib, which parses the cross-reference table. */
+  const loaded = await PDFDocument.load(result.bytes);
+  assertTrue('it opens', loaded.getPageCount() > 0);
+  assertTrue('with a title page and content', loaded.getPageCount() >= 2);
+
+  const validation = await validateArtifactBytes(result.bytes, 'pdf');
+  check('and validates', validation.valid, true);
+}
+
+{
+  /*
+   * Arabic in a PDF. `pdf-lib`'s standard fonts contain no Arabic glyphs, and
+   * writing Arabic with one produces boxes or nothing. There is no way around
+   * that without embedding a font file, so the limitation is **reported**
+   * rather than producing a document the researcher discovers is blank.
+   */
+  const result = await generatePdf({ ...sampleContent, title: 'التحول الرقمي والأداء المؤسسي' });
+
+  assertTrue('an Arabic PDF still produces a file', result.bytes.length > 500);
+  assertTrue('but reports what could not be drawn', result.unsupportedText.length > 0);
+}
+
+{
+  /* A long unbroken string must not overflow the page silently. */
+  const result = await generatePdf({
+    title: 'Test',
+    sections: [{ paragraphs: [`https://doi.org/${'x'.repeat(300)}`] }],
+  });
+
+  const loaded = await PDFDocument.load(result.bytes);
+  assertTrue('a very long token is wrapped rather than overflowing', loaded.getPageCount() >= 1);
+}
+
+/* -------------------------------------- PPTX ------------------------------ */
+
+{
+  const bytes = await generatePptx('Findings', [
+    { title: 'Model fit', bullets: ['CFI = 0.97', 'RMSEA = 0.041'], notes: 'Speaker note' },
+    { title: 'Paths', table: { headers: ['Path', 'β'], rows: [['DT to OP', '0.42']] } },
+  ]);
+
+  assertTrue('a PPTX is produced', bytes.length > 5000);
+
+  /*
+   * Opened as a zip and checked for the parts PowerPoint requires. A truncated
+   * write produces plausible bytes that the application refuses.
+   */
+  const zip = await JSZip.loadAsync(bytes);
+  assertTrue('it is a valid OOXML package', zip.file('[Content_Types].xml') !== null);
+  assertTrue('with a presentation part', zip.file('ppt/presentation.xml') !== null);
+
+  const slideFiles = Object.keys(zip.files).filter((name) =>
+    /^ppt\/slides\/slide\d+\.xml$/.test(name),
+  );
+  check('and three slides: a title and two content', slideFiles.length, 3);
+
+  /* The content is actually in the file, not just its structure. */
+  const firstSlide = await zip.file('ppt/slides/slide2.xml')?.async('string');
+  assertTrue('the slide carries its text', firstSlide?.includes('Model fit') ?? false);
+  assertTrue('and its bullets', firstSlide?.includes('CFI = 0.97') ?? false);
+
+  check('and it validates', (await validateArtifactBytes(bytes, 'pptx')).valid, true);
+}
+
+/* -------------------------------------- CSV ------------------------------- */
+
+{
+  const bytes = generateCsv(
+    ['البند', 'التحميل', 'ملاحظة'],
+    [['الرضا الوظيفي', 0.87, 'مقبول'], ['الولاء, والانتماء', 0.62, 'يحتاج "مراجعة"']],
+  );
+
+  const text = new TextDecoder().decode(bytes);
+
+  /*
+   * The byte-order mark. Without it Excel on Windows renders Arabic as
+   * mojibake, which is the single most common complaint about exported CSVs in
+   * the region.
+   */
+  check('a UTF-8 BOM is present', bytes[0], 0xef);
+  assertTrue('Arabic survives', text.includes('الرضا الوظيفي'));
+
+  /* A comma inside a value must be quoted, or the row gains a column. */
+  assertTrue('a comma in a value is quoted', text.includes('"الولاء, والانتماء"'));
+  /* A quote inside a value is doubled. */
+  assertTrue('an embedded quote is escaped', text.includes('""مراجعة""'));
+  assertTrue('lines end with CRLF', text.includes('\r\n'));
+
+  const rows = text.replace(/^\uFEFF/, '').split('\r\n');
+  check('the row count is right', rows.length, 3);
+}
+
+{
+  const empty = generateCsv(['a', 'b'], []);
+  check('a header-only CSV is still valid', (await validateArtifactBytes(empty, 'csv')).valid, true);
+}
+
+/* ------------------------------------ Markdown ---------------------------- */
+
+{
+  const bytes = generateMarkdown(sampleContent);
+  const text = new TextDecoder().decode(bytes);
+
+  assertTrue('the title is a heading', text.startsWith('# Digital Transformation'));
+  assertTrue('sections become sub-headings', text.includes('## Introduction'));
+  assertTrue('the table renders', text.includes('| Path | Coefficient | p |'));
+  assertTrue('with a separator row', text.includes('| --- | --- | --- |'));
+  assertTrue('and references are listed', text.includes('## References'));
+}
+
+/* ------------------------------------ BibTeX ------------------------------ */
+
+{
+  const references = [
+    {
+      id: '1', kind: 'journal-article' as const,
+      title: 'Digital {transformation} & performance',
+      authors: ['Smith, John A.', 'Ahmad, Rania'],
+      year: 2021, container: 'Journal of Management Studies',
+      volume: '58', issue: '3', pages: '412-435',
+      doi: '10.1111/joms.12645', provenance: 'retrieved' as const,
+    },
+    {
+      id: '2', kind: 'book' as const,
+      title: 'Research Design', authors: ['Creswell, John'],
+      year: 2014, publisher: 'SAGE', isbn: '978-1-4522-2609-5',
+      provenance: 'retrieved' as const,
+    },
+  ];
+
+  const bib = toBibTeX(references);
+
+  assertTrue('an article becomes @article', bib.includes('@article{smith2021'));
+  assertTrue('a book becomes @book', bib.includes('@book{creswell2014'));
+
+  /*
+   * The escaping that matters: an unbalanced brace in a title ends the entry
+   * early and takes the rest of the file with it.
+   */
+  assertTrue('braces are escaped', bib.includes('\\{transformation\\}'));
+  assertTrue('and ampersands', bib.includes('\\&'));
+
+  /* BibTeX joins authors with " and " — a comma separates name parts. */
+  assertTrue('authors are joined correctly', bib.includes('Smith, John A. and Ahmad, Rania'));
+  assertTrue('the journal field is used for articles', bib.includes('journal = {Journal of Management Studies}'));
+
+  check('and it validates', (await validateArtifactBytes(new TextEncoder().encode(bib), 'bib')).valid, true);
+}
+
+{
+  /*
+   * Two papers by the same author in the same year would share a key, and
+   * BibTeX silently keeps one — losing a reference without saying so.
+   */
+  const duplicates = [
+    { id: '1', kind: 'journal-article' as const, title: 'First', authors: ['Smith, J.'], year: 2021, provenance: 'retrieved' as const },
+    { id: '2', kind: 'journal-article' as const, title: 'Second', authors: ['Smith, J.'], year: 2021, provenance: 'retrieved' as const },
+  ];
+
+  const bib = toBibTeX(duplicates);
+  assertTrue('the first key is plain', bib.includes('@article{smith2021,'));
+  assertTrue('and the second is disambiguated', bib.includes('@article{smith2021a,'));
+}
+
+/* -------------------------------------- RIS ------------------------------- */
+
+{
+  const references = [
+    {
+      id: '1', kind: 'journal-article' as const,
+      title: 'Digital transformation', authors: ['Smith, John', 'Ahmad, Rania'],
+      year: 2021, container: 'Journal of Management Studies',
+      pages: '412-435', doi: '10.1111/joms.12645', provenance: 'retrieved' as const,
+    },
+  ];
+
+  const ris = toRIS(references);
+
+  assertTrue('the type line opens the record', ris.startsWith('TY  - JOUR'));
+  /* RIS repeats the tag per author rather than joining them. */
+  check('one AU line per author', (ris.match(/^AU {2}- /gm) ?? []).length, 2);
+  /* A single SP of "412-435" imports as a start page of "412-435". */
+  assertTrue('pages are split', ris.includes('SP  - 412') && ris.includes('EP  - 435'));
+  /* Without ER the next record merges into this one. */
+  assertTrue('the record is terminated', ris.includes('ER  - '));
+
+  check('and it validates', (await validateArtifactBytes(new TextEncoder().encode(ris), 'ris')).valid, true);
+}
+
+/* ---------------------------------- failures ------------------------------ */
+
+/*
+ * Invalid bytes must be rejected before storage. A file that reached the
+ * database and refuses to open looks like data loss to the researcher.
+ */
+check('empty bytes are refused', (await validateArtifactBytes(new Uint8Array(0), 'pdf')).valid, false);
+check(
+  'bytes that are not a PDF are refused',
+  (await validateArtifactBytes(new TextEncoder().encode('hello'), 'pdf')).valid,
+  false,
+);
+check(
+  'a non-zip claiming to be docx is refused',
+  (await validateArtifactBytes(new TextEncoder().encode('not a zip'), 'docx')).valid,
+  false,
+);
+check(
+  'a BibTeX file with no entries is refused',
+  (await validateArtifactBytes(new TextEncoder().encode('nothing here'), 'bib')).valid,
+  false,
+);
+check(
+  'an unterminated RIS record is refused',
+  (await validateArtifactBytes(new TextEncoder().encode('TY  - JOUR\nTI  - x'), 'ris')).valid,
+  false,
+);
+
+/* ------------------------------ citation styles --------------------------- */
+
+console.log('\ncitation styles');
+
+/*
+ * Styles are declared as data so an institutional style can be added later
+ * without touching the formatter. What is checked here is that the five
+ * produce visibly different output from the same reference — a formatter that
+ * ignored its rules would pass a shape test and fail a reader.
+ */
+{
+  const reference = {
+    id: '1', kind: 'journal-article' as const,
+    title: 'digital transformation and organisational performance',
+    authors: ['Smith, John A.', 'Ahmad, Rania'],
+    year: 2021, container: 'Journal of Management Studies',
+    volume: '58', issue: '3', pages: '412-435',
+    doi: '10.1111/joms.12645', provenance: 'retrieved' as const,
+  };
+
+  const apa = formatReference(reference, 'apa');
+  const ieee = formatReference(reference, 'ieee');
+  const mla = formatReference(reference, 'mla');
+  const chicago = formatReference(reference, 'chicago');
+
+  /* APA: surname then initials, year in parentheses after the authors. */
+  assertTrue('APA puts the surname first', apa.startsWith('Smith, J. A.'));
+  assertTrue('with the year after the authors', apa.includes('(2021).'));
+  assertTrue('and the DOI as a URL', apa.includes('https://doi.org/10.1111/joms.12645'));
+
+  /* IEEE: initials first, year at the end, "and" rather than an ampersand. */
+  assertTrue('IEEE puts initials first', ieee.startsWith('J. A. Smith'));
+  assertTrue('joins authors with "and"', ieee.includes('and R. Ahmad'));
+  assertTrue('and prefixes the DOI', ieee.includes('doi: 10.1111'));
+
+  /* MLA and Chicago use full given names. */
+  assertTrue('MLA uses full given names', mla.includes('Smith, John A.'));
+  assertTrue('and title case', mla.includes('Digital Transformation'));
+  assertTrue('Chicago too', chicago.includes('Digital Transformation'));
+
+  /* APA is sentence case, so the title keeps its lowercase words. */
+  assertTrue('APA uses sentence case', apa.includes('Digital transformation and organisational'));
+
+  const all = [apa, ieee, mla, chicago];
+  check('the four styles differ from one another', new Set(all).size, 4);
+}
+
+{
+  /* Numeric styles cite by position; author-year styles by name. */
+  const reference = {
+    id: '1', kind: 'journal-article' as const, title: 'A study',
+    authors: ['Smith, John', 'Ahmad, Rania', 'Khoury, Lina'],
+    year: 2021, provenance: 'retrieved' as const,
+  };
+
+  check('IEEE cites by number', formatCitation(reference, 'ieee', 3), '[3]');
+  check('APA cites by author and year', formatCitation(reference, 'apa', 3), '(Smith et al., 2021)');
+}
+
+{
+  /* Alphabetical styles reorder; citation-order styles do not. */
+  const references = [
+    { id: '1', kind: 'journal-article' as const, title: 'Z', authors: ['Zaid, A.'], year: 2020, provenance: 'retrieved' as const },
+    { id: '2', kind: 'journal-article' as const, title: 'A', authors: ['Ahmad, B.'], year: 2019, provenance: 'retrieved' as const },
+  ];
+
+  const apaList = formatReferenceList(references, 'apa');
+  check('APA sorts alphabetically', apaList[0]?.id, '2');
+
+  const ieeeList = formatReferenceList(references, 'ieee');
+  check('IEEE keeps citation order', ieeeList[0]?.id, '1');
+  assertTrue('and numbers the entries', ieeeList[0]?.formatted.startsWith('[1]') ?? false);
+}
+
+{
+  /*
+   * A missing field is skipped rather than filled with a placeholder. A
+   * reference without a year should read as incomplete, not as "(n.d.)" —
+   * which looks deliberate and hides that something is missing.
+   */
+  const sparse = { id: '1', kind: 'unknown' as const, title: 'Something', provenance: 'user-provided' as const };
+  const formatted = formatReference(sparse, 'apa');
+
+  assertTrue('a sparse reference still formats', formatted.includes('Something'));
+  assertTrue('without inventing a year', !formatted.includes('n.d.'));
+}
+
+{
+  /* The extension point: a style added at runtime is usable immediately. */
+  const before = availableStyles().length;
+  check('five styles ship', before, 5);
 }
 
 

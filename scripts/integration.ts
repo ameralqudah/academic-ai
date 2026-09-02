@@ -38,6 +38,14 @@ import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repositor
 import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
+import { generateMarkdown } from '@/server/generators/documents';
+import {
+  deleteArtifact,
+  listArtifacts,
+  readArtifact,
+  storeArtifact,
+  versionsOf,
+} from '@/server/services/artifact.service';
 import * as chatRepo from '@/server/repositories/chat.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
@@ -1869,6 +1877,154 @@ async function main() {
   await expectAppError('discarding a missing title is refused', 'NOT_FOUND', () =>
     deleteTitle(titleOwner, titleProject?.id as string, 'no-such-candidate'),
   );
+
+  /* ------------------------------------------------- artifact versioning */
+
+  section('artifacts keep every version');
+
+  /*
+   * Local storage, as the dataset section does. The env cache is reset because
+   * `getEnv()` memoises: setting the variable without resetting leaves the
+   * provider reading the value from before the test started.
+   */
+  const artifactRoot = await mkdtemp(join(tmpdir(), 'academic-ai-artifacts-'));
+  process.env.STORAGE_PROVIDER = 'local';
+  process.env.STORAGE_LOCAL_DIR = artifactRoot;
+  resetEnvCache();
+  resetStorageCache();
+
+  /*
+   * The requirement that shapes the whole design: regenerating must not destroy
+   * what came before. A researcher who exports a thesis at midnight, changes a
+   * chapter, exports again, and at nine decides the earlier draft was better
+   * must still be able to reach it.
+   */
+  const artifactOwner = await newUser('artifact-owner');
+
+  const markdown = generateMarkdown({
+    title: 'Chapter Three',
+    sections: [{ heading: 'Methodology', paragraphs: ['The study used a survey design.'] }],
+  });
+
+  const firstVersion = await storeArtifact({
+    userId: artifactOwner,
+    kind: 'md',
+    filename: 'thesis.md',
+    bytes: markdown,
+    metadata: { citationStyle: 'apa' },
+  });
+
+  check('the first version is version one', firstVersion.version, 1);
+  check('and its lineage points at itself', firstVersion.lineageId, firstVersion.id);
+  check('with no parent', firstVersion.parentArtifactId, null);
+
+  /* A change produces a new version, not a replacement. */
+  const revisedBytes = generateMarkdown({
+    title: 'Chapter Three',
+    sections: [{ heading: 'Methodology', paragraphs: ['The study used a mixed-methods design.'] }],
+  });
+
+  const secondVersion = await storeArtifact({
+    userId: artifactOwner,
+    kind: 'md',
+    filename: 'thesis.md',
+    bytes: revisedBytes,
+    previousArtifactId: firstVersion.id,
+  });
+
+  check('the revision is version two', secondVersion.version, 2);
+  check('sharing the lineage', secondVersion.lineageId, firstVersion.lineageId);
+  check('and naming its parent', secondVersion.parentArtifactId, firstVersion.id);
+
+  const thirdVersion = await storeArtifact({
+    userId: artifactOwner,
+    kind: 'md',
+    filename: 'thesis.md',
+    bytes: generateMarkdown({ title: 'Chapter Three', sections: [{ paragraphs: ['Revised again.'] }] }),
+    previousArtifactId: secondVersion.id,
+  });
+
+  check('and a third follows', thirdVersion.version, 3);
+
+  /* The earlier version still exists and still reads as it did. */
+  const originalVersion = await readArtifact(firstVersion.id, artifactOwner);
+  check('the first version survives', originalVersion.artifact.version, 1);
+  assertTrue(
+    'with its original content intact',
+    new TextDecoder().decode(originalVersion.bytes).includes('a survey design'),
+  );
+
+  const lineageVersions = await versionsOf(secondVersion.id, artifactOwner);
+  check('the lineage holds all three', lineageVersions.length, 3);
+  check('newest first', lineageVersions[0]?.version, 3);
+  /*
+   * Any version's id finds the history: a researcher looking at version 2 wants
+   * the list without knowing what a lineage is.
+   */
+  check('and asking from the middle works', lineageVersions[2]?.version, 1);
+
+  /* The list view shows one entry per document, not one per version. */
+  const artifactList = await listArtifacts(artifactOwner);
+  check('the list shows the document once', artifactList.length, 1);
+  check('at its latest version', artifactList[0]?.version, 3);
+
+  /* Invalid bytes are refused before anything is stored. */
+  await expectAppError('invalid bytes are refused', 'INTERNAL', () =>
+    storeArtifact({
+      userId: artifactOwner,
+      kind: 'pdf',
+      filename: 'broken.pdf',
+      bytes: new TextEncoder().encode('not a pdf at all'),
+    }),
+  );
+
+  check('and nothing was stored', (await listArtifacts(artifactOwner)).length, 1);
+
+  /* Ownership: another user cannot read or branch from someone else's file. */
+  const artifactIntruder = await newUser('artifact-intruder');
+
+  await expectAppError('another user cannot read it', 'NOT_FOUND', () =>
+    readArtifact(firstVersion.id, artifactIntruder),
+  );
+  await expectAppError('nor list its versions', 'NOT_FOUND', () =>
+    versionsOf(firstVersion.id, artifactIntruder),
+  );
+  await expectAppError('nor add a version to it', 'NOT_FOUND', () =>
+    storeArtifact({
+      userId: artifactIntruder,
+      kind: 'md',
+      filename: 'theirs.md',
+      bytes: markdown,
+      previousArtifactId: firstVersion.id,
+    }),
+  );
+
+  /* The quality report travels with the artifact rather than being recomputed. */
+  const checkedArtifact = await storeArtifact({
+    userId: artifactOwner,
+    kind: 'md',
+    filename: 'checked.md',
+    bytes: generateMarkdown({ title: 'X', sections: [{ paragraphs: ['A claim [7].'] }] }),
+    quality: {
+      text: 'Prior research found that engagement rose by 34% [7].',
+      references: [
+        { id: '1', kind: 'journal-article', title: 'A study', authors: ['Smith, J.'], year: 2021, provenance: 'retrieved' },
+      ],
+    },
+  });
+
+  assertTrue('a quality report is stored with the file', checkedArtifact.qualityReport !== null);
+  /*
+   * A citation pointing at no reference is an error, so the artifact records
+   * that it failed validation — and the researcher sees why without rerunning
+   * anything.
+   */
+  check('and its verdict is recorded', checkedArtifact.validationStatus, 'fail');
+
+  /* Deleting one version leaves the others. */
+  await deleteArtifact(thirdVersion.id, artifactOwner);
+  check('a deleted version leaves the lineage', (await versionsOf(firstVersion.id, artifactOwner)).length, 2);
+  assertTrue('and the earlier ones remain readable', (await readArtifact(firstVersion.id, artifactOwner)).artifact.version === 1);
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

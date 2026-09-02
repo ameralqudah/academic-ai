@@ -43,6 +43,13 @@
       "when": 1788284974595,
       "tag": "0005_detach_conversations_from_projects",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788376281941,
+      "tag": "0006_artifacts",
+      "breakpoints": true
     }
   ]
 }

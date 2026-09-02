@@ -985,6 +985,82 @@ export type SectionVersion = typeof sectionVersions.$inferSelect;
 export type TitleCandidate = typeof titleCandidates.$inferSelect;
 export type ReferenceRow = typeof references.$inferSelect;
 export type AnalysisJob = typeof analysisJobs.$inferSelect;
+
+/**
+ * A file the system generated, kept as a first-class object.
+ *
+ * Documents were produced and handed over: the Word export wrote a file,
+ * streamed it, and forgot it. A researcher who exported a thesis, changed a
+ * chapter and exported again had no way to reach the first one — and no way to
+ * tell which version their supervisor had read.
+ *
+ * **Nothing is overwritten.** Regenerating creates a new row pointing at the
+ * previous one, so the chain is walkable in both directions. A researcher who
+ * regenerates at midnight and realises at nine that the earlier draft was
+ * better can still get it.
+ *
+ * The quality report travels with the file rather than being computed on
+ * demand, because it describes the artefact as it was generated. Re-running the
+ * check later would judge a March export against a June bibliography.
+ */
+export const artifacts = pgTable(
+  'artifacts',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /* Detached rather than destroyed when a project goes, like conversations. */
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    /* The job that produced it, when one did. */
+    jobId: text('job_id').references(() => analysisJobs.id, { onDelete: 'set null' }),
+    conversationId: text('conversation_id').references(() => aiConversations.id, {
+      onDelete: 'set null',
+    }),
+
+    /** docx, pdf, pptx, xlsx, csv, md, bib, ris. */
+    kind: varchar('kind', { length: 16 }).notNull(),
+    filename: text('filename').notNull(),
+    /** Where the bytes live, in the same object store uploads use. */
+    storageKey: text('storage_key').notNull(),
+    byteSize: integer('byte_size').notNull(),
+
+    /**
+     * Version within its lineage, from 1.
+     *
+     * Stored rather than derived by counting: a count would renumber every
+     * version if one were ever removed, and a researcher citing "version 3" in
+     * an email expects it to stay version 3.
+     */
+    version: integer('version').default(1).notNull(),
+    /** The version this replaces. Null for the first in a lineage. */
+    parentArtifactId: text('parent_artifact_id'),
+    /** Stable across versions, so a lineage can be fetched in one query. */
+    lineageId: text('lineage_id').notNull(),
+
+    /** What produced it: the style, the sections, the options. */
+    metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}).notNull(),
+    /** The quality report as generated. Null when checking was skipped. */
+    qualityReport: jsonb('quality_report').$type<Record<string, unknown> | null>(),
+    /** pass, attention, fail, not-applicable, or unchecked. */
+    validationStatus: varchar('validation_status', { length: 16 }).default('unchecked').notNull(),
+
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    index('artifacts_user_idx').on(table.userId, table.createdAt),
+    index('artifacts_project_idx').on(table.projectId),
+    /* The lineage query: every version of one document, newest first. */
+    index('artifacts_lineage_idx').on(table.lineageId, table.version),
+  ],
+);
+
+export type Artifact = typeof artifacts.$inferSelect;
+export type NewArtifact = typeof artifacts.$inferInsert;
+
 export type NewAnalysisJob = typeof analysisJobs.$inferInsert;
 export type AIConversation = typeof aiConversations.$inferSelect;
 export type NewAIConversation = typeof aiConversations.$inferInsert;

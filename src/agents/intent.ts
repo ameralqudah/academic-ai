@@ -131,9 +131,35 @@ Rules that matter:
 
 1. Choose the intent that matches what the user asked for, even if this tool cannot do it. Classifying a PLS-SEM request as stats.plsSem is correct and useful; classifying it as stats.predict so that something can run is wrong and harmful.
 
+1b. Judge what the user *wants*, not which words they used. There is no keyword you must see. "هاي بياناتي، اعمل PLS" is a PLS request; "بدي أحدث الدراسات عن الذكاء الاصطناعي في التعليم" is a literature search; "شو أخبار الأردن اليوم" needs current information from the web; "احسب 15% من 240" is arithmetic the assistant can do directly and is general.question. Read the sentence and decide what would actually help.
+
 2. stats.compare is for differences between groups. stats.relate is for association between variables. stats.predict is for predicting one variable from others. These are different questions — do not collapse them.
 
-3. If the request is ambiguous, or names no variables when it needs them, or could reasonably mean two different analyses, set confidence below 0.6 and write one clarifying question. Asking is always better than guessing.
+3. UNDERSTAND THE USER, WHATEVER THEY WRITE.
+
+   This assistant is used by researchers across the Arab world, and they write the way people actually write. You must understand all of it:
+
+   - Modern Standard Arabic: "أين تقع الأردن؟"
+   - Jordanian and Levantine dialect: "وين الأردن؟", "شو عاصمتها؟", "احكيلي عن..."
+   - Gulf, Egyptian, Maghrebi phrasings: "فين", "وشلون", "كيفاش"
+   - English, including informal: "where's jordan", "whats a p value"
+   - Arabic and English mixed in one sentence: "بدي أعرف الفرق بين PLS و CB-SEM"
+   - Transliterated Arabic in Latin letters: "wein Jordan?", "shu ya3ni photosynthesis"
+   - Spelling and grammar mistakes, missing punctuation, missing question marks
+   - Very short messages: "الأردن؟", "PLS?", "ألفا كرونباخ"
+   - Greetings and conversation: "مرحبا", "hello", "كيف حالك"
+
+   None of these is unclear. A message written in dialect, misspelled, or three words long is still a message you can understand, and you must classify it on its meaning.
+
+4. CLARIFICATION IS THE LAST RESORT, NOT THE SAFE CHOICE.
+
+   Asking the user to rephrase is a failure of this system, not a cautious success. It is only correct in one situation: the user clearly wants an analysis run, and the information needed to run it is genuinely missing — no file, no variables named, no way to know what to compute.
+
+   In every other case, choose the best intent you can:
+   - A question about the world, a definition, a concept, a calculation, a greeting, or anything conversational → general.question. This is the right answer far more often than any other, and it is never wrong to send an understandable question there.
+   - A request that is vague about the topic but clear about the kind of work → the matching intent. "ساعدني بهذا البحث" with a project open is research help, not confusion.
+
+   Do not set confidence below 0.6 merely because a message is short, informal, misspelled, or written in dialect. Set it low only when you genuinely cannot tell what the person wants.
 
 4. Never invent a column name. Only list columns that appear in the dataset description exactly as written there.
 
@@ -197,13 +223,25 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
   if (stub && process.env.NODE_ENV !== 'production') return stub;
 
   /*
-   * Keywords first. A message that names its analysis outright does not need a
-   * model to interpret it, and routing it through one adds latency, cost, and a
-   * way for the whole thing to fail — which is exactly what happened the first
-   * time this ran against a real provider.
+   * Keywords are a fast path for unambiguous specialised requests, not the
+   * router.
+   *
+   * "احسب ألفا كرونباخ" names its analysis outright and does not need a model
+   * to interpret it — routing that through one adds latency, cost, and a way to
+   * fail. But the rules only earn that shortcut where they are certain, and
+   * they are certain about specialised work, not about the shape of ordinary
+   * language.
+   *
+   * A general question deliberately does *not* take this path even when a rule
+   * matches it. The rules for those were written around teaching verbs —
+   * "اشرح", "ما الفرق" — and they will never cover "وين الأردن؟" or "shu
+   * ya3ni". Sending an understandable question to the model costs one call and
+   * gets dialect, transliteration and misspelling right, which no list of
+   * patterns will.
    */
   const keyword = classifyByKeyword(input.message);
-  if (keyword) {
+
+  if (keyword && keyword.intent !== 'general.question') {
     logger.info('agent.intent.keyword', { intent: keyword.intent, matched: keyword.matched });
 
     /*
@@ -232,6 +270,11 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
     };
   }
 
+  /*
+   * Everything else goes to the model, including the messages a keyword rule
+   * recognised as general questions. That is deliberate: the rules are a
+   * shortcut for certainty, and the model is what understands people.
+   */
   const provider = await resolveProvider();
 
   const history = (input.history ?? []).slice(-6);
@@ -330,18 +373,51 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
       : null;
 
   /*
-   * Low confidence is downgraded to `general.unclear` here rather than being
-   * left for the orchestrator to notice. Making it the classifier's job means
-   * every caller gets the same behaviour without having to remember the rule.
+   * Low confidence about *which specialised capability* is not the same as not
+   * understanding the message, and conflating them was the central defect here.
+   *
+   * "الأردن وين؟" is perfectly understandable and belongs to no specialised
+   * capability. The old code read the low confidence, concluded the message was
+   * unclear, and asked the user to rephrase a sentence that any person would
+   * have answered — which is the product refusing to understand plain speech.
+   *
+   * So an uncertain classification falls back to the general assistant, which
+   * can answer or say what it does not know. Clarification is reserved for the
+   * case it was always meant for: a specialised task genuinely missing
+   * something essential, such as an analysis with no variables named and no
+   * file attached.
    */
   if (confidence < CONFIDENCE_FLOOR) {
-    logger.info('agent.intent.lowConfidence', { intent, confidence });
+    /*
+     * The one situation that still warrants asking: the user clearly wants an
+     * analysis, and the information needed to run one is absent. Answering
+     * conversationally there would be worse than asking — the researcher wants
+     * a computation, not a description of one.
+     */
+    const wantsAnalysis = intent.startsWith('stats.') || intent.startsWith('data.');
+    const cannotProceed = wantsAnalysis && !input.profile && mentionedColumns.length === 0;
+
+    if (cannotProceed) {
+      logger.info('agent.intent.needsClarification', { intent, confidence });
+      return {
+        intent: 'general.unclear',
+        confidence,
+        mentionedColumns,
+        restatement,
+        clarifyingQuestion: clarifyingQuestion ?? defaultQuestion(input.locale),
+        searchQueries: [],
+        usage: result.usage,
+      };
+    }
+
+    logger.info('agent.intent.fellBackToGeneral', { intent, confidence });
     return {
-      intent: 'general.unclear',
+      intent: 'general.question',
       confidence,
       mentionedColumns,
       restatement,
-      clarifyingQuestion: clarifyingQuestion ?? defaultQuestion(input.locale),
+      /* No question: the assistant is about to answer, not interrogate. */
+      clarifyingQuestion: null,
       searchQueries: [],
       usage: result.usage,
     };

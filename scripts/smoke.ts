@@ -589,6 +589,321 @@ check('an empty message matches nothing', classifyByKeyword(''), null);
 check('small talk matches nothing', classifyByKeyword('مرحبا كيف حالك'), null);
 check('a bare question matches nothing', classifyByKeyword('what can you do?'), null);
 
+
+/*
+ * Ordinary questions must reach the assistant rather than a request for
+ * clarification.
+ *
+ * A user asked "الأردن أين موقعها" and was asked to clarify. Every rule for
+ * general questions anchored on a teaching verb — "اشرح", "ما الفرق", "متى
+ * أستخدم" — because they were written for a researcher asking about
+ * statistics. A plain question matched nothing, fell below the confidence
+ * floor, and became `general.unclear`.
+ *
+ * That is the wrong failure: the product refused to understand a sentence any
+ * person would.
+ */
+for (const question of [
+  'الأردن أين موقعها',
+  'أين تقع الأردن',
+  'من هو ابن خلدون',
+  'كم عدد سكان الأردن',
+  'هل التعلم عن بعد فعّال',
+  'متى بدأت الثورة الصناعية',
+  'where is Jordan',
+  'who wrote this theory',
+  'when did the study begin',
+]) {
+  check(`"${question}" is answered rather than queried`, classifyByKeyword(question)?.intent, 'general.question');
+}
+
+/*
+ * And the analysis rules still win, which is what makes the broad patterns
+ * safe: they are checked first, so a question word in a request to compute
+ * something never reaches the conversational rule.
+ */
+for (const [request, expected] of [
+  ['ما هو التحليل الإحصائي المناسب لبياناتي', 'stats.recommend'],
+  ['which test should I use for my data', 'stats.recommend'],
+  ['احسب ألفا كرونباخ', 'stats.reliability'],
+  ['قارن بين المجموعتين', 'stats.compare'],
+  ['نظّف بياناتي', 'data.clean'],
+  ['ابحث عن دراسات حول التعلم التعاوني', 'research.literature'],
+] as const) {
+  check(`"${request}" still routes to ${expected}`, classifyByKeyword(request)?.intent, expected);
+}
+
+/*
+ * Small talk and capability questions stay with the model. They are
+ * conversation rather than questions with answers, and a rule that claimed them
+ * would answer worse than the model does.
+ */
+check('greetings stay unmatched', classifyByKeyword('مرحبا كيف حالك'), null);
+check('capability questions stay unmatched', classifyByKeyword('what can you do?'), null);
+check('and their Arabic form', classifyByKeyword('ماذا تستطيع أن تفعل'), null);
+
+/**
+ * Routing, across the ways people actually write.
+ *
+ * The product is used by researchers across the Arab world who write in
+ * dialect, mix Arabic with English, transliterate into Latin letters, misspell,
+ * and ask three-word questions. A router that only recognises Modern Standard
+ * Arabic with a teaching verb in front is a router that tells most of them to
+ * rephrase.
+ *
+ * **What this suite can and cannot check.** Semantic classification happens in
+ * a language model, and there is no provider key here — so the cases below are
+ * checked against the keyword layer and the fallback logic, which is where the
+ * failures were. Specifically:
+ *
+ * - a specialised request must reach its capability without a model call;
+ * - an ordinary question must NOT be claimed by a keyword rule, so it reaches
+ *   the model that can understand dialect;
+ * - and nothing may fall through to `general.unclear` by default.
+ *
+ * The third is the one that broke a real user's first question. It is checked
+ * structurally, by reading the fallback, because that is where the decision is
+ * made.
+ */
+
+
+const routing = { passed: 0, failed: 0 };
+
+function routes(message: string, expected: string, note?: string) {
+  const got = classifyByKeyword(message)?.intent ?? 'NO_KEYWORD_MATCH';
+  const ok = got === expected;
+
+  if (ok) routing.passed += 1;
+  else {
+    routing.failed += 1;
+    console.log(`  FAIL ${message}`);
+    console.log(`       expected ${expected}, got ${got}${note ? ` — ${note}` : ''}`);
+  }
+}
+
+/*
+ * Specialised requests, which the keyword layer should catch without a model.
+ * These are the shortcut's reason to exist: a message that names its analysis
+ * does not need interpreting.
+ */
+console.log('\nrouting: specialised requests take the fast path');
+
+routes('احسب ألفا كرونباخ', 'stats.reliability');
+routes('احسب معامل الثبات للمقياس', 'stats.reliability');
+routes("compute cronbach's alpha", 'stats.reliability');
+routes('قارن بين المجموعتين', 'stats.compare');
+/*
+ * "هل يوجد فرق بين الذكور والإناث" is deliberately not here.
+ *
+ * It reads as a comparison and is one — but it names no outcome variable, and
+ * without a file the rules cannot tell a statistical comparison from a question
+ * about society. The model, which sees the dataset profile, can. Expecting a
+ * rule to catch it was my error rather than the rule's.
+ */
+routes('compare the two groups', 'stats.compare');
+/*
+ * Correlation phrasings without the word "ارتباط" spelled as the rule expects
+ * go to the model too. Adding a pattern for every wording is the brittleness
+ * this work exists to remove.
+ */
+routes('نظّف بياناتي', 'data.clean');
+routes('clean my data', 'data.clean');
+routes('افحص البيانات', 'data.inspect');
+routes('ما هو التحليل الإحصائي المناسب لبياناتي', 'stats.recommend');
+routes('which test should I use for my data', 'stats.recommend');
+routes('ابحث عن دراسات حول التعلم التعاوني', 'research.literature');
+routes('أريد الدراسات السابقة عن التعلم عن بعد', 'research.literature');
+routes('find studies about remote learning', 'research.literature');
+
+/*
+ * Ordinary questions must NOT be claimed by a keyword rule.
+ *
+ * This is the assertion that matters most, and it is the opposite of what a
+ * reader might expect. These messages are perfectly understandable — the point
+ * is that the *rules* must not try to understand them, because they cannot
+ * handle dialect, transliteration or misspelling, and a rule that half-matches
+ * is worse than no rule. They go to the model instead.
+ */
+console.log('\nrouting: ordinary questions go to the model, not to a rule');
+
+const goesToModel = (message: string) => {
+  const got = classifyByKeyword(message)?.intent;
+  const ok = got === undefined || got === 'general.question';
+
+  if (ok) routing.passed += 1;
+  else {
+    routing.failed += 1;
+    console.log(`  FAIL "${message}" was claimed by ${got}`);
+  }
+};
+
+/* Jordanian and Levantine dialect. */
+for (const message of [
+  'الأردن وين؟',
+  'وين الأردن؟',
+  'شو عاصمة الأردن؟',
+  'مين ابن خلدون؟',
+  'احكيلي عن الأردن',
+  'شو يعني الانحراف المعياري',
+  'كيف بقدر أحسن بحثي',
+  'شو رأيك بهاي النتيجة؟',
+  'بدي أفهم هاي النتيجة',
+  'مش فاهم شو صار',
+  'ليش النتيجة طلعت هيك',
+  'إيش الفرق بينهم',
+  'كيفك اليوم',
+]) goesToModel(message);
+
+/* Modern Standard Arabic. */
+for (const message of [
+  'الأردن أين موقعها',
+  'أين تقع الأردن',
+  'ما عاصمة الأردن',
+  'من هو ابن خلدون',
+  'كم عدد سكان الأردن',
+  'متى بدأت الثورة الصناعية',
+  'هل التعلم عن بعد فعّال',
+  'لماذا السماء زرقاء',
+  'ماذا يعني التحيز في العينة',
+  'اشرح لي مفهوم الصدق',
+  'عرّف الموثوقية',
+  'ما الفرق بين الصدق والثبات',
+]) goesToModel(message);
+
+/* Gulf, Egyptian and Maghrebi phrasings. */
+for (const message of [
+  'فين الأردن',
+  'وشلون أسوي التحليل',
+  'كيفاش نحسب المتوسط',
+  'ايه هو الانحدار',
+  'ازاي أعمل استبانة',
+]) goesToModel(message);
+
+/* English, formal and informal. */
+for (const message of [
+  'where is Jordan',
+  "where's jordan",
+  'who wrote this theory',
+  'what is a p value',
+  'whats a p value',
+  'how many countries in Asia',
+  'why is the sky blue',
+  'why sky blue',
+  'explain sampling bias',
+  'tell me about Jordan',
+  'can you help me with my research',
+  'hello',
+  'hi there',
+]) goesToModel(message);
+
+/* Transliterated Arabic in Latin letters. */
+for (const message of [
+  'wein Jordan?',
+  'shu ya3ni photosynthesis',
+  'kayf a3mal tahlil',
+  'meen ibn khaldun',
+  'shu el 7al',
+]) goesToModel(message);
+
+/* Mixed Arabic and English. */
+for (const message of [
+  'بدي أعرف الفرق بين PLS و CB-SEM',
+  'شو يعني p-value',
+  'كيف أحسب the mean',
+  'اشرحلي معنى reliability',
+  'هل الـ sample size كافي',
+]) goesToModel(message);
+
+/* Very short, and messages with mistakes. */
+for (const message of [
+  'الأردن؟',
+  'مرحبا',
+  'hello?',
+  'الاردن وين',
+  'شو هاد',
+  'وين',
+  'ما هوا الانحدار',
+  'اشرحلي الاحصاء',
+  'كيف احسب المتوسط الحسابي',
+]) goesToModel(message);
+
+/* Arithmetic, which the assistant answers directly. */
+for (const message of [
+  'احسبلي 25*18',
+  'احسب 15% من 240',
+  'what is 15% of 240',
+  'كم يساوي 12 ضرب 8',
+]) goesToModel(message);
+
+/* Conversational follow-ups, which need the history rather than a rule. */
+for (const message of [
+  'مش فاهم هاي النتيجة، اشرحلي',
+  'وليش هيك؟',
+  'اشرح أكثر',
+  'and what does that mean',
+  'ok but why',
+]) goesToModel(message);
+
+/*
+ * The structural guarantee: an uncertain classification falls back to the
+ * assistant, not to a request for clarification.
+ *
+ * This is checked by reading the source because the decision lives in a branch
+ * that needs a model to reach. A user's first question — "الأردن وين؟" — was
+ * answered with "please clarify", and the cause was this branch defaulting to
+ * `general.unclear` for anything below the confidence floor.
+ */
+console.log('\nrouting: uncertainty falls back to answering, not interrogating');
+
+const intentSource = await readFile('src/agents/intent.ts', 'utf8');
+
+assertTrue(
+  'low confidence falls back to the general assistant',
+  intentSource.includes("intent: 'general.question'") &&
+    intentSource.includes('fellBackToGeneral'),
+);
+assertTrue(
+  'clarification is reserved for an analysis that cannot proceed',
+  intentSource.includes('cannotProceed'),
+);
+assertTrue(
+  'and that condition requires both no dataset and no columns',
+  intentSource.includes('!input.profile && mentionedColumns.length === 0'),
+);
+
+/* The prompt must tell the model to understand dialect rather than refuse it. */
+assertTrue(
+  'the classifier prompt covers Jordanian dialect',
+  intentSource.includes('Jordanian and Levantine dialect'),
+);
+assertTrue('and transliterated Arabic', intentSource.includes('Transliterated Arabic in Latin letters'));
+assertTrue('and mixed Arabic-English', intentSource.includes('Arabic and English mixed in one sentence'));
+assertTrue('and spelling mistakes', intentSource.includes('Spelling and grammar mistakes'));
+assertTrue(
+  'and states that clarification is a failure rather than a safe choice',
+  intentSource.includes('CLARIFICATION IS THE LAST RESORT'),
+);
+assertTrue(
+  'and that dialect alone is not a reason for low confidence',
+  intentSource.includes('short, informal, misspelled, or written in dialect'),
+);
+
+/*
+ * Keywords must not claim general questions. The rules cannot handle dialect,
+ * and one that half-matches sends a message it does not understand down a path
+ * that cannot recover.
+ */
+assertTrue(
+  'the keyword layer defers general questions to the model',
+  intentSource.includes("keyword.intent !== 'general.question'"),
+);
+
+console.log(`\nrouting: ${routing.passed} passed, ${routing.failed} failed`);
+
+if (routing.failed > 0) {
+  failures += routing.failed;
+}
+
 /* Every intent a keyword rule can produce must exist in the catalogue. */
 for (const intent of KEYWORD_RULE_ORDER) {
   assertTrue(`the keyword rule for ${intent} names a real intent`, isKnownIntent(intent));
@@ -918,8 +1233,33 @@ const arabicWithBoundary = keywordSource
 
 check('no Arabic pattern relies on a word boundary', arabicWithBoundary.length, 0);
 
-/* Ambiguity is still left to the model rather than guessed at. */
-check('a bare name is left to the model', classifyByKeyword('من هو د. عامر زيد القضاة؟'), null);
+/*
+ * "من هو فلان" now classifies as a general question rather than falling
+ * through unmatched.
+ *
+ * The guard used to require null here, on the reasoning that a question about a
+ * specific person must reach the model so it can declare what it does not know.
+ * That reasoning was right and the mechanism was wrong: `general.question`
+ * *is* the path to that model, and the honesty rule lives in the general prompt
+ * — "never invent facts about a specific person" — not in the classifier.
+ *
+ * Leaving it unmatched meant a user asking a plain question got a request for
+ * clarification instead of an answer, which is what a real user reported.
+ */
+check(
+  'a question about a person reaches the general prompt, which declares its limits',
+  classifyByKeyword('من هو د. عامر زيد القضاة؟')?.intent,
+  'general.question',
+);
+assertTrue(
+  'and the general prompt is what forbids inventing facts about them',
+  (await readFile('src/ai/prompts/general.ts', 'utf8')).includes(
+    'Never invent facts about a specific person',
+  ),
+);
+
+/* Genuine ambiguity is still left to the model rather than guessed at. */
+check('a vague request stays unmatched', classifyByKeyword('ساعدني في بحثي'), null);
 check('an upload request is left to the model', classifyByKeyword('حلل هذا الملف'), null);
 
 /*

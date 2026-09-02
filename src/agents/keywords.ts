@@ -96,12 +96,79 @@ const RULES: Rule[] = [
       /(^|\s)أيهما\s+(أفضل|أنسب)(\s|$)/,
       /(^|\s)كيف\s+(أفسّ?ر|نفسّ?ر|أقرأ|نقرأ)(\s|$)/,
       /(^|\s)لماذا(\s|$)/,
+      /*
+       * Ordinary questions, which the rules above do not cover.
+       *
+       * Everything before this anchors on a teaching verb — "اشرح", "ما الفرق",
+       * "متى أستخدم" — because the rules were written for a researcher asking
+       * about statistics. A user asked "الأردن أين موقعها" and got a request
+       * for clarification: the sentence matched nothing, fell below the
+       * confidence floor, and became `general.unclear`.
+       *
+       * That is the wrong failure. The assistant answers general questions —
+       * the general prompt has handled knowledge limits since it was written —
+       * and a plain question should reach it rather than being interrogated.
+       *
+       * These patterns are deliberately broad. The cost of a false positive is
+       * a question answered conversationally that could have been an analysis
+       * request; the cost of a false negative is the product refusing to
+       * understand a sentence any person would. The second is worse, and the
+       * analysis rules are checked first anyway.
+       */
+      /*
+       * A question word, but not one opening small talk or a capability
+       * question.
+       *
+       * "مرحبا كيف حالك" and "ماذا تستطيع أن تفعل" are conversation, not
+       * questions with answers — they belong to the model, which handles them
+       * better than a rule can. The exclusions are the phrasings that actually
+       * appear rather than an attempt to enumerate politeness.
+       */
+      /(^|\s)(أين|متى|كم|هل)(\s|$)/,
+      /(^|\s)من\s+(هو|هي|هم|كان|اخترع|كتب|أسّ?س)(\s|$)/,
+      /(^|\s)كيف(?!\s+حالك)\s+(يمكن|أستطيع|نستطيع|تعمل|يعمل|أصبح|صار|تمّ?)(\s|$)/,
+      /(^|\s)ماذا(?!\s+(تستطيع|يمكنك|تفعل))\s+(يعني|تعني|حدث|يحدث|قال|تقول)(\s|$)/,
+      /(^|\s)ما\s+(اسم|أهم|أفضل|أشهر|أبرز)(\s|$)/,
+      /(^|\s)(حدّ?ثني|أخبرني|قل\s+لي)(\s|$)/,
       /^\s*(explain|define|describe|tell me about)\b/i,
       /\bwhat\s+(is|are|does|do)\b/i,
       /\bwhat('s| is)\s+the\s+difference\s+between\b/i,
       /\bwhen\s+(should|do)\s+i\s+use\b/i,
       /\bhow\s+do\s+i\s+(interpret|read)\b/i,
       /\bwhy\s+(is|are|does|do)\b/i,
+      /* The English equivalents, for the same reason. */
+      /*
+       * `who wrote`, `where did`, `which came` — a question word followed by a
+       * plain past-tense verb rather than an auxiliary. Written as two patterns
+       * because merging them into one alternation makes it unreadable and
+       * makes a later change to either half risk the other.
+       */
+      /\b(where|when|who|which|how many|how much)\s+(is|are|was|were|do|does|did|can|should|will|would)\b/i,
+      /*
+       * A question word opening the sentence.
+       *
+       * The narrower version matched a following verb by its ending, and
+       * English's irregular verbs defeat that immediately: `who wrote`, `which
+       * came`. Anchoring on the opening word instead is simpler and catches
+       * them all — and it is safe here because every analysis rule is checked
+       * before this one, so "who" opening a sentence has already failed to be
+       * a request to compute something.
+       */
+      /*
+       * A question word opening the sentence, minus the two shapes that are not
+       * questions about the world.
+       *
+       * "what can you do" is a capability question and belongs to the model,
+       * which knows what it can do. "which test should I use" is a request for
+       * the recommender, which needs the user's file — routing it here would
+       * answer conversationally about tests in general when the researcher
+       * wanted one chosen for their data.
+       */
+      /^\s*(who|whose|whom|where|when)\b/i,
+      /^\s*which(?!\s+(test|analysis|method|statistic))\b/i,
+      /^\s*what(?!\s+(can|could|do)\s+you)(?!\s+(test|analysis|method))\b/i,
+      /\bis\s+(there|it|the)\b/i,
+      /\bcan\s+you\s+(tell|explain|describe)\b/i,
     ],
   },
 
@@ -110,6 +177,15 @@ const RULES: Rule[] = [
     patterns: [
       /\bpls[\s-]?sem\b/i,
       /\bsmart\s?pls\b/i,
+      /*
+       * `PLS` on its own, which is how researchers usually write it — "اعمل
+       * تحليل PLS لبياناتي". The strict form required "pls-sem" together and
+       * missed the common case entirely.
+       *
+       * The guard above already keeps questions *about* PLS out of here, so a
+       * bare mention reaching this point is a request to run one.
+       */
+      /\bpls\b/i,
       /\bpartial\s+least\s+squares\b/i,
       /المربعات\s+الجزئية/,
       /بي\s?إل\s?إس/,
@@ -339,11 +415,79 @@ export interface KeywordMatch {
  * Null means "not sure", and null is a perfectly good answer: the caller falls
  * through to the model, which is what it is for.
  */
+/**
+ * Whether a message asks *about* a method rather than asking to run one.
+ *
+ * A statistical term on its own is not a request to compute. "اشرحلي معنى
+ * reliability" was routed to a reliability analysis and "بدي أعرف الفرق بين PLS
+ * و CB-SEM" to a CB-SEM run, because the rules matched the term and never
+ * looked at the sentence around it.
+ *
+ * That is the wrong failure twice over: the user gets an analysis they did not
+ * ask for, and the question they did ask goes unanswered.
+ *
+ * Checked as a prefix rather than anywhere in the message, because "احسب
+ * الثبات ثم اشرح النتيجة" is a request to compute followed by a request to
+ * explain — the computation is what was asked for first, and it is what should
+ * run.
+ */
+function asksAboutRatherThanFor(message: string): boolean {
+  const opening = message.trim().slice(0, 40);
+
+  /*
+   * "ما هو التحليل المناسب لبياناتي" opens like a question and is a request:
+   * the researcher wants a test chosen for their data, not a description of
+   * tests. The recommender rule already handles it, and this guard would take
+   * it away — which it did, until this exception.
+   *
+   * The signal is the possessive: "لبياناتي", "for my data". Asking which test
+   * suits *my* data is asking for a decision about a specific dataset.
+   */
+  if (
+    /(المناسب|الأنسب|should\s+i\s+use)/.test(opening) ||
+    /(لبياناتي|بياناتي|my\s+data)/.test(message)
+  ) {
+    return false;
+  }
+
+  /*
+   * "ما هي الدراسات السابقة عن X" opens like a question and asks a database for
+   * papers. The literature rule handles it, and this guard was taking it away —
+   * the same mistake as the recommender above, and for the same reason: an
+   * interrogative opening does not make a request into a question.
+   */
+  if (/(الدراسات|الأبحاث|البحوث|الأدبيات|studies|papers|literature|research\s+on)/.test(message)) {
+    return false;
+  }
+
+  return (
+    /^(اشرح|اشرحلي|وضّ?ح|فسّ?ر|عرّ?ف|ما\s+(هو|هي|معنى|تعريف)|شو\s+يعني|إيش\s+يعني|ايش\s+يعني)/.test(
+      opening,
+    ) ||
+    /^(بدي\s+أ?عرف|أريد\s+أن\s+أعرف|أ?بغى\s+أعرف)/.test(opening) ||
+    /^(ما\s+)?الفرق\s+بين/.test(opening) ||
+    /^(explain|define|describe|what\s+(is|are|does)|what's|tell\s+me\s+about|difference\s+between)/i.test(
+      opening,
+    ) ||
+    /^(i\s+want\s+to\s+(know|understand)|help\s+me\s+understand)/i.test(opening)
+  );
+}
+
 export function classifyByKeyword(message: string): KeywordMatch | null {
   const text = message.trim();
   if (text.length === 0) return null;
 
+  /*
+   * A question about a method goes to the model, whatever terms it contains.
+   *
+   * Only specialised rules are skipped — the general rules below still apply,
+   * so nothing is lost by deferring.
+   */
+  const aboutRatherThanFor = asksAboutRatherThanFor(text);
+
   for (const rule of RULES) {
+    if (aboutRatherThanFor && rule.intent !== 'general.question') continue;
+
     for (const pattern of rule.patterns) {
       const found = text.match(pattern);
       if (found) {

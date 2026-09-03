@@ -116,6 +116,8 @@ Rules:
    - PDF, ملف PDF, بصيغة PDF → "pdf"
    - PowerPoint, presentation, عرض تقديمي, بوربوينت → "pptx"
    - Excel, spreadsheet, جدول بيانات, إكسل → "xlsx"
+   - Excel, spreadsheet, workbook, إكسل, جدول بيانات → "xlsx"
+   - text file, plain text, ملف نصي → "txt"
    - CSV, ملف CSV → "csv"
    - BibTeX, references file, ملف مراجع → "bib"
    - RIS, EndNote → "ris"

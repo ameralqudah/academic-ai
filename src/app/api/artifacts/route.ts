@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { generateCsv, generateMarkdown, generatePdf, generatePptx } from '@/server/generators/documents';
 import { generateDocx } from '@/server/generators/docx';
+import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { formatReferenceList, type StyleId } from '@/server/citation/styles';
 import { ok, withApi } from '@/server/http/api';
@@ -49,7 +50,7 @@ const referenceSchema = z.object({
 });
 
 const schema = z.object({
-  kind: z.enum(['docx', 'pdf', 'pptx', 'csv', 'md', 'bib', 'ris']),
+  kind: z.enum(['docx', 'pdf', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'bib', 'ris']),
   filename: z.string().min(1).max(200),
   title: z.string().max(500).default(''),
   subtitle: z.string().max(500).optional(),
@@ -109,6 +110,12 @@ export const POST = withApi<Body>(
         subtitle: body.subtitle,
         rtl: body.rtl,
       });
+    } else if (body.kind === 'xlsx') {
+      bytes = await generateXlsx(
+        body.csv ? [{ name: 'Data', headers: body.csv.headers, rows: body.csv.rows as never }] : [],
+      );
+    } else if (body.kind === 'txt') {
+      bytes = generateTxt(content);
     } else if (body.kind === 'csv') {
       bytes = generateCsv(body.csv?.headers ?? [], body.csv?.rows ?? []);
     } else if (body.kind === 'md') {
@@ -121,7 +128,7 @@ export const POST = withApi<Body>(
 
     /* Prose is checked; a spreadsheet or bibliography has none to check. */
     const proseText =
-      body.kind === 'csv' || body.kind === 'bib' || body.kind === 'ris'
+      body.kind === 'csv' || body.kind === 'xlsx' || body.kind === 'bib' || body.kind === 'ris'
         ? null
         : body.sections
             .flatMap((section) => [section.heading ?? '', ...(section.paragraphs ?? [])])

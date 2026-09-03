@@ -427,6 +427,15 @@ export function generateMarkdown(content: DocumentContent): Uint8Array {
 export async function validateArtifactBytes(
   bytes: Uint8Array,
   kind: string,
+  /**
+   * Text that must appear inside the file.
+   *
+   * Structural validity is not enough: a Word file with a correct zip
+   * structure and an empty body opens cleanly and contains nothing, and the
+   * researcher discovers that rather than the pipeline. When supplied, this
+   * confirms the content actually reached the document.
+   */
+  expectedContent?: string,
 ): Promise<{ valid: boolean; reason?: string }> {
   if (bytes.length === 0) return { valid: false, reason: 'empty' };
 
@@ -438,6 +447,15 @@ export async function validateArtifactBytes(
 
       const document = await PDFDocument.load(bytes);
       if (document.getPageCount() === 0) return { valid: false, reason: 'no pages' };
+
+      /*
+       * A PDF's text cannot be read back without a parser this does not carry,
+       * so content is checked by size: a document with pages and almost no
+       * bytes is an empty shell.
+       */
+      if (expectedContent && bytes.length < 1200) {
+        return { valid: false, reason: 'appears empty' };
+      }
 
       return { valid: true };
     }
@@ -460,12 +478,62 @@ export async function validateArtifactBytes(
       if (!zip.file(required)) return { valid: false, reason: `missing ${required}` };
       if (!zip.file('[Content_Types].xml')) return { valid: false, reason: 'missing content types' };
 
+      /*
+       * The body must contain something. A zip with the right parts and an
+       * empty document opens in Word and shows a blank page — which is a
+       * failure the pipeline should catch, not the researcher.
+       */
+      if (kind === 'docx' || kind === 'pptx') {
+        const body = await zip.file(required)?.async('string');
+        if (!body || body.length < 400) return { valid: false, reason: 'document body is empty' };
+
+        if (expectedContent) {
+          /*
+           * OOXML splits text across runs, so a phrase may not appear
+           * contiguously. Checked word by word: enough of them present means
+           * the content arrived.
+           */
+          const words = expectedContent
+            .split(/\s+/)
+            .filter((word) => word.length > 3)
+            .slice(0, 12);
+
+          const found = words.filter((word) => body.includes(word)).length;
+
+          if (words.length > 0 && found < Math.ceil(words.length / 3)) {
+            return { valid: false, reason: 'expected content not found in document' };
+          }
+        }
+      }
+
+      if (kind === 'xlsx') {
+        /* A workbook with no sheet parts opens with a repair prompt. */
+        const hasSheet = Object.keys(zip.files).some((name) =>
+          /^xl\/worksheets\/sheet\d+\.xml$/.test(name),
+        );
+
+        if (!hasSheet) return { valid: false, reason: 'no worksheets' };
+      }
+
       return { valid: true };
     }
 
-    if (kind === 'csv' || kind === 'md' || kind === 'bib' || kind === 'ris') {
+    if (kind === 'csv' || kind === 'md' || kind === 'bib' || kind === 'ris' || kind === 'txt') {
       const text = new TextDecoder().decode(bytes);
       if (text.trim().length === 0) return { valid: false, reason: 'empty' };
+
+      if (expectedContent) {
+        const words = expectedContent
+          .split(/\s+/)
+          .filter((word) => word.length > 3)
+          .slice(0, 12);
+
+        const found = words.filter((word) => text.includes(word)).length;
+
+        if (words.length > 0 && found < Math.ceil(words.length / 3)) {
+          return { valid: false, reason: 'expected content not found' };
+        }
+      }
 
       /* Format-specific structure, so a truncated write is caught. */
       if (kind === 'bib' && !text.includes('@')) return { valid: false, reason: 'no entries' };

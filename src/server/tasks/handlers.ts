@@ -28,6 +28,7 @@ import {
   generatePptx,
 } from '@/server/generators/documents';
 import { generateDocx } from '@/server/generators/docx';
+import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { storeArtifact, type ArtifactKind } from '@/server/services/artifact.service';
 import { answerGeneralQuestion, generateSurveyItems } from '@/server/services/ai.service';
@@ -438,7 +439,9 @@ export function registerAllHandlers(): void {
      * learns why rather than assuming the product cannot do it.
      */
     const requested = textInput(context, 'format', 'md');
-    const known: ArtifactKind[] = ['docx', 'pdf', 'pptx', 'xlsx', 'csv', 'md', 'bib', 'ris'];
+    const known: ArtifactKind[] = [
+      'docx', 'pdf', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'bib', 'ris',
+    ];
     const kind = (known.includes(requested as ArtifactKind) ? requested : 'md') as ArtifactKind;
     const title = textInput(context, 'title', textInput(context, 'topic', 'Document'));
     const style = (textInput(context, 'citationStyle', 'apa') as StyleId) ?? 'apa';
@@ -493,6 +496,30 @@ export function registerAllHandlers(): void {
         })),
         { rtl: context.locale === 'ar' },
       );
+    } else if (kind === 'xlsx') {
+      /*
+       * Tables from the steps that produced them. A spreadsheet request follows
+       * an analysis, and the analysis output is where the numbers are — asking
+       * the planner to restate them in the step input would mean the figures
+       * exist twice and can disagree.
+       */
+      const sheets = Object.entries(context.dependencies)
+        .filter(([, output]) => output.table)
+        .map(([capability, output]) => {
+          const table = output.table as { headers: string[]; rows: unknown[][] };
+          return {
+            name: capability.replace(/^\w+\./, ''),
+            headers: table.headers,
+            rows: table.rows as never,
+          };
+        });
+
+      const own = context.input.table as { headers: string[]; rows: unknown[][] } | undefined;
+      if (own) sheets.push({ name: 'Data', headers: own.headers, rows: own.rows as never });
+
+      bytes = await generateXlsx(sheets);
+    } else if (kind === 'txt') {
+      bytes = generateTxt(content);
     } else if (kind === 'csv') {
       const table = context.input.table as { headers: string[]; rows: unknown[][] } | undefined;
       bytes = generateCsv(table?.headers ?? [], (table?.rows ?? []) as never);
@@ -516,6 +543,13 @@ export function registerAllHandlers(): void {
         ...(kind !== requested ? { requestedFormat: requested, substituted: true } : {}),
       },
       ...(prose ? { quality: { text: prose, references } } : {}),
+      /*
+       * The prose is also what went into the file, so validation can confirm it
+       * arrived. Named separately from the quality text because a caller may
+       * check one thing and store another — and a file rejected for not
+       * containing text it never held is a false failure.
+       */
+      ...(prose ? { expectedContent: prose } : {}),
     });
 
     return {

@@ -26,7 +26,8 @@ import * as artifactsRepo from '@/server/repositories/artifacts.repository';
 import { storageProvider } from '@/server/storage';
 import type { Artifact } from '@/server/db/schema';
 
-export type ArtifactKind = 'docx' | 'pdf' | 'pptx' | 'xlsx' | 'csv' | 'md' | 'bib' | 'ris';
+export type ArtifactKind =
+  | 'docx' | 'pdf' | 'pptx' | 'xlsx' | 'csv' | 'md' | 'txt' | 'bib' | 'ris';
 
 const CONTENT_TYPES: Record<ArtifactKind, string> = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -34,12 +35,24 @@ const CONTENT_TYPES: Record<ArtifactKind, string> = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   csv: 'text/csv; charset=utf-8',
+  txt: 'text/plain; charset=utf-8',
   md: 'text/markdown; charset=utf-8',
   bib: 'application/x-bibtex; charset=utf-8',
   ris: 'application/x-research-info-systems; charset=utf-8',
 };
 
 export interface StoreInput {
+  /**
+   * Text that must appear in the file, when the caller can name it.
+   *
+   * Separate from `quality.text` for a reason discovered by a failing test: the
+   * prose sent for quality checking is not always what went into the document.
+   * A caller may check a draft and store a rendered version, and conflating the
+   * two rejected a valid file for not containing text it never claimed to hold.
+   *
+   * Absent means structural validation only, which is the safe default.
+   */
+  expectedContent?: string;
   userId: string;
   kind: ArtifactKind;
   filename: string;
@@ -65,8 +78,31 @@ export interface StoreInput {
 export async function storeArtifact(input: StoreInput): Promise<Artifact> {
   const startedAt = Date.now();
 
-  /* 1. The bytes must actually be the file they claim to be. */
-  const validation = await validateArtifactBytes(input.bytes, input.kind);
+  /*
+   * 1. The bytes must be the file they claim to be, and must contain what was
+   * written into them.
+   *
+   * Structure alone is not enough: a Word file with a correct zip layout and an
+   * empty body opens cleanly and shows a blank page. Passing the prose lets the
+   * check confirm it actually arrived — which is the difference between "a file
+   * was produced" and "the research is in the file".
+   */
+  /*
+   * The expected content depends on the format, which the first version got
+   * wrong: it passed the prose to every check, and a BibTeX file or a
+   * spreadsheet legitimately contains none of it. Four formats were rejected
+   * for not containing text they were never meant to hold.
+   *
+   * Only the formats that carry prose are checked against it. The rest are
+   * checked structurally, which is all that can be asked of them.
+   */
+  const carriesProse = ['docx', 'pdf', 'md', 'txt'].includes(input.kind);
+
+  const validation = await validateArtifactBytes(
+    input.bytes,
+    input.kind,
+    carriesProse ? input.expectedContent : undefined,
+  );
 
   if (!validation.valid) {
     logger.error('artifact.invalid', {

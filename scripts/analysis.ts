@@ -33,6 +33,11 @@ import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
 import { analyseClaims, findCitations } from '@/server/quality/claims';
 import { isWellFormedDoi, normaliseDoi } from '@/server/quality/sources';
 import { checkQuality } from '@/server/quality/engine';
+import {
+  filterByRelevance,
+  looksOffTopic,
+  meaningfulTerms,
+} from '@/server/knowledge/relevance';
 import { PDFDocument } from 'pdf-lib';
 import {
   generateCsv,
@@ -4334,6 +4339,159 @@ console.log('\ncitation styles');
   const before = availableStyles().length;
   check('five styles ship', before, 5);
 }
+
+
+
+console.log('\nsearch relevance');
+
+/*
+ * A researcher asked for studies on hybrid learning (التعلم الهجين) and
+ * received ten papers about learning disabilities. Crossref's Arabic index is
+ * shallow, and a two-word phrase matches anything containing the commoner word
+ * — so `query.bibliographic` helped and did not fix it.
+ *
+ * The provider cannot tell the difference. This can, because it has the titles.
+ */
+
+const relevanceNow = new Date().toISOString();
+const relevanceSource = (title: string) => ({
+  kind: 'academic' as const,
+  title,
+  url: 'https://example.org',
+  language: 'ar' as const,
+  provider: 'test',
+  retrievedAt: relevanceNow,
+});
+
+/* The exact results the researcher received. */
+const wrongCorpus = [
+  'A Comprehensive Review of Deep Learning Methods for Object Detection',
+  'الطلاب الدوليون في مؤسسات التعليم العالي في روسيا الاتحادية',
+  'مفهوم الذات للأشخاص ذوي صعوبات التعلم والعوامل المؤثرة فيه',
+  'استراتيجية التساؤل الذاتي للطلاب ذوي صعوبات التعلم',
+  'تصورات المعلمين نحو تعليم الطلاب الموهوبين ذوي صعوبات التعلم',
+  'هل من العدل استخدام اختبار الذكاء لقياس ذكاء الأشخاص',
+  'المحادثة المرئية عن بعد في الجزائر',
+  'توظيف استراتيجية التعلم القائم على المشاريع في التعليم عن بعد',
+  'صعوبات التعلم: قضايا حديثة',
+  'صعوبات التعلم غير اللفظية',
+].map(relevanceSource);
+
+/*
+ * Stop words are removed before matching. "دراسات حديثة عن التعلم الهجين"
+ * would otherwise match on "دراسات", which appears in half the corpus and says
+ * nothing about the topic.
+ */
+{
+  const terms = meaningfulTerms('دراسات حديثة عن التعلم الهجين');
+
+  assertTrue('the distinctive word survives', terms.includes('هجين'));
+  assertTrue('and the topic word', terms.includes('تعلم'));
+  assertTrue('but not "دراسات"', !terms.includes('دراسات'));
+  assertTrue('nor "حديثة"', !terms.includes('حديثة'));
+
+  /* The definite article is stripped: التعلم and تعلم are one word to a reader. */
+  check('the definite article is stripped', meaningfulTerms('التعلم').join(), 'تعلم');
+  check('and compound prefixes', meaningfulTerms('بالتعليم').join(), 'تعليم');
+
+  const english = meaningfulTerms('recent studies on hybrid learning');
+  assertTrue('English stop words go too', !english.includes('studies'));
+  assertTrue('leaving the topic', english.includes('hybrid') && english.includes('learning'));
+}
+
+/*
+ * The rare term decides, not any term.
+ *
+ * Matching on either word kept six of the ten wrong results, because "تعلم"
+ * appears in all of them — the common word carries no information about the
+ * topic and the rare one carries all of it.
+ */
+{
+  assertTrue(
+    'results that match nothing distinctive are recognised as off-topic',
+    looksOffTopic(wrongCorpus, 'دراسات حديثة عن التعلم الهجين'),
+  );
+
+  const onTopic = [
+    'التعلم الهجين في الجامعات الأردنية',
+    'أثر التعليم الهجين على التحصيل الدراسي',
+    'تجربة التعلم الهجين بعد الجائحة',
+  ].map(relevanceSource);
+
+  assertTrue('and genuinely relevant results are not', !looksOffTopic(onTopic, 'التعلم الهجين'));
+  check('which all survive filtering', filterByRelevance(onTopic, 'التعلم الهجين').kept.length, 3);
+}
+
+/*
+ * A mixed set keeps what matches and discards what does not — which is the case
+ * where filtering earns its place.
+ */
+{
+  const mixed = [
+    ...['التعلم الهجين في التعليم العالي', 'نموذج للتعلم الهجين'].map(relevanceSource),
+    ...['صعوبات التعلم: قضايا حديثة', 'مفهوم الذات لذوي صعوبات التعلم'].map(relevanceSource),
+  ];
+
+  const result = filterByRelevance(mixed, 'التعلم الهجين');
+  check('the matching sources are kept', result.kept.length, 2);
+  check('and the rest discarded', result.discarded, 2);
+  assertTrue('keeping the right ones', result.kept.every((source) => source.title.includes('هجين')));
+}
+
+/*
+ * Filtering never returns nothing.
+ *
+ * Zero results tells the researcher nothing and hides what the provider found;
+ * ten imperfect ones let them judge. The off-topic flag is what says the search
+ * went wrong.
+ */
+{
+  const result = filterByRelevance(wrongCorpus, 'التعلم الهجين');
+
+  check('an entirely wrong corpus is returned rather than emptied', result.kept.length, 10);
+  check('with nothing reported as discarded', result.discarded, 0);
+  assertTrue('but flagged as off-topic', looksOffTopic(wrongCorpus, 'التعلم الهجين'));
+}
+
+/*
+ * A query with no distinctive terms cannot be filtered on. Returning everything
+ * is correct — the researcher gave nothing to match against, and inventing a
+ * criterion would discard arbitrarily.
+ */
+{
+  const result = filterByRelevance(wrongCorpus, 'دراسات حديثة');
+  check('an unfilterable query keeps everything', result.kept.length, 10);
+  assertTrue('and raises no false alarm', !looksOffTopic(wrongCorpus, 'دراسات حديثة'));
+}
+
+/* Arabic letter variants are treated as equal, or half the matches are missed. */
+{
+  const variants = ['التعلّم الهجين في الجامعات', 'التعليم الهجين'].map(relevanceSource);
+  check('diacritics do not prevent a match', filterByRelevance(variants, 'التعلم الهجين').kept.length, 2);
+
+  const hamza = ['أثر التعلم الهجين'].map(relevanceSource);
+  check('nor hamza forms', filterByRelevance(hamza, 'اثر التعلم الهجين').kept.length, 1);
+}
+
+/*
+ * The handler refuses to write from a wrong corpus. A review built on ten
+ * papers about another subject is worse than no review: it looks like work and
+ * is unusable.
+ */
+const handlerSource = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+assertTrue(
+  'a literature review refuses off-topic sources',
+  handlerSource.includes("output: { error: 'off-topic-sources' }"),
+);
+assertTrue(
+  'asking the researcher to rephrase rather than writing anyway',
+  handlerSource.includes('do not concern this topic'),
+);
+assertTrue(
+  'and the search step reports the finding',
+  handlerSource.includes('offTopic: report.offTopic'),
+);
 
 
 console.log(

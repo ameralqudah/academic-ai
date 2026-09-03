@@ -19,6 +19,7 @@
 import { logger } from '@/lib/logger';
 
 import { mergeSources, type CoverageReport } from './merge';
+import { filterByRelevance, looksOffTopic } from './relevance';
 import { CrossrefProvider } from './providers/crossref';
 import { OpenAlexProvider } from './providers/openalex';
 import type { KnowledgeProvider, SearchQuery, Source, SourceKind, SourceLanguage } from './types';
@@ -35,6 +36,16 @@ export interface SearchRequest {
 export interface SearchReport {
   sources: Source[];
   coverage: CoverageReport;
+  /**
+   * True when the results do not appear to concern the query.
+   *
+   * Reported rather than acted on: ten papers on the wrong subject are more
+   * useful than zero, and the caller decides whether to warn, re-search, or
+   * ask the researcher to rephrase.
+   */
+  offTopic: boolean;
+  /** Results removed as irrelevant, so a narrow search can say it was narrow. */
+  discardedAsIrrelevant: number;
   /** Per provider, so a coverage gap can be told apart from an outage. */
   providers: {
     name: string;
@@ -79,6 +90,9 @@ export async function search(request: SearchRequest): Promise<SearchReport> {
         arabicCoverageNoticeKey: null,
       },
       providers: [],
+      /* No providers ran, so there is nothing to judge relevance against. */
+      offTopic: false,
+      discardedAsIrrelevant: 0,
       queriesRun: request.queries.map((query) => ({ text: query.text, language: query.language })),
       tookMs: Date.now() - startedAt,
     };
@@ -158,6 +172,43 @@ export async function search(request: SearchRequest): Promise<SearchReport> {
     limit: request.limit ?? 10,
   });
 
+  /*
+   * Relevance checked after retrieval, against the text we actually received.
+   *
+   * A researcher asked for studies on hybrid learning and received ten papers
+   * about learning disabilities: Crossref's Arabic index is shallow, and a
+   * two-word phrase matches anything containing the commoner word. The provider
+   * cannot tell the difference; this can, because it has the titles.
+   *
+   * Only the first query is used for filtering — a multi-query search is
+   * deliberately broad, and narrowing it to one of its queries would discard
+   * what the others found.
+   */
+  const primaryQuery = request.queries[0]?.text ?? '';
+  const relevance = primaryQuery ? filterByRelevance(merged.sources, primaryQuery) : null;
+  const offTopic = primaryQuery ? looksOffTopic(merged.sources, primaryQuery) : false;
+
+  if (relevance && relevance.discarded > 0) {
+    logger.info('knowledge.filtered', {
+      query: primaryQuery.slice(0, 80),
+      kept: relevance.kept.length,
+      discarded: relevance.discarded,
+    });
+  }
+
+  if (offTopic) {
+    /*
+     * Logged, and reported to the caller rather than hidden. A search whose
+     * distinctive term appears in none of the results found the wrong corpus,
+     * and the researcher should be told that instead of being handed ten papers
+     * on another subject as though they answered the question.
+     */
+    logger.warn('knowledge.offTopic', {
+      query: primaryQuery.slice(0, 80),
+      returned: merged.sources.length,
+    });
+  }
+
   logger.info('knowledge.search', {
     queries: request.queries.length,
     providers: providers.length,
@@ -168,8 +219,14 @@ export async function search(request: SearchRequest): Promise<SearchReport> {
   });
 
   return {
-    sources: merged.sources,
+    sources: relevance?.kept ?? merged.sources,
     coverage: merged.coverage,
+    /*
+     * True when the results do not appear to concern the query. The caller
+     * warns the researcher rather than presenting them as an answer.
+     */
+    offTopic,
+    discardedAsIrrelevant: relevance?.discarded ?? 0,
     providers: reports,
     queriesRun: request.queries.map((query) => ({ text: query.text, language: query.language })),
     tookMs: Date.now() - startedAt,

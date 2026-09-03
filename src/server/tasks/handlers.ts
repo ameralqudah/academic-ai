@@ -171,17 +171,31 @@ export function registerAllHandlers(): void {
     }));
 
     /*
-     * A search returning almost nothing is worth telling the planner about:
-     * the topic may be phrased too narrowly, and a review written on three
-     * sources is a review the researcher should not submit.
+     * Two conditions worth telling the planner about, and they are different
+     * problems.
+     *
+     * A thin result means the phrasing was too narrow. An off-topic result
+     * means the search found the wrong corpus entirely — which happened to a
+     * researcher who asked for hybrid learning and received ten papers on
+     * learning disabilities. Writing a review from either would produce
+     * something worse than nothing.
      */
     const thin = references.length < 4;
 
     return {
-      output: { references, found: references.length },
-      ...(thin
-        ? { suggestsMoreWork: `Only ${references.length} sources found for "${query}"` }
-        : {}),
+      output: {
+        references,
+        found: references.length,
+        offTopic: report.offTopic,
+        discarded: report.discardedAsIrrelevant,
+      },
+      ...(report.offTopic
+        ? {
+            suggestsMoreWork: `The results for "${query}" do not appear to concern the topic; the query may need rephrasing`,
+          }
+        : thin
+          ? { suggestsMoreWork: `Only ${references.length} sources found for "${query}"` }
+          : {}),
       modelCalls: 1,
     };
   });
@@ -223,6 +237,25 @@ export function registerAllHandlers(): void {
 
   registerHandler('literature.review', async (context): Promise<StepResult> => {
     const references = referencesFrom(context);
+
+    /*
+     * A search that found the wrong corpus is refused as firmly as one that
+     * found nothing. A review written from ten papers on another subject is
+     * worse than no review: it looks like work and is unusable.
+     */
+    const offTopic = Object.values(context.dependencies).some(
+      (output) => output.offTopic === true,
+    );
+
+    if (offTopic) {
+      return {
+        output: { error: 'off-topic-sources' },
+        needsUserInput:
+          context.locale === 'ar'
+            ? 'المصادر التي وجدتها لا تتناول الموضوع المطلوب. هل تريد صياغة أخرى للبحث؟'
+            : 'The sources I found do not concern this topic. Would you like to rephrase the search?',
+      };
+    }
 
     if (references.length === 0) {
       /*

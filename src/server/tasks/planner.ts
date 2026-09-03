@@ -105,7 +105,27 @@ Rules:
 
 5. missingInformation is for things you genuinely cannot infer and that would change the work — the topic when there is none, the analysis when several are possible. Do not ask about things you can reasonably assume; asking is a cost to the user.
 
-6. Use at most 40 steps. If the request needs more, plan the first coherent portion and note the rest in summary.`;
+6. Use at most 40 steps. If the request needs more, plan the first coherent portion and note the rest in summary.
+
+7. FILE FORMATS. When the researcher asks for a file, the document.generate step must carry the format they asked for in its input:
+
+   {"capability": "document.generate", "input": {"format": "docx", "title": "..."}}
+
+   Recognise these, in either language:
+   - Word, DOCX, ملف وورد, بصيغة وورد → "docx"
+   - PDF, ملف PDF, بصيغة PDF → "pdf"
+   - PowerPoint, presentation, عرض تقديمي, بوربوينت → "pptx"
+   - Excel, spreadsheet, جدول بيانات, إكسل → "xlsx"
+   - CSV, ملف CSV → "csv"
+   - BibTeX, references file, ملف مراجع → "bib"
+   - RIS, EndNote → "ris"
+   - Nothing named → "md"
+
+   If they ask for two formats — "Word and PDF" — plan two document.generate steps, both depending on the writing step.
+
+   Omitting the format silently produces a Markdown file, which is not what someone asking for Word wanted and gives them no way to tell what happened.
+
+8. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
 
   const result = await runCompletion({
     userId: input.userId,

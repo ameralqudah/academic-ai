@@ -27,6 +27,7 @@ import {
   generatePdf,
   generatePptx,
 } from '@/server/generators/documents';
+import { generateDocx } from '@/server/generators/docx';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { storeArtifact, type ArtifactKind } from '@/server/services/artifact.service';
 import { answerGeneralQuestion, generateSurveyItems } from '@/server/services/ai.service';
@@ -427,7 +428,18 @@ export function registerAllHandlers(): void {
   /* ------------------------------ artefacts ----------------------------- */
 
   registerHandler('document.generate', async (context): Promise<StepResult> => {
-    const kind = (textInput(context, 'format', 'md') as ArtifactKind) ?? 'md';
+    /*
+     * The format the researcher asked for.
+     *
+     * An unrecognised value falls back to Markdown, and that fallback is what
+     * silently turned "give me Word" into a .md file. It is kept — a task must
+     * produce something — but the substitution is now recorded in the metadata
+     * and reported, so a researcher who asked for Word and received Markdown
+     * learns why rather than assuming the product cannot do it.
+     */
+    const requested = textInput(context, 'format', 'md');
+    const known: ArtifactKind[] = ['docx', 'pdf', 'pptx', 'xlsx', 'csv', 'md', 'bib', 'ris'];
+    const kind = (known.includes(requested as ArtifactKind) ? requested : 'md') as ArtifactKind;
     const title = textInput(context, 'title', textInput(context, 'topic', 'Document'));
     const style = (textInput(context, 'citationStyle', 'apa') as StyleId) ?? 'apa';
 
@@ -458,7 +470,19 @@ export function registerAllHandlers(): void {
 
     let bytes: Uint8Array;
 
-    if (kind === 'pdf') {
+    if (kind === 'docx') {
+      /*
+       * Word was missing from this chain entirely: the condition fell through
+       * to Markdown, so a researcher asking for Word received a .md file and no
+       * indication that anything had been substituted.
+       *
+       * It matters more than the other formats for this product's users. Word
+       * embeds fonts from the reader's system, so Arabic renders correctly with
+       * nothing shipped — where PDF needs an embedded font file this does not
+       * carry.
+       */
+      bytes = await generateDocx(content);
+    } else if (kind === 'pdf') {
       bytes = (await generatePdf(content)).bytes;
     } else if (kind === 'pptx') {
       bytes = await generatePptx(
@@ -486,7 +510,11 @@ export function registerAllHandlers(): void {
       filename: `${title.slice(0, 60).replace(/[^\p{L}\p{N}\s-]/gu, '')}.${kind}`,
       bytes,
       projectId: (context.context.projectId as string) ?? null,
-      metadata: { citationStyle: style, taskId: context.taskId },
+      metadata: {
+        citationStyle: style,
+        taskId: context.taskId,
+        ...(kind !== requested ? { requestedFormat: requested, substituted: true } : {}),
+      },
       ...(prose ? { quality: { text: prose, references } } : {}),
     });
 
@@ -496,6 +524,8 @@ export function registerAllHandlers(): void {
         filename: artifact.filename,
         kind: artifact.kind,
         validationStatus: artifact.validationStatus,
+        /* Surfaced rather than hidden: the user asked for something else. */
+        ...(kind !== requested ? { requestedFormat: requested } : {}),
       },
       artifactIds: [artifact.id],
     };

@@ -38,6 +38,7 @@ import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repositor
 import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
+import JSZip from 'jszip';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import {
@@ -2694,6 +2695,199 @@ async function main() {
     check('verification completes', verify?.status, 'COMPLETED');
     check('reporting nothing to check rather than a problem', verify?.output?.status, 'not-applicable');
     check('and no network call was made', verify?.output?.checked, 0);
+  }
+
+  /* ------------------------------------------------ Word, end to end */
+
+  section('a Word request produces a Word file');
+
+  /*
+   * A researcher asked for their research as a Word file and received Markdown,
+   * with nothing saying a substitution had happened. Four links in the chain
+   * were broken:
+   *
+   *   1. the planner was never told how to request a format, so it passed none;
+   *   2. `document.generate` had no docx branch and fell through to Markdown;
+   *   3. the artifact route's schema rejected 'docx' outright;
+   *   4. and the silent fallback meant none of it was visible.
+   *
+   * These tests run the **real** handler — only the model call that writes the
+   * prose is replaced — and open the produced file as a zip to confirm it is a
+   * Word document with the research inside it.
+   */
+  const wordOwner = await newUser('word-owner');
+
+  registerAllHandlers();
+
+  registerHandler('document.write', async () => ({
+    output: {
+      /*
+       * Both citations have references. The first version of this cited [2]
+       * with only one reference supplied, and the quality check correctly
+       * failed the artifact — the test was wrong, not the engine, and the
+       * failure is a small demonstration that the check does its job.
+       */
+      text: 'أظهرت الدراسات أن التعلم الهجين يحسّن التحصيل [1].\n\nويشير الباحثون إلى أثر إيجابي على الدافعية [2].',
+      heading: 'مراجعة الأدبيات',
+      references: [
+        {
+          id: '1', kind: 'journal-article', title: 'التعلم الهجين في الجامعات',
+          authors: ['القضاة, عامر'], year: 2024, container: 'مجلة التربية',
+          doi: '10.1111/x', provenance: 'retrieved',
+        },
+        {
+          id: '2', kind: 'journal-article', title: 'الدافعية والتعلم الهجين',
+          authors: ['الزعبي, ليلى'], year: 2023, container: 'مجلة العلوم التربوية',
+          provenance: 'retrieved',
+        },
+      ],
+    },
+    modelCalls: 1,
+  }));
+
+  async function runWordTask(title: string, format: string) {
+    const task = await tasksRepo.create({
+      userId: wordOwner,
+      request: `write research and give me ${format}`,
+      locale: 'ar',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const rows = await tasksRepo.addSteps([
+      { taskId: task.id, ordinal: 0, capability: 'document.write', label: 'Write', status: 'PENDING', dependsOn: [], input: {} },
+      {
+        taskId: task.id, ordinal: 1, capability: 'document.generate', label: 'Export',
+        status: 'PENDING', dependsOn: [], input: { format, title, citationStyle: 'apa' },
+      },
+    ]);
+
+    await tasksRepo.updateDependencies(rows[1]?.id as string, [rows[0]?.id as string]);
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    return { task, generate: steps.find((step) => step.capability === 'document.generate') };
+  }
+
+  /* Arabic, which is the case that matters most for these users. */
+  {
+    const { task, generate } = await runWordTask('التعلم الهجين في التعليم العالي', 'docx');
+
+    check('the task completes', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+    check('the export step completes', generate?.status, 'COMPLETED');
+    check('producing one artifact', generate?.artifactIds.length, 1);
+
+    const { artifact, bytes, contentType } = await readArtifact(
+      generate?.artifactIds[0] as string,
+      wordOwner,
+    );
+
+    /* A Word file, not a Markdown file with a Word name. */
+    check('the artifact is a Word document', artifact.kind, 'docx');
+    assertTrue('with the Word content type', contentType.includes('wordprocessingml'));
+    assertTrue('and real content, not an empty shell', bytes.length > 5000);
+
+    /*
+     * Opened as a zip and read. A file that is the right size and the wrong
+     * bytes still fails to open in Word, which is where the researcher finds
+     * out.
+     */
+    const zip = await JSZip.loadAsync(bytes);
+    assertTrue('it is a valid OOXML package', zip.file('[Content_Types].xml') !== null);
+
+    const documentXml = await zip.file('word/document.xml')?.async('string');
+    assertTrue('with a document part', (documentXml?.length ?? 0) > 500);
+
+    /* The research is actually inside it. */
+    assertTrue('the title is in the document', documentXml?.includes('التعلم الهجين') ?? false);
+    assertTrue('the written prose is in it', documentXml?.includes('يحسّن التحصيل') ?? false);
+    assertTrue('and the reference', documentXml?.includes('القضاة') ?? false);
+
+    /*
+     * Right-to-left layout, applied from the content rather than a setting. An
+     * Arabic document laid out left to right is unreadable in a way a
+     * supervisor notices immediately.
+     */
+    assertTrue('Arabic gets right-to-left layout', documentXml?.includes('bidi') ?? false);
+
+    /* Persisted, owned, and validated. */
+    check('the artifact belongs to its user', artifact.userId, wordOwner);
+    check('is version one of its lineage', artifact.version, 1);
+    check('and passed validation', artifact.validationStatus, 'pass');
+    assertTrue('carrying its quality report', artifact.qualityReport !== null);
+    check('and its originating task', (artifact.metadata as Record<string, unknown>).taskId, task.id);
+
+    /* Another user cannot read it. */
+    await expectAppError('another user cannot download it', 'NOT_FOUND', () =>
+      readArtifact(artifact.id, chatOwner),
+    );
+  }
+
+  /* English, on the same path. */
+  {
+    registerHandler('document.write', async () => ({
+      output: {
+        text: 'Prior research found that hybrid learning improves outcomes [1].',
+        heading: 'Literature Review',
+        references: [
+          {
+            id: '1', kind: 'journal-article', title: 'Blended learning outcomes',
+            authors: ['Smith, J.'], year: 2023, container: 'Journal of Education',
+            provenance: 'retrieved',
+          },
+        ],
+      },
+      modelCalls: 1,
+    }));
+
+    const { generate } = await runWordTask('Hybrid Learning in Higher Education', 'docx');
+    const { artifact, bytes } = await readArtifact(generate?.artifactIds[0] as string, wordOwner);
+
+    check('an English request also produces Word', artifact.kind, 'docx');
+
+    const zip = await JSZip.loadAsync(bytes);
+    const documentXml = await zip.file('word/document.xml')?.async('string');
+
+    assertTrue('with its content', documentXml?.includes('hybrid learning improves') ?? false);
+    assertTrue('and its reference formatted', documentXml?.includes('Smith') ?? false);
+    /* Left to right, since the content is English. */
+    assertTrue('laid out left to right', !(documentXml?.includes('w:bidi w:val="true"') ?? false));
+  }
+
+  /*
+   * An unrecognised format still produces a file — a task must produce
+   * something — but the substitution is recorded rather than hidden. That
+   * silence is what let "give me Word" return Markdown unnoticed.
+   */
+  {
+    const { generate } = await runWordTask('Something', 'wordperfect');
+
+    check('an unknown format falls back', generate?.status, 'COMPLETED');
+    check('to Markdown', (generate?.output as Record<string, unknown>)?.kind, 'md');
+    check(
+      'recording what was actually asked for',
+      (generate?.output as Record<string, unknown>)?.requestedFormat,
+      'wordperfect',
+    );
+  }
+
+  /* Every format the planner may name must reach a generator. */
+  {
+    for (const format of ['docx', 'pdf', 'md', 'bib', 'ris'] as const) {
+      const { generate } = await runWordTask(`Test ${format}`, format);
+
+      check(`${format} produces an artifact`, generate?.artifactIds.length, 1);
+
+      const { artifact, bytes } = await readArtifact(
+        generate?.artifactIds[0] as string,
+        wordOwner,
+      );
+
+      check(`and it is a ${format} file`, artifact.kind, format);
+      assertTrue(`which is not empty`, bytes.length > 0);
+    }
   }
 
   /* --------------------------------------------------------------- cleanup */

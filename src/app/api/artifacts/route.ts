@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { generateCsv, generateMarkdown, generatePdf, generatePptx } from '@/server/generators/documents';
+import { generateDocx } from '@/server/generators/docx';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { formatReferenceList, type StyleId } from '@/server/citation/styles';
 import { ok, withApi } from '@/server/http/api';
@@ -48,7 +49,7 @@ const referenceSchema = z.object({
 });
 
 const schema = z.object({
-  kind: z.enum(['pdf', 'pptx', 'csv', 'md', 'bib', 'ris']),
+  kind: z.enum(['docx', 'pdf', 'pptx', 'csv', 'md', 'bib', 'ris']),
   filename: z.string().min(1).max(200),
   title: z.string().max(500).default(''),
   subtitle: z.string().max(500).optional(),
@@ -97,7 +98,9 @@ export const POST = withApi<Body>(
     let bytes: Uint8Array;
     let unsupported: string[] = [];
 
-    if (body.kind === 'pdf') {
+    if (body.kind === 'docx') {
+      bytes = await generateDocx(content);
+    } else if (body.kind === 'pdf') {
       const result = await generatePdf(content);
       bytes = result.bytes;
       unsupported = result.unsupportedText;

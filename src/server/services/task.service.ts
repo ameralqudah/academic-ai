@@ -117,6 +117,34 @@ export async function planAndRun(taskId: string): Promise<void> {
     onSuggestion: async (current, trigger, available) => {
       const steps = await tasksRepo.stepsOf(current.id);
 
+      /*
+       * A recommendation that names a capability is acted on directly.
+       *
+       * The handler already decided what would help and with what input; asking
+       * a model to re-derive that from a sentence costs a call, adds latency,
+       * and can produce a different answer than the one the handler stated.
+       * Only when nothing is recommended does the planner reason about it.
+       */
+      const direct = trigger.recommendedNextActions.filter(
+        (action) => !steps.some((step) => step.capability === action.capability && step.status === 'PENDING'),
+      );
+
+      if (direct.length > 0) {
+        await persistPlan(
+          current.id,
+          direct.slice(0, available).map((action, index) => ({
+            key: `replan_${index}`,
+            capability: action.capability,
+            label: action.reason,
+            dependsOn: [],
+            input: action.input ?? {},
+          })),
+          true,
+        );
+
+        return Math.min(direct.length, available);
+      }
+
       const added = await planAdditionalSteps({
         userId: current.userId,
         locale: (current.locale as 'ar' | 'en') ?? 'en',
@@ -127,7 +155,16 @@ export async function planAndRun(taskId: string): Promise<void> {
         remainingSteps: steps
           .filter((step) => step.status === 'PENDING')
           .map((step) => ({ key: step.id, capability: step.capability, label: step.label })),
-        trigger,
+        /*
+         * Described for the model only when there is nothing structured to act
+         * on — the fallback, not the normal path.
+         */
+        trigger: [
+          trigger.status === 'partial' ? 'The step completed only partially.' : '',
+          ...trigger.missingInformation,
+        ]
+          .filter(Boolean)
+          .join(' '),
         stepsAvailable: available,
       });
 

@@ -2239,6 +2239,26 @@ assertTrue(
   panelForReasons.includes("?? t('step.failed'"),
 );
 
+/*
+ * The same holds for a task that failed before any step existed.
+ *
+ * "Stopped by an unexpected error" is true and useless — it tells the
+ * researcher what they already knew. The provider's message names the cause,
+ * and the classifier will never recognise every phrasing one invents.
+ */
+assertTrue(
+  'a planning failure keeps the provider message',
+  serviceForReasons.includes('failureDetail'),
+);
+assertTrue(
+  'and the panel shows it when the cause is unclassified',
+  panelForReasons.includes('function taskFailureDetail'),
+);
+assertTrue(
+  'rather than the generic sentence',
+  panelForReasons.includes("task.errorReasonKey !== 'task.error.crashed'"),
+);
+
 /* Every reason reads as a sentence in both languages. */
 {
   type Messages = {

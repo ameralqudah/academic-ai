@@ -2217,6 +2217,28 @@ assertTrue(
   panelForReasons.includes('failedBeforePlanning'),
 );
 
+/*
+ * And an unrecognised throw still says something.
+ *
+ * A researcher saw "failed after 2 attempts" for a step whose error message
+ * named the cause exactly — the message was stored and nothing read it, because
+ * only the reason key was consulted and every unrecognised throw shares one
+ * key. The classifier will never match every phrasing a provider invents, so
+ * the handler's own message is the fallback rather than an attempt count.
+ */
+assertTrue(
+  'an unclassified failure shows the message it recorded',
+  panelForReasons.includes('function failureMessage'),
+);
+assertTrue(
+  'reading it from the stored observation',
+  panelForReasons.includes('observation?.errors?.[0]?.message'),
+);
+assertTrue(
+  'falling back to the attempt count only when there is no message',
+  panelForReasons.includes("?? t('step.failed'"),
+);
+
 /* Every reason reads as a sentence in both languages. */
 {
   type Messages = {

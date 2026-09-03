@@ -190,6 +190,14 @@ export async function failStep(
       status: willRetry ? 'PENDING' : 'FAILED',
       attempts,
       errorReasonKey: reasonKey,
+      /*
+       * The observation, which carries the handler's own message.
+       *
+       * A researcher saw "failed after 2 attempts" for a step whose thrown
+       * error said exactly what went wrong — the message was stored and the
+       * interface had no way to reach it, because only the reason key was
+       * consulted and unrecognised throws all share one key.
+       */
       ...(observation ? { output: { observation } } : {}),
       ...(willRetry ? { startedAt: null } : { finishedAt: new Date() }),
     })

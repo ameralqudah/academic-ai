@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { ok, withApi } from '@/server/http/api';
+import { ensureTasksReady } from '@/server/services/startup';
 import { answerTask, cancelTask, getTask, resumeTask } from '@/server/services/task.service';
 
 type Params = { id: string };
@@ -31,6 +32,13 @@ type ActionBody = z.infer<typeof actionSchema>;
 export const POST = withApi<ActionBody, Params>(
   { schema: actionSchema },
   async ({ user, params, body }) => {
+    /*
+     * Handlers registered and interrupted work resumed, once per process.
+     * A task started before registration would fail every step with "no
+     * handler", which reads as the work being lost.
+     */
+    await ensureTasksReady();
+
     if (body.action === 'answer') {
       await answerTask({ taskId: params.id, userId: user.id, answer: body.answer ?? '' });
     } else {

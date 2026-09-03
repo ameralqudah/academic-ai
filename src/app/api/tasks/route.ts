@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { ok, withApi } from '@/server/http/api';
+import { ensureTasksReady } from '@/server/services/startup';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { startTask } from '@/server/services/task.service';
 
@@ -24,6 +25,13 @@ type Body = z.infer<typeof schema>;
 export const POST = withApi<Body>(
   { schema, rateLimit: { max: 10, windowSeconds: 900, key: 'task.start' } },
   async ({ user, body }) => {
+    /*
+     * Handlers registered and interrupted work resumed, once per process.
+     * A task started before registration would fail every step with "no
+     * handler", which reads as the work being lost.
+     */
+    await ensureTasksReady();
+
     const task = await startTask({
       userId: user.id,
       request: body.request,

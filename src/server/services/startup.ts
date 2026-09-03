@@ -17,6 +17,8 @@
 
 import { logger } from '@/lib/logger';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
+import { registerAllHandlers } from '@/server/tasks/handlers';
+import { resumeInterrupted } from '@/server/services/task.service';
 
 let done = false;
 let running: Promise<void> | null = null;
@@ -54,4 +56,51 @@ export async function ensureStaleJobsFailed(): Promise<void> {
   })();
 
   return running;
+}
+
+
+/**
+ * Registers the task handlers and resumes work a restart interrupted.
+ *
+ * Two things that must happen once per process and cannot happen at import
+ * time: registration would run in every context that touches the module
+ * including the test suite, and resumption needs a database.
+ *
+ * Handlers are registered before resumption, in that order deliberately: a
+ * resumed task whose handlers are not yet registered fails every step with
+ * "no handler", which looks like the work being lost.
+ */
+let tasksReady = false;
+let readying: Promise<void> | null = null;
+
+export async function ensureTasksReady(): Promise<void> {
+  if (tasksReady) return;
+
+  if (readying) {
+    await readying;
+    return;
+  }
+
+  readying = (async () => {
+    try {
+      registerAllHandlers();
+
+      const resumed = await resumeInterrupted();
+      if (resumed > 0) logger.info('startup.tasksResumed', { count: resumed });
+
+      tasksReady = true;
+    } catch (error) {
+      /*
+       * A failure here must not take down the request that triggered it. The
+       * handlers are registered or they are not; a task that cannot run reports
+       * that per step, which is more useful than a five-hundred on an unrelated
+       * page load.
+       */
+      logger.error('startup.tasksFailed', { error: String(error) });
+    } finally {
+      readying = null;
+    }
+  })();
+
+  await readying;
 }

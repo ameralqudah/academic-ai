@@ -1532,7 +1532,14 @@
     "step": {
       "blocked": "not run, because a step it needed failed",
       "failed": "failed after {attempts} attempts",
-      "added": "added while running"
+      "added": "added while running",
+      "reason": {
+        "quota": "Stopped: you have reached your AI usage limit",
+        "credentials": "Stopped: a problem with the service key",
+        "network": "Stopped: the service could not be reached",
+        "timeout": "Stopped: it took longer than allowed",
+        "noHandler": "That capability is not available yet"
+      }
     },
     "capability": {
       "generalAnswer": "Answering",

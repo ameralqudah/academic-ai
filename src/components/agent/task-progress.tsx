@@ -368,7 +368,18 @@ function StepRow({ step }: { step: TaskStepView }) {
 
         {step.status === 'FAILED' && (
           <span className="text-[11px] text-danger">
-            {t('step.failed', { attempts: step.attempts })}
+            {/*
+              The reason, when one was recognised.
+
+              "failed after 1 attempt" could mean a quota, an outage, or a bug,
+              and gives the researcher nothing to act on. An exhausted allowance
+              is something they can fix; a network blip is worth retrying; a
+              crash is worth reporting. Saying which turns a dead end into a
+              next step.
+            */}
+            {step.errorReasonKey && step.errorReasonKey !== 'task.error.stepThrew'
+              ? t(`step.reason.${step.errorReasonKey.split('.').pop()}`)
+              : t('step.failed', { attempts: step.attempts })}
           </span>
         )}
 

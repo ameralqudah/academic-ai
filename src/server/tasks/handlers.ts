@@ -63,6 +63,23 @@ function producer(context: StepContext, capability: string): ProducerContext {
   };
 }
 
+/**
+ * A broader form of a query that returned too little.
+ *
+ * Drops the last significant word, which in both Arabic and English is usually
+ * the narrowing qualifier — "hybrid learning in Jordanian universities" becomes
+ * "hybrid learning in Jordanian". Crude, and better than repeating a query that
+ * already failed.
+ *
+ * Returns the original when there is nothing to drop, and the caller checks for
+ * that: a recommendation identical to what was just tried is filtered out
+ * before it reaches the planner.
+ */
+function broaden(query: string): string {
+  const words = query.trim().split(/\s+/);
+  return words.length > 2 ? words.slice(0, -1).join(' ') : query;
+}
+
 /** Reads a string from a step's input or the task context, in that order. */
 function textInput(context: StepContext, key: string, fallback = ''): string {
   const fromInput = context.input[key];
@@ -310,7 +327,19 @@ export function registerAllHandlers(): void {
           {
             capability: 'academic.search',
             reason: report.offTopic ? 'the query found the wrong corpus' : 'too few sources',
-            input: { topic: query },
+            /*
+             * A different query, or none.
+             *
+             * Recommending the same search with the same words would repeat the
+             * failure exactly — a second wrong corpus, a third recommendation,
+             * and a budget spent circling. When the corpus is wrong the phrasing
+             * is the problem, and only the researcher or the planner can supply
+             * a better one; when the result is merely thin, dropping the
+             * narrowest word is a correction this can make itself.
+             */
+            input: report.offTopic
+              ? {}
+              : { topic: broaden(query) },
           },
         ],
         confidence: report.offTopic ? 0.2 : 0.6,

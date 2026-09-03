@@ -2074,6 +2074,7 @@ assertTrue(
 );
 
 
+
 console.log('\ntask workspace UI');
 
 /*
@@ -3566,6 +3567,59 @@ const searchBlock = crossrefSource.slice(
   crossrefSource.indexOf('async search('),
   crossrefSource.indexOf('private toSource('),
 );
+
+console.log('\nsearch relevance and summary length');
+
+/*
+ * Three defects a real search exposed, all of them invisible in testing until
+ * someone ran the product.
+ *
+ * A user asked for studies on hybrid learning (التعلم الهجين) and got ten
+ * papers about learning disabilities. The search was working exactly as
+ * written: Crossref's plain `query` parameter matches any field with no regard
+ * for word order, so a two-word Arabic phrase matched anything containing the
+ * commoner of the two words.
+ */
+assertTrue(
+  'the academic search weights title and author',
+  crossrefSource.includes("url.searchParams.set('query.bibliographic'"),
+);
+assertTrue(
+  'rather than matching any field anywhere',
+  !crossrefSource.includes("url.searchParams.set('query', query.text)"),
+);
+
+/*
+ * And the summary of those sources stopped mid-sentence. Two thousand tokens
+ * is comfortable in English and truncated in Arabic, which costs roughly twice
+ * as many tokens per word — the same budget buys half the text.
+ */
+const aiForSummaries = await readFile('src/server/services/ai.service.ts', 'utf8');
+
+assertTrue(
+  'the summary budget scales with the language',
+  aiForSummaries.includes("input.locale === 'ar' ? 2400 : 1400"),
+);
+assertTrue(
+  'and with the number of sources',
+  aiForSummaries.includes('input.sources.length * 120'),
+);
+
+/*
+ * When it still truncates, it says so. A summary ending "...computer vision,
+ * and" with no full stop and no explanation is indistinguishable from a short
+ * one, and the reader cannot tell which they have.
+ */
+assertTrue(
+  'a truncated summary is marked rather than handed over silently',
+  aiForSummaries.includes('ai.summaryTruncated'),
+);
+assertTrue(
+  'in both languages',
+  aiForSummaries.includes('توقّف الملخّص عند حدّ الطول') &&
+    aiForSummaries.includes('stopped at its length limit'),
+);
+
 
 assertTrue(
   'the Crossref search does not send `select` — it made every request fail',

@@ -1031,7 +1031,21 @@ ${listed}`;
             : `Summarise what these sources say about: ${input.topic}`,
       },
     ],
-    maxTokens: 2000,
+    /*
+     * Sized for the language, not fixed.
+     *
+     * Two thousand tokens is a comfortable summary in English and a truncated
+     * one in Arabic: Arabic costs roughly twice as many tokens per word with
+     * most tokenisers, so the same budget buys half the text. A user watched a
+     * summary of ten sources stop mid-sentence for exactly this reason.
+     *
+     * Scaled by the number of sources as well, because summarising ten needs
+     * more room than summarising three.
+     */
+    maxTokens: Math.min(
+      6000,
+      (input.locale === 'ar' ? 2400 : 1400) + input.sources.length * 120,
+    ),
     temperature: 0.4,
   });
 
@@ -1049,6 +1063,30 @@ ${listed}`;
       task: 'summariseSources',
       length: result.text.length,
     });
+  }
+
+  /*
+   * A summary that stopped mid-sentence says so.
+   *
+   * A user watched one end after "...special education, higher education,
+   * distance learning, computer vision, and" — no full stop, no explanation,
+   * and no way to tell a truncated summary from a short one. The budget above
+   * is the fix; this is what happens when the budget is still not enough,
+   * which will occasionally be true for a long list in Arabic.
+   */
+  if (looksTruncated(result.text)) {
+    logger.warn('ai.summaryTruncated', {
+      sources: input.sources.length,
+      locale: input.locale,
+      length: result.text.length,
+    });
+
+    return (
+      stripTrailingArtefact(result.text) +
+      (input.locale === 'ar'
+        ? '\n\n_[توقّف الملخّص عند حدّ الطول. اطلب عددًا أقل من المصادر لملخّص كامل.]_'
+        : '\n\n_[The summary stopped at its length limit. Ask for fewer sources at a time.]_')
+    );
   }
 
   return stripTrailingArtefact(result.text);

@@ -107,7 +107,21 @@ export class CrossrefProvider implements KnowledgeProvider {
     const startedAt = Date.now();
 
     const url = new URL(BASE);
-    url.searchParams.set('query', query.text);
+
+    /*
+     * `query.bibliographic` rather than `query`.
+     *
+     * The plain `query` parameter searches every field with no regard for word
+     * order or proximity, so "التعلم الهجين" matched anything containing
+     * "التعلم" anywhere — a search for hybrid learning returned ten papers
+     * about learning disabilities, and the model correctly refused to write a
+     * review from them.
+     *
+     * `query.bibliographic` weights title, author and container, which is what
+     * a researcher naming a topic means: papers *about* this, not papers that
+     * happen to contain one of these words.
+     */
+    url.searchParams.set('query.bibliographic', query.text);
     url.searchParams.set('rows', String(Math.min(query.limit ?? 10, 50)));
 
     /*

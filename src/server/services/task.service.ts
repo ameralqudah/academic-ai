@@ -10,7 +10,7 @@ import { logger } from '@/lib/logger';
 import type { Task, TaskStep } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
-import { DEFAULT_BUDGET, type TaskBudget } from '@/server/tasks/capabilities';
+import { capabilityFor, DEFAULT_BUDGET, type TaskBudget } from '@/server/tasks/capabilities';
 import { runTask } from '@/server/tasks/executor';
 import { planAdditionalSteps, planTask } from '@/server/tasks/planner';
 
@@ -125,9 +125,32 @@ export async function planAndRun(taskId: string): Promise<void> {
        * and can produce a different answer than the one the handler stated.
        * Only when nothing is recommended does the planner reason about it.
        */
-      const direct = trigger.recommendedNextActions.filter(
-        (action) => !steps.some((step) => step.capability === action.capability && step.status === 'PENDING'),
-      );
+      const direct = trigger.recommendedNextActions.filter((action) => {
+        /* Already planned and waiting: adding it again would duplicate work. */
+        if (steps.some((step) => step.capability === action.capability && step.status === 'PENDING')) {
+          return false;
+        }
+
+        /*
+         * A retry with the same input will fail the same way.
+         *
+         * A search that found the wrong corpus recommended searching again, and
+         * the recommendation carried the query that had just failed — so the
+         * second search would return the same wrong corpus, recommend a third,
+         * and the task would spend its budget repeating one mistake.
+         *
+         * Requiring the input to differ is what makes a recommendation a
+         * correction rather than a repetition.
+         */
+        const identical = steps.some(
+          (step) =>
+            step.capability === action.capability &&
+            step.status === 'COMPLETED' &&
+            JSON.stringify(step.input) === JSON.stringify(action.input ?? {}),
+        );
+
+        return !identical;
+      });
 
       if (direct.length > 0) {
         await persistPlan(
@@ -135,7 +158,15 @@ export async function planAndRun(taskId: string): Promise<void> {
           direct.slice(0, available).map((action, index) => ({
             key: `replan_${index}`,
             capability: action.capability,
-            label: action.reason,
+            /*
+             * The capability's own label, not the recommendation's reason.
+             *
+             * Using the reason put "the query found the wrong corpus" in the
+             * step list as though it were work to be done — a sentence
+             * explaining *why* a step was added, displayed as the step itself.
+             * The reason belongs in the observation, which is where it is.
+             */
+            label: capabilityFor(action.capability)?.labelKey ?? action.capability,
             dependsOn: [],
             input: action.input ?? {},
           })),

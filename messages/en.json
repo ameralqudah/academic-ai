@@ -1375,7 +1375,8 @@
     },
     "label": {
       "workspace": "Workspace"
-    }
+    },
+    "workspace": "Workspace"
   },
   "roles": {
     "title": "Choose the variables",

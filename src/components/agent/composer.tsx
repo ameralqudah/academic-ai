@@ -37,7 +37,18 @@ import { cn } from '@/lib/cn';
  * follows, and the one people's hands already know.
  */
 
-export type ModeKey = 'chat' | 'academic' | 'webSearch' | 'deepResearch' | 'dataAnalysis';
+/*
+ * The mode list comes from the agent's configuration rather than being
+ * declared again here.
+ *
+ * It was declared twice, and adding a mode to one left the other behind — the
+ * same duplication that was removed from the PLS model schema for the same
+ * reason. A component that knows a different set of modes from the server is a
+ * component that renders one the server will reject.
+ */
+import type { ModeKey } from '@/agents/modes';
+
+export type { ModeKey };
 
 export interface ModeOption {
   key: ModeKey;

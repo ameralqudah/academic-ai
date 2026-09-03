@@ -2073,6 +2073,114 @@ assertTrue(
   aiForCleanup.includes("logger.warn('ai.possiblyTruncated'"),
 );
 
+
+console.log('\ntask workspace UI');
+
+/*
+ * Three phases were built before the user could reach any of them. This is the
+ * seam that closes: a mode in the composer, a panel in the thread, and the
+ * files at the end.
+ */
+const taskPanel = await readFile('src/components/agent/task-progress.tsx', 'utf8');
+const chatForTasks = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+
+assertTrue('a workspace mode exists', MODE_KEYS.includes('workspace' as never));
+check('and is available without a key', MODES.workspace.available, true);
+
+assertTrue('the chat can start a task', chatForTasks.includes("fetch('/api/tasks'"));
+assertTrue('and renders its progress', chatForTasks.includes('<TaskProgress'));
+
+/*
+ * Steps rather than a percentage. A thesis workflow runs for minutes, and
+ * "43%" cannot distinguish steady progress from a hang where a named step can.
+ */
+assertTrue('progress is shown as steps', taskPanel.includes('function StepRow'));
+assertTrue('with a count', taskPanel.includes('stepCount'));
+
+/*
+ * A failed step keeps its place with its reason, and what depended on it is
+ * shown as blocked. A researcher whose export never appeared needs to see why.
+ */
+assertTrue('a blocked step explains itself', taskPanel.includes('step.blocked'));
+assertTrue('and a failed one reports its attempts', taskPanel.includes('step.failed'));
+assertTrue(
+  'steps added while running are marked',
+  taskPanel.includes('step.added') && taskPanel.includes('step.dynamic'),
+);
+
+/* The question is asked inline, where the context already is. */
+assertTrue('a waiting task asks inline', taskPanel.includes('pendingQuestion'));
+assertTrue('with a way to answer', taskPanel.includes("action: 'answer'"));
+
+/* A pause at a limit is not a failure: the work is kept and can continue. */
+assertTrue('a paused task offers to continue', taskPanel.includes("action: 'resume'"));
+assertTrue('naming the limit reached', taskPanel.includes('pauseReasonKey'));
+
+/*
+ * Polling stops while nothing can change. Continuing every two seconds for an
+ * hour while a task waits for an answer is load nobody benefits from.
+ */
+assertTrue(
+  'polling stops when the task is waiting or paused',
+  taskPanel.includes("data.task.status === 'WAITING_FOR_INPUT' || data.task.status === 'PAUSED'"),
+);
+
+/* Files are reachable, with their verdict beside them. */
+assertTrue('generated files are downloadable', taskPanel.includes('/api/artifacts/'));
+assertTrue(
+  'and a failed quality check is visible where they are downloaded',
+  taskPanel.includes("validationStatus === 'fail'"),
+);
+
+/*
+ * The mode list is declared once. It was declared in the composer and again in
+ * the agent configuration, and adding a mode to one left the other behind —
+ * the same duplication removed from the PLS schema, for the same reason.
+ */
+const composerForModes = await readFile('src/components/agent/composer.tsx', 'utf8');
+assertTrue(
+  'the composer imports the mode list rather than redeclaring it',
+  composerForModes.includes("import type { ModeKey } from '@/agents/modes'"),
+);
+assertTrue(
+  'and does not define its own',
+  !composerForModes.includes("export type ModeKey = 'chat'"),
+);
+
+/* Every capability label and task state must exist in both languages. */
+{
+  const arTask = (JSON.parse(await readFile('messages/ar.json', 'utf8')) as Record<string, unknown>).task;
+  const enTask = (JSON.parse(await readFile('messages/en.json', 'utf8')) as Record<string, unknown>).task;
+
+  const flatten = (value: unknown, prefix = ''): string[] =>
+    value && typeof value === 'object'
+      ? Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+          typeof child === 'string' ? [`${prefix}${key}`] : flatten(child, `${prefix}${key}.`),
+        )
+      : [];
+
+  const arKeys = flatten(arTask).sort();
+  const enKeys = flatten(enTask).sort();
+
+  assertTrue('the task namespace has keys', arKeys.length > 25);
+  check('and both languages match', arKeys.join(), enKeys.join());
+
+  /* Every state the panel can display must have a label in both. */
+  for (const status of [
+    'QUEUED', 'PLANNING', 'RUNNING', 'PAUSED',
+    'WAITING_FOR_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED',
+  ]) {
+    assertTrue(`the ${status} state has an Arabic label`, arKeys.includes(`status.${status}`));
+    assertTrue(`and an English one`, enKeys.includes(`status.${status}`));
+  }
+
+  /* And every pause reason, or the user sees a raw key at the moment they need an explanation. */
+  for (const reason of ['maxSteps', 'maxDuration', 'maxModelCalls', 'maxRetries', 'deadlocked']) {
+    assertTrue(`the ${reason} pause is explained in Arabic`, arKeys.includes(`paused.${reason}`));
+    assertTrue(`and in English`, enKeys.includes(`paused.${reason}`));
+  }
+}
+
 console.log('\nfiles page');
 
 /*
@@ -2502,15 +2610,14 @@ assertTrue(
  * built and waiting on configuration, and it tells the person nothing they can
  * do about it.
  */
-const composerModes = await readFile('src/components/agent/composer.tsx', 'utf8');
 
 assertTrue(
   'an unavailable mode explains itself with the server\'s reason',
-  composerModes.includes('option.unavailableReason'),
+  composerForModes.includes('option.unavailableReason'),
 );
 assertTrue(
   'and the badge no longer claims the feature is merely coming',
-  !composerModes.includes("{t('soon')}"),
+  !composerForModes.includes("{t('soon')}"),
 );
 
 /* Every mode's reason key must resolve, or the tooltip shows a raw identifier. */

@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState } from 'react';
 
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
+import { TaskProgress } from '@/components/agent/task-progress';
 import { PlsModelBuilder, type PlsModelDraft } from '@/components/agent/pls-builder';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { MessageActions, MessageEditor } from '@/components/agent/message-actions';
@@ -405,6 +406,21 @@ export function AgentChat({
 
     if (mode === 'deepResearch') {
       void runDeepResearch(trimmed);
+      return;
+    }
+
+    /*
+     * A request that describes work rather than asking a question goes to the
+     * task system: it is planned, executed across steps, and produces files.
+     *
+     * Detected by the composer's mode rather than by guessing, because the
+     * difference between "explain PLS-SEM" and "run PLS-SEM on my data and
+     * write the results chapter" is a difference in what the person wants
+     * done, and getting it wrong either way is worse than asking them to
+     * choose once.
+     */
+    if (mode === 'workspace') {
+      void runWorkspaceTask(trimmed);
       return;
     }
 
@@ -1037,6 +1053,53 @@ export function AgentChat({
     }
   }
 
+  /**
+   * Starts a task and shows its progress in the thread.
+   *
+   * The task outlives the request, so what appears here is a panel that polls
+   * — the same arrangement deep research uses, with steps instead of a single
+   * stage because a task has many.
+   */
+  async function runWorkspaceTask(request: string) {
+    setError(null);
+    setDraft('');
+
+    const thread = conversationId ?? (await ensureConversation(request));
+
+    try {
+      const response = await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request,
+          locale,
+          projectId: projectId ?? undefined,
+          conversationId: thread ?? undefined,
+          datasetId: file?.datasetId ?? undefined,
+        }),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok || !json.ok) {
+        setError((locale === 'ar' ? json?.error?.messageAr : json?.error?.message) ?? te('generic'));
+        return;
+      }
+
+      setTurns((current) => [
+        ...current,
+        { id: crypto.randomUUID(), role: 'user', text: request },
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          results: [{ kind: 'task', runId: json.data.task.id as string, payload: null }],
+        },
+      ]);
+    } catch {
+      setError(te('network'));
+    }
+  }
+
   function stop() {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -1379,7 +1442,7 @@ function TurnView({
       )}
 
       {turn.results?.map((result, index) => (
-        <ResultView key={index} kind={result.kind} payload={result.payload} />
+        <ResultView key={index} kind={result.kind} payload={result.payload} runId={result.runId} />
       ))}
 
       {/*
@@ -1440,11 +1503,24 @@ function unavailableKey(reasonKey: string): string {
   return stripped;
 }
 
-function ResultView({ kind, payload }: { kind: string; payload: unknown }) {
+function ResultView({
+  kind,
+  payload,
+  runId,
+}: {
+  kind: string;
+  payload: unknown;
+  /* A task or job id, for results that keep polling after the turn is drawn. */
+  runId?: string;
+}) {
   const t = useTranslations('agent');
 
   if (kind === 'analysis' || kind === 'reliability') {
     return <ResultCard result={payload as StatisticalResult} />;
+  }
+
+  if (kind === 'task' && runId) {
+    return <TaskProgress taskId={runId} />;
   }
 
   if (kind === 'webSources') {

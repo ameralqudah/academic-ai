@@ -22,7 +22,13 @@ import type { IntentKey } from './registry';
 /*                                   Modes                                    */
 /* -------------------------------------------------------------------------- */
 
-export type ModeKey = 'chat' | 'academic' | 'webSearch' | 'deepResearch' | 'dataAnalysis';
+export type ModeKey =
+  | 'chat'
+  | 'academic'
+  | 'webSearch'
+  | 'deepResearch'
+  | 'dataAnalysis'
+  | 'workspace';
 
 export interface ModeConfig {
   key: ModeKey;
@@ -119,6 +125,24 @@ export const MODES: Record<ModeKey, ModeConfig> = {
     requiresDataset: false,
     intents: ['research.deep'],
     unavailableReason: 'mode.unavailable.webSearchKey',
+  },
+
+  /**
+   * Multi-step work: planned, executed across steps, producing files.
+   *
+   * A separate mode rather than something inferred, because the difference
+   * between "explain PLS-SEM" and "run PLS-SEM on my data and write the
+   * results chapter" is a difference in what the person wants done — and
+   * guessing wrong either way costs them more than choosing once.
+   *
+   * Always available: the planner and executor need no external key, and a
+   * task whose steps need one reports that per step.
+   */
+  workspace: {
+    key: 'workspace',
+    available: true,
+    requiresDataset: false,
+    intents: [],
   },
 };
 

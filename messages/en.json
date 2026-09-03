@@ -1372,6 +1372,9 @@
       "webSearch": "Web search is not available yet — we are connecting it to a real search provider.",
       "deepResearch": "Deep research is not available yet.",
       "webSearchKey": "Web search needs a search provider key, which has not been configured."
+    },
+    "label": {
+      "workspace": "Workspace"
     }
   },
   "roles": {
@@ -1496,6 +1499,58 @@
     },
     "error": {
       "deleteFailed": "The file could not be deleted. Please try again."
+    }
+  },
+  "task": {
+    "starting": "Starting…",
+    "planning": "Planning the steps…",
+    "stepCount": "{done} of {total}",
+    "cancel": "Cancel",
+    "continue": "Continue",
+    "send": "Send",
+    "answerPlaceholder": "Type your answer…",
+    "files": "Generated files",
+    "status": {
+      "QUEUED": "Queued",
+      "PLANNING": "Planning",
+      "RUNNING": "Running",
+      "PAUSED": "Paused",
+      "WAITING_FOR_INPUT": "Waiting for you",
+      "COMPLETED": "Completed",
+      "FAILED": "Failed",
+      "CANCELLED": "Cancelled"
+    },
+    "paused": {
+      "maxSteps": "The task reached its step limit.",
+      "maxDuration": "The task reached its time limit.",
+      "maxModelCalls": "The task reached its model-call limit.",
+      "maxRetries": "The task reached its retry limit.",
+      "deadlocked": "The task stopped: remaining steps cannot run.",
+      "generic": "The task is paused."
+    },
+    "step": {
+      "blocked": "not run, because a step it needed failed",
+      "failed": "failed after {attempts} attempts",
+      "added": "added while running"
+    },
+    "capability": {
+      "generalAnswer": "Answering",
+      "webSearch": "Web search",
+      "academicSearch": "Academic search",
+      "deepResearch": "Deep research",
+      "literatureReview": "Literature review",
+      "fileAnalyse": "Reading the file",
+      "statistics": "Statistical analysis",
+      "pls": "PLS-SEM",
+      "cbsem": "CB-SEM",
+      "survey": "Questionnaire",
+      "write": "Writing",
+      "generate": "Generating the file",
+      "quality": "Quality check",
+      "citations": "Verifying references"
+    },
+    "error": {
+      "answerFailed": "The answer could not be sent."
     }
   }
 }

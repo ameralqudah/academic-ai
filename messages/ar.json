@@ -1372,6 +1372,9 @@
       "webSearch": "البحث في الويب غير متاح بعد — نعمل على ربطه بمزوّد بحث حقيقي.",
       "deepResearch": "البحث المعمّق غير متاح بعد.",
       "webSearchKey": "البحث في الويب يحتاج مفتاح مزوّد بحث لم يُضَف بعد."
+    },
+    "label": {
+      "workspace": "مساحة العمل"
     }
   },
   "roles": {
@@ -1496,6 +1499,58 @@
     },
     "error": {
       "deleteFailed": "تعذّر حذف الملف. أعد المحاولة."
+    }
+  },
+  "task": {
+    "starting": "جارٍ البدء…",
+    "planning": "جارٍ تخطيط الخطوات…",
+    "stepCount": "{done} من {total}",
+    "cancel": "إلغاء",
+    "continue": "تابع",
+    "send": "إرسال",
+    "answerPlaceholder": "اكتب إجابتك…",
+    "files": "الملفات المُنتَجة",
+    "status": {
+      "QUEUED": "في الانتظار",
+      "PLANNING": "التخطيط",
+      "RUNNING": "قيد التنفيذ",
+      "PAUSED": "متوقّفة",
+      "WAITING_FOR_INPUT": "بانتظار ردّك",
+      "COMPLETED": "اكتملت",
+      "FAILED": "فشلت",
+      "CANCELLED": "أُلغيت"
+    },
+    "paused": {
+      "maxSteps": "بلغت المهمة حدّ الخطوات المسموح.",
+      "maxDuration": "بلغت المهمة حدّ الوقت المسموح.",
+      "maxModelCalls": "بلغت المهمة حدّ استدعاءات النموذج.",
+      "maxRetries": "بلغت المهمة حدّ إعادة المحاولات.",
+      "deadlocked": "توقّفت المهمة: خطوات متبقّية لا يمكن تشغيلها.",
+      "generic": "توقّفت المهمة."
+    },
+    "step": {
+      "blocked": "لم تُشغَّل لأن خطوة تعتمد عليها فشلت",
+      "failed": "فشلت بعد {attempts} محاولة",
+      "added": "أُضيفت أثناء التنفيذ"
+    },
+    "capability": {
+      "generalAnswer": "الإجابة",
+      "webSearch": "البحث في الويب",
+      "academicSearch": "البحث الأكاديمي",
+      "deepResearch": "البحث المعمّق",
+      "literatureReview": "مراجعة الأدبيات",
+      "fileAnalyse": "فحص الملف",
+      "statistics": "التحليل الإحصائي",
+      "pls": "تحليل PLS",
+      "cbsem": "تحليل CB-SEM",
+      "survey": "توليد الاستبانة",
+      "write": "الكتابة",
+      "generate": "إنتاج الملف",
+      "quality": "فحص الجودة",
+      "citations": "التحقّق من المراجع"
+    },
+    "error": {
+      "answerFailed": "تعذّر إرسال الإجابة."
     }
   }
 }

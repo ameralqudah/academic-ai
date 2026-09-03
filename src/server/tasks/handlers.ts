@@ -47,6 +47,7 @@ import {
   type ProducerContext,
 } from './contracts';
 import { registerHandler, type StepContext } from './executor';
+import { broaden, topicOf } from './query';
 
 /**
  * The producer identity every output carries.
@@ -61,23 +62,6 @@ function producer(context: StepContext, capability: string): ProducerContext {
     capability,
     projectId: context.projectId,
   };
-}
-
-/**
- * A broader form of a query that returned too little.
- *
- * Drops the last significant word, which in both Arabic and English is usually
- * the narrowing qualifier — "hybrid learning in Jordanian universities" becomes
- * "hybrid learning in Jordanian". Crude, and better than repeating a query that
- * already failed.
- *
- * Returns the original when there is nothing to drop, and the caller checks for
- * that: a recommendation identical to what was just tried is filtered out
- * before it reaches the planner.
- */
-function broaden(query: string): string {
-  const words = query.trim().split(/\s+/);
-  return words.length > 2 ? words.slice(0, -1).join(' ') : query;
 }
 
 /** Reads a string from a step's input or the task context, in that order. */
@@ -200,9 +184,12 @@ export function registerAllHandlers(): void {
   /* ------------------------------ web search ---------------------------- */
 
   registerHandler('web.search', async (context): Promise<Observation> => {
-    const query = textInput(context, 'query', textInput(context, 'topic'));
+    const raw = textInput(context, 'query', textInput(context, 'topic'));
 
-    if (!query) return needsInput('What should I search for?', 'query');
+    if (!raw) return needsInput('What should I search for?', 'query');
+
+    /* Stripped of the request's instructions; see `topicOf`. */
+    const query = topicOf(raw);
 
     const result = await searchWeb({
       userId: context.userId,

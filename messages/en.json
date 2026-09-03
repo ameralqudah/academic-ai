@@ -1538,7 +1538,8 @@
         "credentials": "Stopped: a problem with the service key",
         "network": "Stopped: the service could not be reached",
         "timeout": "Stopped: it took longer than allowed",
-        "noHandler": "That capability is not available yet"
+        "noHandler": "That capability is not available yet",
+        "crashed": "Stopped by an unexpected error"
       }
     },
     "capability": {
@@ -1559,6 +1560,7 @@
     },
     "error": {
       "answerFailed": "The answer could not be sent."
-    }
+    },
+    "failedBeforePlanning": "The task could not be planned"
   }
 }

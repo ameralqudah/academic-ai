@@ -115,7 +115,17 @@ Rules:
 
 6. Use at most 40 steps. If the request needs more, plan the first coherent portion and note the rest in summary.
 
-7. FILE FORMATS. When the researcher asks for a file, the document.generate step must carry the format they asked for in its input:
+7. SEARCH QUERIES ARE TOPICS, NOT REQUESTS.
+
+   The "topic" on a search step is what the researcher wants to read about, with everything else stripped: the format they asked for, the verbs of instruction, the politeness.
+
+   - "find studies on hybrid learning and give me a Word file" → topic: "hybrid learning"
+   - "اعمل بحث عن التعلم الهجين واعطيني ملف وورد" → topic: "التعلم الهجين"
+   - "I need recent research about AI in education, exported as PDF" → topic: "AI in education"
+
+   Passing the whole request is a real failure, not an inelegance: a search for "hybrid learning and give me a Word file" matched poetry collections on the word "Word", and the researcher received ten volumes of verse. The format belongs in the document.generate step; the topic belongs here.
+
+8. FILE FORMATS. When the researcher asks for a file, the document.generate step must carry the format they asked for in its input:
 
    {"capability": "document.generate", "input": {"format": "docx", "title": "..."}}
 
@@ -135,7 +145,7 @@ Rules:
 
    Omitting the format silently produces a Markdown file, which is not what someone asking for Word wanted and gives them no way to tell what happened.
 
-8. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
+9. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
 
   const result = await runCompletion({
     userId: input.userId,

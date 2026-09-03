@@ -345,7 +345,23 @@ export function TaskProgress({
     </div>
   );
 }
+/**
+ * The message a failed step recorded, when it left one.
+ *
+ * Truncated, because a provider error can run to several lines of stack and the
+ * step list is not the place for it — the first sentence is what identifies the
+ * problem.
+ */
+function failureMessage(step: TaskStepView): string | null {
+  const observation = (step.output as { observation?: { errors?: { message?: string }[] } } | null)
+    ?.observation;
 
+  const message = observation?.errors?.[0]?.message;
+  if (!message) return null;
+
+  const firstLine = message.split('\n')[0]?.trim() ?? '';
+  return firstLine.length > 0 ? firstLine.slice(0, 140) : null;
+}
 function StepRow({ step }: { step: TaskStepView }) {
   const t = useTranslations('task');
 
@@ -398,7 +414,7 @@ function StepRow({ step }: { step: TaskStepView }) {
             */}
             {step.errorReasonKey && step.errorReasonKey !== 'task.error.stepThrew'
               ? t(`step.reason.${step.errorReasonKey.split('.').pop()}`)
-              : t('step.failed', { attempts: step.attempts })}
+              : (failureMessage(step) ?? t('step.failed', { attempts: step.attempts }))}
           </span>
         )}
 

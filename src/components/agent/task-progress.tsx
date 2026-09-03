@@ -238,9 +238,14 @@ export function TaskProgress({
         <div className="flex items-start gap-2 rounded-lg border border-danger/40 bg-subtle p-3">
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
           <span className="text-sm text-ink">
-            {task.errorReasonKey
+            {task.errorReasonKey && task.errorReasonKey !== 'task.error.crashed'
               ? t(`step.reason.${task.errorReasonKey.split('.').pop()}`)
-              : t('failedBeforePlanning')}
+              : /*
+                 * The provider's own message when the cause was not recognised.
+                 * "Stopped by an unexpected error" is true and useless — it
+                 * tells the researcher what they already know.
+                 */
+                (taskFailureDetail(task) ?? t('failedBeforePlanning'))}
           </span>
         </div>
       )}
@@ -345,6 +350,21 @@ export function TaskProgress({
     </div>
   );
 }
+/**
+ * The message a failed task recorded before any step existed.
+ *
+ * Planning needs a model call, so a task can fail with nothing to show. The
+ * detail is kept in the task context rather than a dedicated column — a
+ * migration for one diagnostic string was not worth the deploy risk.
+ */
+function taskFailureDetail(task: TaskView): string | null {
+  const detail = (task.context as { failureDetail?: string } | undefined)?.failureDetail;
+  if (!detail) return null;
+
+  const firstLine = detail.split('\n')[0]?.trim() ?? '';
+  return firstLine.length > 0 ? firstLine.slice(0, 160) : null;
+}
+
 /**
  * The message a failed step recorded, when it left one.
  *

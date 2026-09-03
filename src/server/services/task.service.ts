@@ -87,8 +87,24 @@ export async function startTask(input: {
      * a missing key stops the task here — and both are things they can act on,
      * where a bare failure is a dead end.
      */
+    const detail = String(error);
+
+    /*
+     * The message as well as the key.
+     *
+     * The key alone produced "Stopped by an unexpected error" — true, useless,
+     * and exactly what the researcher already knew. The provider's own message
+     * names the cause, and the classifier will never recognise every phrasing
+     * one invents, so keeping the text is what makes an unclassified failure
+     * actionable.
+     *
+     * Stored in `context` rather than a new column: a migration for one
+     * diagnostic string is not worth the deploy risk, and the field already
+     * holds task-scoped facts.
+     */
     void tasksRepo.setStatus(task.id, 'FAILED', {
-      errorReasonKey: classifyFailure(String(error)),
+      errorReasonKey: classifyFailure(detail),
+      context: { ...task.context, failureDetail: detail.slice(0, 400) },
     });
   });
 

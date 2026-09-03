@@ -31,6 +31,7 @@ import { isPublicHost, isPublicUrl } from '@/server/knowledge/fetch-content';
 import { looksTruncated, stripTrailingArtefact } from '@/server/services/output-cleanup';
 import { SerperProvider } from '@/server/knowledge/providers/serper';
 import { deduplicate, normaliseUrl } from '@/server/research/dedupe';
+import { repairPrerequisites } from '@/server/tasks/prerequisites';
 import { containsMath } from '@/components/chat/markdown';
 import {
   buildDraftFromStructure,
@@ -2074,6 +2075,105 @@ assertTrue(
 );
 
 
+
+
+console.log('\nplan prerequisites');
+
+/*
+ * A researcher asked for a literature review and a Word file, and the task
+ * stopped at step one: "No sources were found to review. Should I broaden the
+ * search?" — for a search that had never run. The planner had produced review →
+ * write → export with no search in front of it.
+ *
+ * The prompt already said a review needs sources. Instructions the model may
+ * ignore are not a guarantee, so the plan is repaired structurally: a step
+ * whose input comes from another step cannot be first.
+ */
+
+/* The exact plan the researcher received. */
+{
+  const broken = [
+    { key: 'review', capability: 'literature.review', label: 'مراجعة الأدبيات', dependsOn: [], input: { topic: 'التعلم الهجين' } },
+    { key: 'write', capability: 'document.write', label: 'صياغة البحث', dependsOn: ['review'], input: {} },
+    { key: 'export', capability: 'document.generate', label: 'توليد ملف Word', dependsOn: ['write'], input: { format: 'docx' } },
+  ];
+
+  repairPrerequisites(broken);
+
+  check('a search is inserted before the review', broken[0]?.capability, 'academic.search');
+  check('and the plan grows by one step', broken.length, 4);
+
+  const review = broken.find((step) => step.capability === 'literature.review');
+  assertTrue('the review now depends on it', (review?.dependsOn.length ?? 0) > 0);
+
+  /* The topic travels, or the inserted search has nothing to search for. */
+  check('the inserted step carries the topic', broken[0]?.input.topic, 'التعلم الهجين');
+}
+
+/*
+ * A plan that already contains the producer must not gain a second one — the
+ * commonest case is a step that simply forgot to declare the dependency, and
+ * inserting a duplicate would search twice and cost the researcher a model call.
+ */
+{
+  const missingLink = [
+    { key: 'search', capability: 'academic.search', label: 'بحث', dependsOn: [], input: { topic: 'x' } },
+    { key: 'review', capability: 'literature.review', label: 'مراجعة', dependsOn: [], input: {} },
+  ];
+
+  repairPrerequisites(missingLink);
+
+  check('no step is inserted when one exists', missingLink.length, 2);
+  check('the existing producer is linked instead', missingLink[1]?.dependsOn.join(), 'search');
+}
+
+/* A correct plan is left alone. */
+{
+  const correct = [
+    { key: 'search', capability: 'academic.search', label: 'بحث', dependsOn: [], input: {} },
+    { key: 'review', capability: 'literature.review', label: 'مراجعة', dependsOn: ['search'], input: {} },
+  ];
+
+  repairPrerequisites(correct);
+
+  check('a sound plan is unchanged', correct.length, 2);
+  check('and its dependency untouched', correct[1]?.dependsOn.join(), 'search');
+}
+
+/* Deep research satisfies a review as well as an academic search does. */
+{
+  const viaDeep = [
+    { key: 'deep', capability: 'deep.research', label: 'بحث معمّق', dependsOn: [], input: {} },
+    { key: 'review', capability: 'literature.review', label: 'مراجعة', dependsOn: ['deep'], input: {} },
+  ];
+
+  repairPrerequisites(viaDeep);
+  check('deep research satisfies the prerequisite', viaDeep.length, 2);
+}
+
+/* Generating a file needs content; checking quality needs something to check. */
+{
+  const orphaned = [
+    { key: 'export', capability: 'document.generate', label: 'ملف', dependsOn: [], input: { format: 'docx' } },
+  ];
+
+  repairPrerequisites(orphaned);
+
+  assertTrue('a file with no content gains a writing step', orphaned.length > 1);
+  check('placed before it', orphaned[0]?.capability, 'document.write');
+}
+
+/* And the prompt still says so, since a planner that gets it right is cheaper. */
+const plannerSource = await readFile('src/server/tasks/planner.ts', 'utf8');
+
+assertTrue(
+  'the prompt states what each capability consumes',
+  plannerSource.includes('literature.review needs sources'),
+);
+assertTrue(
+  'and that a review is never one step',
+  plannerSource.includes('Never one'),
+);
 
 console.log('\ntask workspace UI');
 

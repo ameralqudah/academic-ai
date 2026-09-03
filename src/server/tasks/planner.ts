@@ -26,6 +26,7 @@ import { runCompletion } from '@/server/services/ai.service';
 import { resolveProvider } from '@/ai/registry';
 
 import { allCapabilities, capabilityFor, isKnownCapability } from './capabilities';
+import { repairPrerequisites } from './prerequisites';
 
 export interface PlannedStep {
   /** A key the plan uses to express dependencies before ids exist. */
@@ -101,7 +102,14 @@ Rules:
 
 3. ${hasDataset ? 'A dataset is attached, so capabilities needing one may be used.' : 'No dataset is attached. Do not plan steps that need one; if the request requires data analysis, list that in missingInformation.'}
 
-4. Never plan writing that presents findings before the step that produces them. A results chapter depends on the analysis, always.
+4. Never plan a step before the step that produces what it consumes. This is the most common planning error and it wastes the whole run:
+
+   - literature.review needs sources. It MUST depend on an academic.search or deep.research step. A review planned without one has no literature and will stop to ask.
+   - document.write that reports findings needs them. It depends on the analysis or the review.
+   - document.generate needs content. It depends on every writing step whose output belongs in the file.
+   - statistics.* need a dataset, not a search.
+
+   "Write a literature review about X" is therefore at least two steps: search, then review. Never one.
 
 5. missingInformation is for things you genuinely cannot infer and that would change the work — the topic when there is none, the analysis when several are possible. Do not ask about things you can reasonably assume; asking is a cost to the user.
 
@@ -330,6 +338,19 @@ function parsePlan(reply: string): Plan | null {
     step.dependsOn = step.dependsOn.filter((key) => seen.has(key) && key !== step.key);
   }
 
+  /*
+   * Missing prerequisites are repaired, not just discouraged.
+   *
+   * The prompt tells the planner that a literature review needs sources, and a
+   * planner produced one anyway — the task stopped at step one asking the
+   * researcher to broaden a search that had never run. Instructions the model
+   * may ignore are not a guarantee; this is.
+   *
+   * Declared as data so a new capability states what it consumes rather than
+   * the repair logic growing a branch per capability.
+   */
+  repairPrerequisites(steps);
+
   const cycle = findCycle(steps);
 
   if (cycle) {
@@ -433,3 +454,4 @@ export function blockedSteps<T extends { id: string; status: string; dependsOn: 
 }
 
 export { capabilityFor };
+export { repairPrerequisites } from './prerequisites';

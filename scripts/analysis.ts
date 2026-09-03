@@ -33,6 +33,7 @@ import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
 import { analyseClaims, findCitations } from '@/server/quality/claims';
 import { isWellFormedDoi, normaliseDoi } from '@/server/quality/sources';
 import { checkQuality } from '@/server/quality/engine';
+import { topicOf } from '@/server/tasks/query';
 import {
   filterByRelevance,
   looksOffTopic,
@@ -4497,6 +4498,72 @@ assertTrue(
 assertTrue(
   'and the search step carries the finding in its output',
   handlerSource.includes('offTopic: report.offTopic'),
+);
+
+
+
+console.log('\nsearch topic extraction');
+
+/*
+ * A researcher asked for "studies on hybrid learning and give me a Word file"
+ * and received ten poetry collections — matched on the word "Word", which in
+ * that sentence names a program and not a subject.
+ *
+ * The planner is told to pass a topic. It passed the whole request. Both layers
+ * exist now because either alone has been shown to fail.
+ */
+for (const [request, expected] of [
+  ['find studies on hybrid learning and give me a Word file', 'hybrid learning'],
+  ['اعمل بحث عن التعلم الهجين واعطيني ملف وورد', 'التعلم الهجين'],
+  ['I need recent research about AI in education, exported as PDF', 'AI in education'],
+  ['ابحث عن دراسات حديثة عن التعلم الهجين', 'التعلم الهجين'],
+  ['write a review of blended learning and export it to PDF', 'blended learning'],
+] as const) {
+  check(`"${request.slice(0, 40)}…" reduces to its topic`, topicOf(request), expected);
+}
+
+/* A bare topic passes through unchanged. */
+check('a topic with no request around it is untouched', topicOf('hybrid learning'), 'hybrid learning');
+check('and an Arabic one', topicOf('التعلم الهجين'), 'التعلم الهجين');
+
+/*
+ * Stripping that leaves nothing returns the original. An empty query searches
+ * for nothing, which is worse than searching for the whole sentence — that at
+ * least returns results the relevance filter can judge.
+ */
+check('stripping never produces an empty query', topicOf('find studies'), 'find studies');
+check('nor a fragment', topicOf('اعمل بحث'), 'اعمل بحث');
+
+/*
+ * The format words that caused the poetry are removed from the phrasings the
+ * planner actually produces. These are the ones observed in real requests; a
+ * phrasing outside them survives, which the comment on `topicOf` states — the
+ * relevance filter then judges the results, so an unstripped request degrades
+ * rather than failing.
+ */
+assertTrue(
+  'the word "Word" does not survive a real request',
+  !topicOf('find studies on hybrid learning and give me a Word file').includes('Word'),
+);
+assertTrue(
+  'nor "PDF"',
+  !topicOf('write a review of blended learning and export it to PDF').includes('PDF'),
+);
+assertTrue(
+  'nor the Arabic form',
+  !topicOf('اعمل بحث عن التعلم الهجين واعطيني ملف وورد').includes('وورد'),
+);
+
+/* And the planner is told the same rule, so the safety net is rarely needed. */
+const plannerForTopics = await readFile('src/server/tasks/planner.ts', 'utf8');
+
+assertTrue(
+  'the planner is told a topic is not a request',
+  plannerForTopics.includes('SEARCH QUERIES ARE TOPICS, NOT REQUESTS'),
+);
+assertTrue(
+  'with the failure that motivated it',
+  plannerForTopics.includes('matched poetry collections'),
 );
 
 

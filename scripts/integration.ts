@@ -43,6 +43,16 @@ import { PDFDocument } from 'pdf-lib';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import {
+  failed as observationFailed,
+  makeOutput,
+  needsInput,
+  partial,
+  readOutput,
+  succeeded,
+  type Observation,
+  type OutputReference,
+} from '@/server/tasks/contracts';
+import {
   capabilityFor,
   registerCapability,
   DEFAULT_BUDGET,
@@ -181,6 +191,16 @@ const projectInput = {
   problemArea:
     'ضعف مستوى التحصيل في مادة الرياضيات لدى طلبة المرحلة الأساسية رغم تطبيق استراتيجيات حديثة.',
 };
+
+
+/** A step's typed output of a given kind, for assertions. */
+function typedOutput<T>(
+  step: { output: Record<string, unknown> | null } | undefined,
+  type: string,
+): T | undefined {
+  const outputs = ((step?.output as { outputs?: OutputReference[] } | null)?.outputs ?? []);
+  return outputs.find((output) => output.type === type)?.data as T | undefined;
+}
 
 async function main() {
   /* ---------------------------------------------------------------- accounts */
@@ -2058,27 +2078,48 @@ async function main() {
     return { output: { answered: true, marker: input.marker ?? null }, modelCalls: 1 };
   });
 
-  registerHandler('web.search', async ({ input }) => {
+  registerHandler('web.search', async (context) => {
     executed.push('web.search');
 
     /* A handler that fails on demand, for the dependency and retry tests. */
-    if (input.fail) throw new Error('search failed');
+    if (context.input.fail) throw new Error('search failed');
 
-    return { output: { results: ['a', 'b'] }, modelCalls: 1 };
+    return succeeded([
+      makeOutput(
+        {
+          taskId: context.taskId,
+          stepId: context.stepId,
+          capability: 'web.search',
+          projectId: context.projectId,
+        },
+        'sources.v1',
+        { references: [{ id: 'a' }, { id: 'b' }], found: 2 },
+      ),
+    ]);
   });
 
-  registerHandler('document.write', async ({ dependencies }) => {
+  registerHandler('document.write', async (context) => {
     executed.push('document.write');
 
     /*
-     * Reads what the search produced. If a dependency did not run, this would
-     * see nothing — which is exactly what the blocking test asserts cannot
-     * happen.
+     * Reads by output type, not by producer name. If the search did not run
+     * this sees nothing — which is what the blocking test asserts cannot
+     * happen — and it works whichever capability supplied the sources.
      */
-    return {
-      output: { wrote: true, usedResults: (dependencies['web.search']?.results as string[])?.length ?? 0 },
-      modelCalls: 1,
-    };
+    const sources = readOutput<{ found?: number }>(context.available, 'sources.v1');
+
+    return succeeded([
+      makeOutput(
+        {
+          taskId: context.taskId,
+          stepId: context.stepId,
+          capability: 'document.write',
+          projectId: context.projectId,
+        },
+        'prose.v1',
+        { text: 'written', usedResults: sources?.found ?? 0 },
+      ),
+    ]);
   });
 
   registerHandler('quality.check', async () => {
@@ -2197,7 +2238,20 @@ async function main() {
      * The dependent step received the earlier step's structured output — not
      * the conversation, not the whole context, just what it needs.
      */
-    check('the dependent step read its dependency output', write?.output?.usedResults, 2);
+  /*
+   * Read from the typed output rather than the handler's raw return. The
+   * stored shape is now `{ outputs, observation, legacy }` — the payload lives
+   * inside a typed output, which is the whole point of the change.
+   */
+  {
+    const stored = ((write?.output as { outputs?: OutputReference[] } | null)?.outputs ?? [])[0];
+    check(
+      'the dependent step read its dependency output',
+      (stored?.data as { usedResults?: number })?.usedResults,
+      2,
+    );
+    check('through a typed reference', stored?.type, 'prose.v1');
+  }
   }
 
   /* ------------------- 5: completed steps are not rerun ------------------ */
@@ -2520,8 +2574,13 @@ async function main() {
      * report. No model is involved — the writing step is replaced — but every
      * other link is real.
      */
-    registerHandler('document.write', async () => ({
-      output: {
+    registerHandler('document.write', async (context) => {
+      /*
+       * Migrated to typed outputs. The payload is unchanged; what changed
+       * is that a consumer finds it by asking for `prose.v1` rather than
+       * by naming this capability.
+       */
+      const payload: Record<string, unknown> = {
         text: 'Prior research found that engagement rose after the intervention [1].',
         heading: 'Literature',
         references: [
@@ -2536,9 +2595,32 @@ async function main() {
             provenance: 'retrieved',
           },
         ],
-      },
-      modelCalls: 1,
-    }));
+      };
+
+      const producedBy = {
+        taskId: context.taskId,
+        stepId: context.stepId,
+        capability: 'document.write',
+        projectId: context.projectId,
+      };
+
+      const outputs: OutputReference[] = [
+        makeOutput(producedBy, 'prose.v1', {
+          text: payload.text,
+          heading: payload.heading,
+        }),
+      ];
+
+      if (Array.isArray(payload.references)) {
+        outputs.push(makeOutput(producedBy, 'sources.v1', { references: payload.references }));
+      }
+
+      if (payload.table) {
+        outputs.push(makeOutput(producedBy, 'analysis.v1', { label: 'Data', table: payload.table }));
+      }
+
+      return succeeded(outputs);
+    });
 
     const task = await tasksRepo.create({
       userId: wiredOwner,
@@ -2596,7 +2678,11 @@ async function main() {
     /* The quality check ran on the same prose and saw the same references. */
     const quality = steps.find((step) => step.capability === 'quality.check');
     check('the quality check ran', quality?.status, 'COMPLETED');
-    check('and found the claim supported', quality?.output?.unsupportedClaims, 0);
+    check(
+      'and found the claim supported',
+      typedOutput<{ unsupportedClaims?: number }>(quality, 'quality-report.v1')?.unsupportedClaims,
+      0,
+    );
   }
 
   {
@@ -2667,14 +2753,43 @@ async function main() {
      * mostly have none, and reporting that as a problem is the mistake the
      * quality engine was designed to avoid.
      */
-    registerHandler('document.write', async () => ({
-      output: {
+    registerHandler('document.write', async (context) => {
+      /*
+       * Migrated to typed outputs. The payload is unchanged; what changed
+       * is that a consumer finds it by asking for `prose.v1` rather than
+       * by naming this capability.
+       */
+      const payload: Record<string, unknown> = {
         text: 'The methodology follows established practice.',
         references: [
           { id: '1', kind: 'book', title: 'Research Design', authors: ['Creswell, J.'], year: 2014, publisher: 'SAGE', provenance: 'retrieved' },
         ],
-      },
-    }));
+      };
+
+      const producedBy = {
+        taskId: context.taskId,
+        stepId: context.stepId,
+        capability: 'document.write',
+        projectId: context.projectId,
+      };
+
+      const outputs: OutputReference[] = [
+        makeOutput(producedBy, 'prose.v1', {
+          text: payload.text,
+          heading: payload.heading,
+        }),
+      ];
+
+      if (Array.isArray(payload.references)) {
+        outputs.push(makeOutput(producedBy, 'sources.v1', { references: payload.references }));
+      }
+
+      if (payload.table) {
+        outputs.push(makeOutput(producedBy, 'analysis.v1', { label: 'Data', table: payload.table }));
+      }
+
+      return succeeded(outputs);
+    });
 
     const task = await tasksRepo.create({
       userId: wiredOwner, request: 'check citations', locale: 'en', status: 'QUEUED',
@@ -2694,8 +2809,10 @@ async function main() {
     const verify = steps.find((step) => step.capability === 'citation.verify');
 
     check('verification completes', verify?.status, 'COMPLETED');
-    check('reporting nothing to check rather than a problem', verify?.output?.status, 'not-applicable');
-    check('and no network call was made', verify?.output?.checked, 0);
+    const citations = typedOutput<{ status?: string; checked?: number }>(verify, 'citations.v1');
+
+    check('reporting nothing to check rather than a problem', citations?.status, 'not-applicable');
+    check('and no network call was made', citations?.checked, 0);
   }
 
   /* --------------------------------------- the universal artifact pipeline */
@@ -2717,8 +2834,13 @@ async function main() {
 
   registerAllHandlers();
 
-  registerHandler('document.write', async () => ({
-    output: {
+  registerHandler('document.write', async (context) => {
+      /*
+       * Migrated to typed outputs. The payload is unchanged; what changed
+       * is that a consumer finds it by asking for `prose.v1` rather than
+       * by naming this capability.
+       */
+      const payload: Record<string, unknown> = {
       text: 'أظهرت الدراسات أن التعلم الهجين يحسّن التحصيل الدراسي [1].',
       heading: 'مراجعة الأدبيات',
       table: { headers: ['المتغيّر', 'المتوسط'], rows: [['التحصيل', 4.2]] },
@@ -2729,9 +2851,32 @@ async function main() {
           doi: '10.1111/joms.12645', provenance: 'retrieved',
         },
       ],
-    },
-    modelCalls: 1,
-  }));
+      };
+
+      const producedBy = {
+        taskId: context.taskId,
+        stepId: context.stepId,
+        capability: 'document.write',
+        projectId: context.projectId,
+      };
+
+      const outputs: OutputReference[] = [
+        makeOutput(producedBy, 'prose.v1', {
+          text: payload.text,
+          heading: payload.heading,
+        }),
+      ];
+
+      if (Array.isArray(payload.references)) {
+        outputs.push(makeOutput(producedBy, 'sources.v1', { references: payload.references }));
+      }
+
+      if (payload.table) {
+        outputs.push(makeOutput(producedBy, 'analysis.v1', { label: 'Data', table: payload.table }));
+      }
+
+      return succeeded(outputs);
+    });
 
   async function generateAs(format: string, title = 'التعلم الهجين') {
     const task = await tasksRepo.create({
@@ -2887,8 +3032,13 @@ async function main() {
 
   /* English, on the same path. */
   {
-    registerHandler('document.write', async () => ({
-      output: {
+    registerHandler('document.write', async (context) => {
+      /*
+       * Migrated to typed outputs. The payload is unchanged; what changed
+       * is that a consumer finds it by asking for `prose.v1` rather than
+       * by naming this capability.
+       */
+      const payload: Record<string, unknown> = {
         text: 'Prior research found that hybrid learning improves outcomes [1].',
         heading: 'Literature Review',
         references: [
@@ -2898,9 +3048,32 @@ async function main() {
             doi: '10.1016/j.chb.2019.04.011', provenance: 'retrieved',
           },
         ],
-      },
-      modelCalls: 1,
-    }));
+      };
+
+      const producedBy = {
+        taskId: context.taskId,
+        stepId: context.stepId,
+        capability: 'document.write',
+        projectId: context.projectId,
+      };
+
+      const outputs: OutputReference[] = [
+        makeOutput(producedBy, 'prose.v1', {
+          text: payload.text,
+          heading: payload.heading,
+        }),
+      ];
+
+      if (Array.isArray(payload.references)) {
+        outputs.push(makeOutput(producedBy, 'sources.v1', { references: payload.references }));
+      }
+
+      if (payload.table) {
+        outputs.push(makeOutput(producedBy, 'analysis.v1', { label: 'Data', table: payload.table }));
+      }
+
+      return succeeded(outputs);
+    });
 
     const { generate } = await generateAs('docx', 'Hybrid Learning');
     const { artifact, bytes } = await readArtifact(
@@ -2940,12 +3113,14 @@ async function main() {
   {
     const { generate } = await generateAs('wordperfect');
 
-    check('an unknown format falls back to Markdown', (generate?.output as Record<string, unknown>)?.kind, 'md');
-    check(
-      'recording what was requested',
-      (generate?.output as Record<string, unknown>)?.requestedFormat,
-      'wordperfect',
+    /* Read from the typed artifact output rather than the handler's raw shape. */
+    const produced = typedOutput<{ kind?: string; requestedFormat?: string }>(
+      generate,
+      'artifact.v1',
     );
+
+    check('an unknown format falls back to Markdown', produced?.kind, 'md');
+    check('recording what was requested', produced?.requestedFormat, 'wordperfect');
   }
 
   /*
@@ -2968,6 +3143,237 @@ async function main() {
       readArtifact(generate?.artifactIds[0] as string, chatOwner),
     );
   }
+
+  /* ------------------------------------- typed outputs and observations */
+
+  section('capabilities exchange typed outputs, not capability names');
+
+  /*
+   * The contract this phase replaced: `dependencies['academic.search']`.
+   *
+   * A consumer that named its producer got `undefined` when that capability had
+   * not run, and wrote from nothing with nothing thrown — a literature review
+   * assembled from no literature, which is the worst thing this product can
+   * produce because it looks like work.
+   */
+  const flowOwner = await newUser('flow-owner');
+
+  async function runFlow(
+    plan: { key: string; capability: string; dependsOn?: string[]; input?: Record<string, unknown> }[],
+  ) {
+    const task = await tasksRepo.create({
+      userId: flowOwner,
+      request: 'flow test',
+      locale: 'en',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const rows = await tasksRepo.addSteps(
+      plan.map((step, index) => ({
+        taskId: task.id,
+        ordinal: index,
+        capability: step.capability,
+        label: step.key,
+        status: 'PENDING',
+        dependsOn: [],
+        input: step.input ?? {},
+      })),
+    );
+
+    const byKey = new Map(plan.map((step, index) => [step.key, rows[index]?.id as string]));
+
+    for (const [index, step] of plan.entries()) {
+      const ids = (step.dependsOn ?? [])
+        .map((key) => byKey.get(key))
+        .filter((id): id is string => Boolean(id));
+
+      if (ids.length > 0) await tasksRepo.updateDependencies(rows[index]?.id as string, ids);
+    }
+
+    await runTask(task.id);
+    return { task, steps: await tasksRepo.stepsOf(task.id) };
+  }
+
+  function outputsOf(step: { output: Record<string, unknown> | null } | undefined) {
+    return ((step?.output as { outputs?: OutputReference[] } | null)?.outputs ?? []) as OutputReference[];
+  }
+
+  const stamp = (context: { taskId: string; stepId: string; projectId: string | null }, capability: string) => ({
+    taskId: context.taskId,
+    stepId: context.stepId,
+    capability,
+    projectId: context.projectId,
+  });
+
+  /* A search produces sources.v1; a review consumes it by type. */
+  {
+    registerHandler('academic.search', async (context) =>
+      succeeded([
+        makeOutput(stamp(context, 'academic.search'), 'sources.v1', {
+          references: [{ id: '1', kind: 'journal-article', title: 'A study', year: 2024, provenance: 'retrieved' }],
+          found: 1,
+        }),
+      ]),
+    );
+
+    registerHandler('literature.review', async (context) => {
+      const sources = readOutput<{ references: unknown[] }>(context.available, 'sources.v1');
+      if (!sources) return needsInput('No sources to review', 'sources');
+
+      return succeeded([
+        makeOutput(stamp(context, 'literature.review'), 'literature.v1', {
+          text: 'A review of one source [1].',
+          reviewed: sources.references.length,
+        }),
+      ]);
+    });
+
+    const { steps } = await runFlow([
+      { key: 'search', capability: 'academic.search' },
+      { key: 'review', capability: 'literature.review', dependsOn: ['search'] },
+    ]);
+
+    const search = steps.find((step) => step.capability === 'academic.search');
+    const review = steps.find((step) => step.capability === 'literature.review');
+
+    check('the search produces a typed output', outputsOf(search)[0]?.type, 'sources.v1');
+    check('with its schema version', outputsOf(search)[0]?.schemaVersion, 1);
+    check('the review completes', review?.status, 'COMPLETED');
+    check('having read the sources', (outputsOf(review)[0]?.data as { reviewed: number }).reviewed, 1);
+    check('and produced its own type', outputsOf(review)[0]?.type, 'literature.v1');
+  }
+
+  /*
+   * The assertion that justifies the phase: the producer changes and the
+   * consumer is untouched. `dependencies['academic.search']` made this
+   * impossible.
+   */
+  {
+    registerHandler('deep.research', async (context) =>
+      succeeded([
+        makeOutput(stamp(context, 'deep.research'), 'sources.v1', {
+          references: [
+            { id: '1', kind: 'journal-article', title: 'From deep research', year: 2023, provenance: 'retrieved' },
+            { id: '2', kind: 'website', title: 'A page', provenance: 'retrieved' },
+          ],
+          found: 2,
+        }),
+      ]),
+    );
+
+    const { steps } = await runFlow([
+      { key: 'deep', capability: 'deep.research' },
+      { key: 'review', capability: 'literature.review', dependsOn: ['deep'] },
+    ]);
+
+    const review = steps.find((step) => step.capability === 'literature.review');
+
+    check('a different producer feeds the same consumer', review?.status, 'COMPLETED');
+    check('reading what it supplied', (outputsOf(review)[0]?.data as { reviewed: number }).reviewed, 2);
+  }
+
+  /* Provenance, which is what makes a claim traceable to the step that made it. */
+  {
+    const { task, steps } = await runFlow([
+      { key: 'search', capability: 'academic.search' },
+      { key: 'review', capability: 'literature.review', dependsOn: ['search'] },
+    ]);
+
+    const searchOutput = outputsOf(steps.find((step) => step.capability === 'academic.search'))[0];
+    const reviewOutput = outputsOf(steps.find((step) => step.capability === 'literature.review'))[0];
+
+    check('an output names its capability', searchOutput?.producedBy.capability, 'academic.search');
+    check('and its task', searchOutput?.producedBy.taskId, task.id);
+    assertTrue('and its step', Boolean(searchOutput?.producedBy.stepId));
+    assertTrue('with a timestamp', Boolean(searchOutput?.createdAt));
+    assertTrue(
+      'and two steps are distinguishable',
+      searchOutput?.producedBy.stepId !== reviewOutput?.producedBy.stepId,
+    );
+  }
+
+  /* needs-input stops the task and asks. */
+  {
+    registerHandler('survey.generate', async () =>
+      needsInput('Which constructs should the questionnaire measure?', 'constructs'),
+    );
+
+    const { task } = await runFlow([{ key: 'survey', capability: 'survey.generate' }]);
+    const current = await tasksRepo.findAny(task.id);
+
+    check('needs-input stops the task', current?.status, 'WAITING_FOR_INPUT');
+    assertTrue('with the question', (current?.pendingQuestion ?? '').includes('constructs'));
+  }
+
+  /* A failure is structured, so a replanner can act on the code. */
+  {
+    registerHandler('quality.check', async () =>
+      observationFailed([
+        { code: 'quality.engineUnavailable', severity: 'error', message: 'could not run' },
+      ]),
+    );
+
+    const { task, steps } = await runFlow([{ key: 'check', capability: 'quality.check' }]);
+
+    check('the step is marked failed', steps[0]?.status, 'FAILED');
+    check('and the task reports it', (await tasksRepo.findAny(task.id))?.status, 'FAILED');
+
+    const observation = (steps[0]?.output as { observation?: Observation } | null)?.observation;
+    check('with a machine-readable code', observation?.errors[0]?.code, 'quality.engineUnavailable');
+  }
+
+  /*
+   * Partial is a completion, not a failure: the step did some of its job, and
+   * treating it as failure would discard what it did find.
+   */
+  {
+    registerHandler('academic.search', async (context) =>
+      partial(
+        [makeOutput(stamp(context, 'academic.search'), 'sources.v1', { references: [], found: 0 })],
+        ['on-topic sources'],
+        {
+          warnings: [{ code: 'search.offTopic', severity: 'warning', message: 'wrong corpus' }],
+          confidence: 0.2,
+          recommendedNextActions: [
+            { capability: 'academic.search', reason: 'rephrase', input: { topic: 'x' } },
+          ],
+        },
+      ),
+    );
+
+    const { steps } = await runFlow([{ key: 'search', capability: 'academic.search' }]);
+
+    check('a partial step completes', steps[0]?.status, 'COMPLETED');
+
+    const observation = (steps[0]?.output as { observation?: Observation } | null)?.observation;
+    check('reporting partial status', observation?.status, 'partial');
+    check('naming what is missing', observation?.missingInformation.join(), 'on-topic sources');
+    check(
+      'with a recommendation the planner can act on',
+      observation?.recommendedNextActions[0]?.capability,
+      'academic.search',
+    );
+    assertTrue('and lowered confidence', (observation?.confidence ?? 1) < 0.5);
+  }
+
+  /* Quality and artifacts produce their own types. */
+  {
+    registerHandler('quality.check', async (context) =>
+      succeeded([
+        makeOutput(stamp(context, 'quality.check'), 'quality-report.v1', {
+          status: 'pass',
+          errors: 0,
+        }),
+      ]),
+    );
+
+    const { steps } = await runFlow([{ key: 'check', capability: 'quality.check' }]);
+    check('quality produces a report type', outputsOf(steps[0])[0]?.type, 'quality-report.v1');
+  }
+
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

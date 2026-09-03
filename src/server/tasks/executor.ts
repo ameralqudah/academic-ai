@@ -28,6 +28,15 @@ import {
   type LimitReason,
   type TaskBudget,
 } from './capabilities';
+import {
+  failed,
+  makeOutput,
+  needsInput,
+  succeeded,
+  type Observation,
+  type OutputReference,
+  type ProducerContext,
+} from './contracts';
 import { blockedSteps, readySteps } from './planner';
 
 /**
@@ -40,11 +49,33 @@ import { blockedSteps, readySteps } from './planner';
  */
 export interface StepContext {
   taskId: string;
+  stepId: string;
   userId: string;
+  projectId: string | null;
   locale: 'ar' | 'en';
   /** The step's own input, as planned. */
   input: Record<string, unknown>;
-  /** Outputs of the steps this one depends on, keyed by capability. */
+
+  /**
+   * Typed outputs from every completed step, addressable by data type.
+   *
+   * The contract that replaces `dependencies['academic.search']`. A handler
+   * asks for `sources.v1` and does not name the producer — so deep research can
+   * feed a literature review that an academic search fed yesterday, and
+   * renaming a capability breaks nothing.
+   */
+  available: OutputReference[];
+
+  /**
+   * The old keyed-by-capability view.
+   *
+   * Kept while handlers migrate, and deprecated: it is the mechanism whose
+   * silent failure mode this phase exists to remove. A consumer reading a
+   * capability that did not run gets `undefined` and writes from nothing,
+   * with nothing thrown.
+   *
+   * @deprecated Read from `available` by type.
+   */
   dependencies: Record<string, Record<string, unknown>>;
   /** Task-level facts: the dataset, the project, answers the user gave. */
   context: Record<string, unknown>;
@@ -58,18 +89,72 @@ export interface StepResult {
   /** Model calls made, counted against the budget. */
   modelCalls?: number;
   /**
-   * Something the step discovered that may need more work.
+   * @deprecated Return an `Observation` with `recommendedNextActions`.
    *
-   * The hook for adaptive planning: a search that found a contradiction, an
-   * analysis that revealed an unexpected variable. The executor passes it to
-   * the planner, which decides whether to add steps.
+   * Free text the planner could only hand to a model. A structured
+   * recommendation names the capability that would help, which the planner can
+   * act on without a model call.
    */
   suggestsMoreWork?: string;
-  /** Something only the user can supply. Pauses the task. */
+  /** @deprecated Return an `Observation` with status `needs-input`. */
   needsUserInput?: string;
 }
 
-export type StepHandler = (context: StepContext) => Promise<StepResult>;
+/**
+ * A handler returns either shape.
+ *
+ * Both are supported during migration and normalised to an `Observation`
+ * immediately, so everything downstream reasons about one contract. Migrating
+ * all twelve handlers in one change would mean twelve untested rewrites
+ * landing together.
+ */
+export type StepHandler = (context: StepContext) => Promise<StepResult | Observation>;
+
+/** Whether a handler returned the canonical contract. */
+function isObservation(value: StepResult | Observation): value is Observation {
+  return 'status' in value && 'outputs' in value;
+}
+
+/**
+ * Wraps a legacy result in an observation.
+ *
+ * The old shape carries less information — no typed outputs, no evidence, no
+ * structured findings — so the wrapper produces a `generic.v1` output and marks
+ * what it cannot know. That loss is the argument for migrating handlers rather
+ * than leaving them wrapped indefinitely.
+ */
+function normalise(
+  result: StepResult | Observation,
+  producer: ProducerContext,
+): Observation {
+  if (isObservation(result)) return result;
+
+  if (result.needsUserInput) {
+    return needsInput(result.needsUserInput, 'answer', { modelCalls: result.modelCalls });
+  }
+
+  const outputs = [makeOutput(producer, 'generic.v1', result.output)];
+
+  return succeeded(outputs, {
+    modelCalls: result.modelCalls,
+    artifacts: (result.artifactIds ?? []).map((id) => ({
+      id,
+      kind: 'unknown',
+      filename: '',
+      validationStatus: 'unchecked',
+    })),
+    ...(result.suggestsMoreWork
+      ? {
+          /*
+           * Free text becomes a recommendation with no capability named, which
+           * is the most a string can express — and is why the structured form
+           * matters.
+           */
+          recommendedNextActions: [{ capability: '', reason: result.suggestsMoreWork }],
+        }
+      : {}),
+  });
+}
 
 /*
  * Handlers are registered rather than imported, so this file names no
@@ -262,6 +347,7 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
         result.reasonKey,
         capability.retryable,
         capability.maxAttempts,
+        result.observation as unknown as Record<string, unknown>,
       );
 
       await tasksRepo.recordSpend(taskId, { retries: willRetry ? 1 : 0 });
@@ -276,19 +362,89 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
       continue;
     }
 
-    await tasksRepo.completeStep(claimed.id, result.output, result.artifactIds ?? []);
-    await tasksRepo.recordSpend(taskId, { modelCalls: result.modelCalls ?? 0 });
+    const observation = result.observation;
 
-    /* Adaptive planning: the step found something the plan did not anticipate. */
-    if (result.suggestsMoreWork && options.onSuggestion) {
-      const available = budget.maxSteps - steps.length;
+    /*
+     * The typed outputs are stored alongside the legacy shape.
+     *
+     * `outputs` is what a migrated consumer reads by type; `legacy` is what an
+     * unmigrated one reads by capability name. Keeping both means producers and
+     * consumers can migrate independently rather than in one change.
+     */
+    await tasksRepo.completeStep(
+      claimed.id,
+      {
+        outputs: observation.outputs as unknown as Record<string, unknown>[],
+        legacy: legacyShape(observation),
+        /*
+         * The whole observation, not a selection of its fields.
+         *
+         * The first version stored status, confidence, warnings and evidence
+         * individually — and a replanner reading a resumed task then had no
+         * `recommendedNextActions` and no `missingInformation`, which are
+         * exactly the fields it reasons over. Storing the record entire means a
+         * task resumed after a restart can be replanned as well as one that
+         * never stopped.
+         */
+        observation: observation as unknown as Record<string, unknown>,
+        status: observation.status,
+        confidence: observation.confidence,
+      } as unknown as Record<string, unknown>,
+      observation.artifacts.map((artifact) => artifact.id),
+    );
 
-      if (available > 0) {
-        const added = await options.onSuggestion(current, result.suggestsMoreWork, available);
-        if (added > 0) logger.info('task.stepsAdded', { taskId, added });
+    await tasksRepo.recordSpend(taskId, { modelCalls: observation.modelCalls ?? 0 });
+
+    /*
+     * Replanning driven by structure rather than prose.
+     *
+     * Three signals now reach the planner where one string did: a partial
+     * result with named gaps, an explicit recommendation, or low confidence.
+     * The planner can act on the first two without a model call.
+     */
+    const wantsMore =
+      observation.status === 'partial' ||
+      observation.recommendedNextActions.length > 0 ||
+      observation.missingInformation.length > 0;
+
+    if (wantsMore && options.onSuggestion) {
+      const room = budget.maxSteps - steps.length;
+
+      if (room > 0) {
+        const trigger = [
+          observation.status === 'partial' ? 'The step completed only partially.' : '',
+          ...observation.missingInformation,
+          ...observation.recommendedNextActions.map(
+            (action) => `${action.capability || 'unknown'}: ${action.reason}`,
+          ),
+        ]
+          .filter(Boolean)
+          .join(' ');
+
+        const added = await options.onSuggestion(current, trigger, room);
+        if (added > 0) logger.info('task.stepsAdded', { taskId, added, from: observation.status });
       }
     }
   }
+}
+
+/**
+ * The observation as the old output shape.
+ *
+ * Written so an unmigrated consumer reading `dependencies['academic.search']`
+ * finds what it always found. Removed once every handler reads by type — at
+ * which point the deprecated field goes with it.
+ */
+function legacyShape(observation: Observation): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+
+  for (const output of observation.outputs) {
+    if (output.data && typeof output.data === 'object') {
+      Object.assign(merged, output.data);
+    }
+  }
+
+  return merged;
 }
 
 async function pauseAtLimit(taskId: string, limit: LimitReason): Promise<void> {
@@ -297,9 +453,9 @@ async function pauseAtLimit(taskId: string, limit: LimitReason): Promise<void> {
 }
 
 type Executed =
-  | { kind: 'completed'; output: Record<string, unknown>; artifactIds?: string[]; modelCalls?: number; suggestsMoreWork?: string }
-  | { kind: 'failed'; reasonKey: string }
-  | { kind: 'needs-input'; question: string };
+  | { kind: 'completed'; observation: Observation }
+  | { kind: 'failed'; reasonKey: string; observation: Observation }
+  | { kind: 'needs-input'; question: string; observation: Observation };
 
 /**
  * Runs one step under its capability's timeout.
@@ -316,50 +472,124 @@ async function executeStep(
   timeoutMs: number,
 ): Promise<Executed> {
   const handler = handlers.get(step.capability);
-  if (!handler) return { kind: 'failed', reasonKey: 'task.error.noHandler' };
+  if (!handler) {
+    return {
+      kind: 'failed',
+      reasonKey: 'task.error.noHandler',
+      observation: failed([
+        {
+          code: 'task.error.noHandler',
+          severity: 'error',
+          message: `No handler registered for ${step.capability}`,
+          reference: step.capability,
+        },
+      ]),
+    };
+  }
 
   /*
-   * Dependency outputs, keyed by capability rather than by id. A step that
-   * needs the search results asks for `dependencies['academic.search']` and
-   * does not need to know which step produced them.
+   * Every completed step's typed outputs, not just this step's dependencies.
+   *
+   * A consumer asks for `sources.v1` and gets whatever produced it — which is
+   * the substitution the old contract forbade. Scoping to declared dependencies
+   * would reintroduce the coupling by another route: the step would still have
+   * to know which producer to depend on.
+   */
+  const available: OutputReference[] = [];
+
+  for (const entry of allSteps) {
+    if (entry.status !== 'COMPLETED') continue;
+
+    const stored = (entry.output as { outputs?: OutputReference[] } | null)?.outputs;
+    if (Array.isArray(stored)) available.push(...stored);
+  }
+
+  /*
+   * The legacy view, built only from declared dependencies as it always was.
+   * Handlers still reading it behave exactly as before.
    */
   const byId = new Map(allSteps.map((entry) => [entry.id, entry]));
   const dependencies: Record<string, Record<string, unknown>> = {};
 
   for (const id of step.dependsOn) {
     const dependency = byId.get(id);
-    if (dependency?.output) dependencies[dependency.capability] = dependency.output;
+    if (!dependency?.output) continue;
+
+    /*
+     * A migrated handler stores `{ outputs, legacy }`; the old view reads the
+     * legacy half, so a migrated producer keeps feeding an unmigrated consumer.
+     */
+    const output = dependency.output as Record<string, unknown>;
+    dependencies[dependency.capability] = (output.legacy as Record<string, unknown>) ?? output;
   }
+
+  const producer: ProducerContext = {
+    taskId: task.id,
+    stepId: step.id,
+    capability: step.capability,
+    projectId: task.projectId,
+  };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const result = await handler({
+    const raw = await handler({
       taskId: task.id,
+      stepId: step.id,
       userId: task.userId,
+      projectId: task.projectId,
       locale: (task.locale as 'ar' | 'en') ?? 'en',
       input: step.input,
+      available,
       dependencies,
       context: task.context,
       signal: controller.signal,
     });
 
-    if (result.needsUserInput) return { kind: 'needs-input', question: result.needsUserInput };
+    const observation = normalise(raw, producer);
 
-    return {
-      kind: 'completed',
-      output: result.output,
-      artifactIds: result.artifactIds,
-      modelCalls: result.modelCalls,
-      suggestsMoreWork: result.suggestsMoreWork,
-    };
+    if (observation.status === 'needs-input') {
+      return {
+        kind: 'needs-input',
+        question: observation.requiresUserInput?.question ?? 'More information is needed.',
+        observation,
+      };
+    }
+
+    if (observation.status === 'failed') {
+      return {
+        kind: 'failed',
+        /*
+         * The first error's code, so a retry policy can branch on what went
+         * wrong rather than on a generic failure.
+         */
+        reasonKey: observation.errors[0]?.code ?? 'task.error.stepFailed',
+        observation,
+      };
+    }
+
+    return { kind: 'completed', observation };
   } catch (error) {
     const aborted = controller.signal.aborted;
+    const code = aborted ? 'task.error.timeout' : 'task.error.stepThrew';
 
     return {
       kind: 'failed',
-      reasonKey: aborted ? 'task.error.timeout' : 'task.error.stepThrew',
+      reasonKey: code,
+      /*
+       * A thrown handler still produces a structured observation, so the
+       * replanner sees the same shape whether a step returned a failure or
+       * crashed.
+       */
+      observation: failed([
+        {
+          code,
+          severity: 'error',
+          message: String(error).slice(0, 300),
+          reference: step.capability,
+        },
+      ]),
     };
   } finally {
     clearTimeout(timeout);

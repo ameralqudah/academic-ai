@@ -4480,16 +4480,22 @@ const wrongCorpus = [
  */
 const handlerSource = await readFile('src/server/tasks/handlers.ts', 'utf8');
 
+/*
+ * Checked as behaviour rather than as a literal string. The first version
+ * matched the exact return expression, and migrating the handler to the typed
+ * contract changed that expression without changing what it does — a guard
+ * that breaks on a refactor it should not care about.
+ */
 assertTrue(
   'a literature review refuses off-topic sources',
-  handlerSource.includes("output: { error: 'off-topic-sources' }"),
+  handlerSource.includes('offTopic') && handlerSource.includes('needsInput('),
 );
 assertTrue(
   'asking the researcher to rephrase rather than writing anyway',
   handlerSource.includes('do not concern this topic'),
 );
 assertTrue(
-  'and the search step reports the finding',
+  'and the search step carries the finding in its output',
   handlerSource.includes('offTopic: report.offTopic'),
 );
 

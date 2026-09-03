@@ -34,7 +34,34 @@ import { storeArtifact, type ArtifactKind } from '@/server/services/artifact.ser
 import { answerGeneralQuestion, generateSurveyItems } from '@/server/services/ai.service';
 import { runCbSem, runPls } from '@/server/services/pls.service';
 import { searchWeb } from '@/server/services/web-search.service';
-import { registerHandler, type StepContext, type StepResult } from './executor';
+import {
+  failed,
+  makeOutput,
+  needsInput,
+  partial,
+  readAllOutputs,
+  readOutput,
+  succeeded,
+  type Finding,
+  type Observation,
+  type ProducerContext,
+} from './contracts';
+import { registerHandler, type StepContext } from './executor';
+
+/**
+ * The producer identity every output carries.
+ *
+ * Built once per handler rather than passed field by field: provenance that is
+ * assembled at each call site is provenance that will be wrong at one of them.
+ */
+function producer(context: StepContext, capability: string): ProducerContext {
+  return {
+    taskId: context.taskId,
+    stepId: context.stepId,
+    capability,
+    projectId: context.projectId,
+  };
+}
 
 /** Reads a string from a step's input or the task context, in that order. */
 function textInput(context: StepContext, key: string, fallback = ''): string {
@@ -58,9 +85,21 @@ function textInput(context: StepContext, key: string, fallback = ''): string {
 function referencesFrom(context: StepContext): Reference[] {
   const collected: Reference[] = [];
 
-  for (const output of Object.values(context.dependencies)) {
-    const references = output.references;
-    if (Array.isArray(references)) collected.push(...(references as Reference[]));
+  /*
+   * Read by data type, not by producer name.
+   *
+   * `dependencies['academic.search']` was the old contract, and it meant a
+   * literature review could only be fed by an academic search — deep research
+   * producing the same sources was invisible to it, and renaming a capability
+   * broke every consumer silently.
+   *
+   * Both source-bearing types are read, so whichever step found the sources
+   * feeds whichever step needs them.
+   */
+  for (const type of ['sources.v1', 'citations.v1'] as const) {
+    for (const found of readAllOutputs<{ references?: Reference[] }>(context.available, type)) {
+      if (Array.isArray(found.references)) collected.push(...found.references);
+    }
   }
 
   /* Deduplicated by DOI or title: two searches on one topic overlap heavily. */
@@ -79,11 +118,38 @@ function referencesFrom(context: StepContext): Reference[] {
 function proseFrom(context: StepContext): string {
   const parts: string[] = [];
 
-  for (const output of Object.values(context.dependencies)) {
-    if (typeof output.text === 'string') parts.push(output.text);
+  /* Written text, whichever capability wrote it. */
+  for (const type of ['prose.v1', 'literature.v1'] as const) {
+    for (const found of readAllOutputs<{ text?: string }>(context.available, type)) {
+      if (typeof found.text === 'string') parts.push(found.text);
+    }
   }
 
   return parts.join('\n\n');
+}
+
+/**
+ * Prose with its heading, for assembling a document section by section.
+ *
+ * Returned as a list rather than joined, because a document needs the
+ * boundaries — one long block loses the structure a reader navigates by, and
+ * the heading is what a chapter is called.
+ */
+function sectionsFrom(context: StepContext): { heading: string; text: string }[] {
+  const sections: { heading: string; text: string }[] = [];
+
+  for (const type of ['literature.v1', 'prose.v1'] as const) {
+    for (const found of readAllOutputs<{ text?: string; heading?: string }>(
+      context.available,
+      type,
+    )) {
+      if (typeof found.text === 'string' && found.text.trim()) {
+        sections.push({ heading: found.heading ?? '', text: found.text });
+      }
+    }
+  }
+
+  return sections;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -93,11 +159,11 @@ function proseFrom(context: StepContext): string {
 export function registerAllHandlers(): void {
   /* --------------------------- general answer --------------------------- */
 
-  registerHandler('general.answer', async (context): Promise<StepResult> => {
+  registerHandler('general.answer', async (context): Promise<Observation> => {
     const question = textInput(context, 'question', textInput(context, 'topic'));
 
     if (!question) {
-      return { output: {}, needsUserInput: 'What would you like me to answer?' };
+      return needsInput('What would you like me to answer?', 'question');
     }
 
     const answer = await answerGeneralQuestion({
@@ -108,15 +174,18 @@ export function registerAllHandlers(): void {
       history: [],
     });
 
-    return { output: { text: answer }, modelCalls: 1 };
+    return succeeded(
+      [makeOutput(producer(context, 'general.answer'), 'prose.v1', { text: answer })],
+      { modelCalls: 1 },
+    );
   });
 
   /* ------------------------------ web search ---------------------------- */
 
-  registerHandler('web.search', async (context): Promise<StepResult> => {
+  registerHandler('web.search', async (context): Promise<Observation> => {
     const query = textInput(context, 'query', textInput(context, 'topic'));
 
-    if (!query) return { output: {}, needsUserInput: 'What should I search for?' };
+    if (!query) return needsInput('What should I search for?', 'query');
 
     const result = await searchWeb({
       userId: context.userId,
@@ -124,34 +193,43 @@ export function registerAllHandlers(): void {
       locale: context.locale,
     });
 
-    return {
-      output: {
-        text: result.answer,
-        /*
-         * Sources without their page text. A dependent step needs to cite
-         * them, not to re-read them — and eight full pages in a step's input
-         * is thousands of tokens on every call that follows.
-         */
-        references: result.sources.map((source) => ({
-          id: String(source.index),
-          kind: 'website' as const,
-          title: source.title,
-          url: source.url,
-          container: source.container,
-          provenance: 'retrieved' as const,
-        })),
-        found: result.sources.length,
-      },
-      modelCalls: 1,
-    };
+    /*
+     * Two outputs: the sources, and the answer as prose.
+     *
+     * Separated because they are consumed differently — a writing step wants
+     * the references, a reader wants the answer. Bundling them forced every
+     * consumer to know the shape of a web search result.
+     *
+     * The sources carry no page text: a dependent step cites them rather than
+     * re-reading them, and eight full pages would be thousands of tokens on
+     * every call that follows.
+     */
+    const references = result.sources.map((source) => ({
+      id: String(source.index),
+      kind: 'website' as const,
+      title: source.title,
+      url: source.url,
+      container: source.container,
+      provenance: 'retrieved' as const,
+    }));
+
+    const stamp = producer(context, 'web.search');
+
+    return succeeded(
+      [
+        makeOutput(stamp, 'sources.v1', { references, query, found: references.length }),
+        makeOutput(stamp, 'prose.v1', { text: result.answer, references }),
+      ],
+      { modelCalls: 1 },
+    );
   });
 
   /* --------------------------- academic search -------------------------- */
 
-  registerHandler('academic.search', async (context): Promise<StepResult> => {
+  registerHandler('academic.search', async (context): Promise<Observation> => {
     const query = textInput(context, 'query', textInput(context, 'topic'));
 
-    if (!query) return { output: {}, needsUserInput: 'What topic should I search for?' };
+    if (!query) return needsInput('What topic should I search for?', 'query');
 
     const report = await searchAcademic({
       queries: [{ text: query, language: context.locale }],
@@ -183,31 +261,77 @@ export function registerAllHandlers(): void {
      * something worse than nothing.
      */
     const thin = references.length < 4;
+    const stamp = producer(context, 'academic.search');
 
-    return {
-      output: {
-        references,
-        found: references.length,
-        offTopic: report.offTopic,
-        discarded: report.discardedAsIrrelevant,
-      },
-      ...(report.offTopic
-        ? {
-            suggestsMoreWork: `The results for "${query}" do not appear to concern the topic; the query may need rephrasing`,
-          }
-        : thin
-          ? { suggestsMoreWork: `Only ${references.length} sources found for "${query}"` }
-          : {}),
+    const sources = makeOutput(stamp, 'sources.v1', {
+      references,
+      query,
+      found: references.length,
+      offTopic: report.offTopic,
+      discarded: report.discardedAsIrrelevant,
+    });
+
+    /*
+     * A finding rather than a sentence.
+     *
+     * This returned `suggestsMoreWork` as free text, which the planner could
+     * only pass to a model — a model call to interpret a condition the handler
+     * already knew. A structured finding names the code and the numbers, so the
+     * replanner decides without asking anyone.
+     */
+    const findings: Finding[] = [];
+
+    if (report.offTopic) {
+      findings.push({
+        code: 'search.offTopic',
+        severity: 'warning',
+        message: `The results for "${query}" do not appear to concern the topic`,
+        metadata: { query, returned: references.length },
+      });
+    } else if (thin) {
+      findings.push({
+        code: 'search.thin',
+        severity: 'warning',
+        message: `Only ${references.length} sources found for "${query}"`,
+        metadata: { query, found: references.length },
+      });
+    }
+
+    /*
+     * Off-topic or thin results are `partial`, not `success`. The step did its
+     * work and the work is not enough — and the difference decides whether the
+     * replanner widens the search or moves on.
+     */
+    if (findings.length > 0) {
+      return partial([sources], report.offTopic ? [`sources actually about "${query}"`] : [], {
+        warnings: findings,
+        modelCalls: 1,
+        recommendedNextActions: [
+          {
+            capability: 'academic.search',
+            reason: report.offTopic ? 'the query found the wrong corpus' : 'too few sources',
+            input: { topic: query },
+          },
+        ],
+        confidence: report.offTopic ? 0.2 : 0.6,
+      });
+    }
+
+    return succeeded([sources], {
       modelCalls: 1,
-    };
+      evidence: references.map((reference) => ({
+        claim: reference.title ?? '',
+        sourceIds: [reference.id],
+      })),
+    });
   });
 
   /* --------------------------- deep research ---------------------------- */
 
-  registerHandler('deep.research', async (context): Promise<StepResult> => {
+  registerHandler('deep.research', async (context): Promise<Observation> => {
     const question = textInput(context, 'question', textInput(context, 'topic'));
 
-    if (!question) return { output: {}, needsUserInput: 'What should I research?' };
+    if (!question) return needsInput('What should I research?', 'question');
 
     const report = await runDeepResearch({
       userId: context.userId,
@@ -216,28 +340,60 @@ export function registerAllHandlers(): void {
       shouldStop: () => context.signal.aborted,
     });
 
-    return {
-      output: {
+    const deepReferences = report.sources.map((source) => ({
+      id: String(source.index),
+      kind: source.kind === 'academic' ? ('journal-article' as const) : ('website' as const),
+      title: source.title,
+      url: source.url,
+      doi: source.doi,
+      year: source.year,
+      provenance: 'retrieved' as const,
+    }));
+
+    const deepStamp = producer(context, 'deep.research');
+
+    /*
+     * Three outputs from one step, and the third is the point.
+     *
+     * Deep research produces sources, a written synthesis, and the questions the
+     * sources did not answer. Emitting the gaps as their own type means a
+     * document step can state the review's limitations without re-deriving
+     * them, and the replanner can act on them.
+     */
+    const outputs = [
+      makeOutput(deepStamp, 'sources.v1', {
+        references: deepReferences,
+        query: question,
+        found: deepReferences.length,
+      }),
+      makeOutput(deepStamp, 'literature.v1', {
         text: report.report,
-        references: report.sources.map((source) => ({
-          id: String(source.index),
-          kind: source.kind === 'academic' ? ('journal-article' as const) : ('website' as const),
-          title: source.title,
-          url: source.url,
-          doi: source.doi,
-          year: source.year,
-          provenance: 'retrieved' as const,
-        })),
-        /* Carried forward so the final document can state its limitations. */
-        gaps: report.remainingGaps,
-      },
+        references: deepReferences,
+        heading: question,
+      }),
+    ];
+
+    if (report.remainingGaps.length > 0) {
+      outputs.push(
+        makeOutput(deepStamp, 'research-gap.v1', { gaps: report.remainingGaps, topic: question }),
+      );
+    }
+
+    return succeeded(outputs, {
       modelCalls: 8,
-    };
+      /* Stated rather than implied: the review knows what it could not close. */
+      missingInformation: report.remainingGaps,
+    });
   });
 
   /* -------------------------- literature review ------------------------- */
 
-  registerHandler('literature.review', async (context): Promise<StepResult> => {
+  registerHandler('literature.review', async (context): Promise<Observation> => {
+    /*
+     * Sources by type, whichever capability found them. An academic search, a
+     * deep research run, or a web search all satisfy this — which is what makes
+     * the review reusable rather than bound to one producer.
+     */
     const references = referencesFrom(context);
 
     /*
@@ -245,18 +401,22 @@ export function registerAllHandlers(): void {
      * found nothing. A review written from ten papers on another subject is
      * worse than no review: it looks like work and is unusable.
      */
-    const offTopic = Object.values(context.dependencies).some(
-      (output) => output.offTopic === true,
-    );
+    /*
+     * The off-topic signal, read from the sources output rather than from a
+     * capability-keyed blob. Same finding, addressed by data type.
+     */
+    const offTopic = readAllOutputs<{ offTopic?: boolean }>(
+      context.available,
+      'sources.v1',
+    ).some((bundle) => bundle.offTopic === true);
 
     if (offTopic) {
-      return {
-        output: { error: 'off-topic-sources' },
-        needsUserInput:
-          context.locale === 'ar'
-            ? 'المصادر التي وجدتها لا تتناول الموضوع المطلوب. هل تريد صياغة أخرى للبحث؟'
-            : 'The sources I found do not concern this topic. Would you like to rephrase the search?',
-      };
+      return needsInput(
+        context.locale === 'ar'
+          ? 'المصادر التي وجدتها لا تتناول الموضوع المطلوب. هل تريد صياغة أخرى للبحث؟'
+          : 'The sources I found do not concern this topic. Would you like to rephrase the search?',
+        'query',
+      );
     }
 
     if (references.length === 0) {
@@ -265,13 +425,12 @@ export function registerAllHandlers(): void {
        * the exact failure the evidence rules exist to prevent — the model would
        * write something fluent and cite work it invented.
        */
-      return {
-        output: { error: 'no-sources' },
-        needsUserInput:
-          context.locale === 'ar'
-            ? 'لم أجد مصادر لكتابة المراجعة. هل تريد توسيع نطاق البحث؟'
-            : 'No sources were found to review. Should I broaden the search?',
-      };
+      return needsInput(
+        context.locale === 'ar'
+          ? 'لم أجد مصادر لكتابة المراجعة. هل تريد توسيع نطاق البحث؟'
+          : 'No sources were found to review. Should I broaden the search?',
+        'query',
+      );
     }
 
     const topic = textInput(context, 'topic', 'the topic');
@@ -287,31 +446,58 @@ export function registerAllHandlers(): void {
       history: [],
     });
 
-    return { output: { text, references }, modelCalls: 2 };
+    return succeeded(
+      [
+        makeOutput(producer(context, 'literature.review'), 'literature.v1', {
+          text,
+          references,
+          heading: topic,
+        }),
+      ],
+      {
+        modelCalls: 2,
+        /* Every reference the review drew on, traceable to the claim. */
+        evidence: references.map((reference) => ({
+          claim: reference.title ?? '',
+          sourceIds: [reference.id],
+        })),
+      },
+    );
   });
 
   /* ---------------------------- data analysis --------------------------- */
 
-  registerHandler('statistics.pls', async (context): Promise<StepResult> => {
+  registerHandler('statistics.pls', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
-    const model = context.input.model;
 
-    if (!datasetId) {
-      return { output: {}, needsUserInput: 'Which dataset should I analyse?' };
-    }
+    if (!datasetId) return needsInput('Which dataset should I analyse?', 'datasetId');
+
+    /*
+     * The model comes from the step's input, or from a confirmed proposal.
+     *
+     * A `pls-model.v1` output carries a `confirmed` flag: the agent may propose
+     * a model from the hypotheses, and an unconfirmed proposal is not a mandate
+     * to run it. The model is the researcher's theory, and running a version
+     * they have not seen would produce numbers for a study nobody is
+     * conducting.
+     */
+    const proposed = readOutput<{ model?: unknown; confirmed?: boolean }>(
+      context.available,
+      'pls-model.v1',
+    );
+
+    const model = context.input.model ?? (proposed?.confirmed ? proposed.model : undefined);
 
     if (!model) {
-      /*
-       * A PLS model is the researcher's theory. Guessing one would produce
-       * numbers for a study nobody is running.
-       */
-      return {
-        output: {},
-        needsUserInput:
-          context.locale === 'ar'
-            ? 'ما نموذج PLS؟ حدّد المتغيّرات الكامنة والمسارات بينها.'
-            : 'What is the PLS model? Name the constructs and the paths between them.',
-      };
+      const question = proposed
+        ? context.locale === 'ar'
+          ? 'هل تؤكّد نموذج PLS المقترح كما هو؟ النموذج نظريتك، ولن يُشغَّل قبل تأكيدك.'
+          : 'Do you confirm the proposed PLS model as it stands? The model is your theory, and it will not run until you confirm it.'
+        : context.locale === 'ar'
+          ? 'ما نموذج PLS؟ حدّد المتغيّرات الكامنة والمسارات بينها.'
+          : 'What is the PLS model? Name the constructs and the paths between them.';
+
+      return needsInput(question, 'model');
     }
 
     const analysis = await runPls({
@@ -320,55 +506,76 @@ export function registerAllHandlers(): void {
       model: model as never,
     });
 
-    return {
-      output: {
-        /*
-         * The report's verdict and sections, not the raw estimate. A later step
-         * cites what the analysis concluded; the loading matrix would be
-         * thousands of tokens it cannot use.
-         */
-        verdict: analysis.report.verdict,
-        sections: analysis.report.sections.map((section) => ({
-          titleKey: section.titleKey,
-          findings: section.findings.length,
-        })),
-        n: analysis.n,
-      },
-    };
+    /*
+     * The verdict and section summaries, not the raw estimate. A later step
+     * cites what the analysis concluded; the loading matrix would be thousands
+     * of tokens it cannot use — and it already lives in the analysis run.
+     */
+    return succeeded([
+      makeOutput(
+        producer(context, 'statistics.pls'),
+        'pls-results.v1',
+        {
+          verdict: analysis.report.verdict,
+          sections: analysis.report.sections.map((section) => ({
+            titleKey: section.titleKey,
+            findings: section.findings.length,
+          })),
+          n: analysis.n,
+        },
+        { metadata: { datasetId, converged: true } },
+      ),
+    ]);
   });
 
-  registerHandler('statistics.cbsem', async (context): Promise<StepResult> => {
+  registerHandler('statistics.cbsem', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
-    const model = context.input.model;
+
+    const proposed = readOutput<{ model?: unknown; confirmed?: boolean }>(
+      context.available,
+      'pls-model.v1',
+    );
+
+    const model = context.input.model ?? (proposed?.confirmed ? proposed.model : undefined);
 
     if (!datasetId || !model) {
-      return {
-        output: {},
-        needsUserInput:
-          context.locale === 'ar'
-            ? 'ما نموذج القياس؟ حدّد المتغيّرات الكامنة وبنودها.'
-            : 'What is the measurement model? Name the factors and their indicators.',
-      };
+      return needsInput(
+        context.locale === 'ar'
+          ? 'ما نموذج القياس؟ حدّد المتغيّرات الكامنة وبنودها.'
+          : 'What is the measurement model? Name the factors and their indicators.',
+        'model',
+      );
     }
 
     const result = await runCbSem({ datasetId, userId: context.userId, model: model as never });
 
-    return {
-      output: {
-        fit: result.fit,
-        loadings: result.loadings.map((loading) => ({
-          construct: loading.construct,
-          indicator: loading.indicator,
-          standardised: loading.standardised,
-        })),
-        n: result.n,
-      },
-    };
+    /*
+     * Reported as `analysis.v1` rather than a CB-SEM-specific type: a document
+     * step wants "the analysis", and adding a type per method would mean every
+     * consumer listing them all.
+     */
+    return succeeded([
+      makeOutput(
+        producer(context, 'statistics.cbsem'),
+        'analysis.v1',
+        {
+          method: 'cb-sem',
+          fit: result.fit,
+          loadings: result.loadings.map((loading) => ({
+            construct: loading.construct,
+            indicator: loading.indicator,
+            standardised: loading.standardised,
+          })),
+          n: result.n,
+        },
+        { metadata: { datasetId, verdict: result.fit.verdict } },
+      ),
+    ]);
   });
 
   /* ------------------------------- writing ------------------------------ */
 
-  registerHandler('document.write', async (context): Promise<StepResult> => {
+  registerHandler('document.write', async (context): Promise<Observation> => {
     const section = textInput(context, 'section', textInput(context, 'topic', 'the section'));
     const references = referencesFrom(context);
     const priorWork = proseFrom(context);
@@ -386,9 +593,18 @@ export function registerAllHandlers(): void {
             .join('\n')}\n\nCite the source number after every claim that comes from them. Never cite a number not in this list.`
         : '\n\nNo sources are available. Write only what does not require one — description, procedure, structure — and do not state findings or statistics.';
 
-    const analysisBlock = Object.entries(context.dependencies)
-      .filter(([capability]) => capability.startsWith('statistics.'))
-      .map(([capability, output]) => `\n\nResults from ${capability}: ${JSON.stringify(output).slice(0, 2000)}`)
+    /*
+     * Analysis results by type, not by capability prefix.
+     *
+     * This filtered dependency keys starting with `statistics.`, which meant
+     * adding a statistical capability required remembering to name it
+     * consistently or the writing step would silently ignore its results.
+     */
+    const analysisBlock = [
+      ...readAllOutputs<Record<string, unknown>>(context.available, 'pls-results.v1'),
+      ...readAllOutputs<Record<string, unknown>>(context.available, 'analysis.v1'),
+    ]
+      .map((result) => `\n\nAnalysis results: ${JSON.stringify(result).slice(0, 2000)}`)
       .join('');
 
     const text = await answerGeneralQuestion({
@@ -399,21 +615,55 @@ export function registerAllHandlers(): void {
       history: [],
     });
 
-    return { output: { text, references }, modelCalls: 2 };
+    return succeeded(
+      [
+        makeOutput(producer(context, 'document.write'), 'prose.v1', {
+          text,
+          references,
+          heading: section,
+        }),
+      ],
+      {
+        modelCalls: 2,
+        /*
+         * Reported when writing had no sources. Not an error — a methodology
+         * section legitimately cites nothing — but the replanner should know
+         * the section rests on no evidence.
+         */
+        ...(references.length === 0
+          ? {
+              warnings: [
+                {
+                  code: 'write.noSources',
+                  severity: 'info' as const,
+                  message: `"${section}" was written without sources`,
+                },
+              ],
+            }
+          : {}),
+      },
+    );
   });
 
-  registerHandler('survey.generate', async (context): Promise<StepResult> => {
+  registerHandler('survey.generate', async (context): Promise<Observation> => {
     const topic = textInput(context, 'topic');
-    const constructs = context.input.constructs;
+
+    /*
+     * Constructs from the step input, or from a framework an earlier step
+     * derived. A questionnaire measuring the framework's constructs is the
+     * usual case, and making the planner restate them would let the two
+     * disagree.
+     */
+    const framework = readOutput<{ constructs?: string[] }>(context.available, 'framework.v1');
+    const constructs = context.input.constructs ?? framework?.constructs;
 
     if (!topic || !Array.isArray(constructs) || constructs.length === 0) {
-      return {
-        output: {},
-        needsUserInput:
-          context.locale === 'ar'
-            ? 'ما المقاييس الفرعية المطلوبة في الاستبانة؟'
-            : 'Which constructs should the questionnaire measure?',
-      };
+      return needsInput(
+        context.locale === 'ar'
+          ? 'ما المقاييس الفرعية المطلوبة في الاستبانة؟'
+          : 'Which constructs should the questionnaire measure?',
+        'constructs',
+      );
     }
 
     const reply = await generateSurveyItems({
@@ -423,12 +673,15 @@ export function registerAllHandlers(): void {
       maxTokens: 2000,
     });
 
-    return { output: { text: reply }, modelCalls: 1 };
+    return succeeded(
+      [makeOutput(producer(context, 'survey.generate'), 'survey.v1', { text: reply, constructs })],
+      { modelCalls: 1 },
+    );
   });
 
   /* ------------------------------ artefacts ----------------------------- */
 
-  registerHandler('document.generate', async (context): Promise<StepResult> => {
+  registerHandler('document.generate', async (context): Promise<Observation> => {
     /*
      * The format the researcher asked for.
      *
@@ -454,13 +707,18 @@ export function registerAllHandlers(): void {
      * order. Each becomes a section rather than one long block, so the document
      * has structure a reader can navigate.
      */
-    const sections = Object.entries(context.dependencies)
-      .filter(([, output]) => typeof output.text === 'string')
-      .map(([capability, output]) => ({
-        heading: (output.heading as string) ?? capability.replace(/^\w+\./, ''),
-        level: 1,
-        paragraphs: String(output.text).split(/\n{2,}/).filter(Boolean),
-      }));
+    /*
+     * Sections from the prose steps, in the order they were produced.
+     *
+     * This read every dependency with a `text` field, keyed by capability —
+     * so the heading fell back to a capability name when none was given, and a
+     * chapter appeared in a document titled `write`.
+     */
+    const sections = sectionsFrom(context).map((section, index) => ({
+      heading: section.heading || `${index + 1}`,
+      level: 1,
+      paragraphs: section.text.split(/\n{2,}/).filter(Boolean),
+    }));
 
     const formatted = formatReferenceList(references, style);
 
@@ -503,16 +761,30 @@ export function registerAllHandlers(): void {
        * the planner to restate them in the step input would mean the figures
        * exist twice and can disagree.
        */
-      const sheets = Object.entries(context.dependencies)
-        .filter(([, output]) => output.table)
-        .map(([capability, output]) => {
-          const table = output.table as { headers: string[]; rows: unknown[][] };
-          return {
-            name: capability.replace(/^\w+\./, ''),
-            headers: table.headers,
-            rows: table.rows as never,
-          };
-        });
+      /*
+       * Tables read by type, from whichever step produced them. The analysis
+       * output is where the numbers are — asking the planner to restate them in
+       * the step input would mean the figures exist twice and can disagree.
+       *
+       * `analysis.v1` and `pls-results.v1` both carry tables, and reading both
+       * means a spreadsheet request works after either kind of analysis.
+       */
+      const sheets: { name: string; headers: string[]; rows: never[] }[] = [];
+
+      for (const type of ['analysis.v1', 'pls-results.v1'] as const) {
+        for (const found of readAllOutputs<{
+          table?: { headers: string[]; rows: unknown[][] };
+          label?: string;
+        }>(context.available, type)) {
+          if (!found.table) continue;
+
+          sheets.push({
+            name: found.label ?? type.replace('.v1', ''),
+            headers: found.table.headers,
+            rows: found.table.rows as never,
+          });
+        }
+      }
 
       const own = context.input.table as { headers: string[]; rows: unknown[][] } | undefined;
       if (own) sheets.push({ name: 'Data', headers: own.headers, rows: own.rows as never });
@@ -531,71 +803,182 @@ export function registerAllHandlers(): void {
       bytes = generateMarkdown(content);
     }
 
-    const artifact = await storeArtifact({
-      userId: context.userId,
-      kind,
-      filename: `${title.slice(0, 60).replace(/[^\p{L}\p{N}\s-]/gu, '')}.${kind}`,
-      bytes,
-      projectId: (context.context.projectId as string) ?? null,
-      metadata: {
-        citationStyle: style,
-        taskId: context.taskId,
-        ...(kind !== requested ? { requestedFormat: requested, substituted: true } : {}),
-      },
-      ...(prose ? { quality: { text: prose, references } } : {}),
-      /*
-       * The prose is also what went into the file, so validation can confirm it
-       * arrived. Named separately from the quality text because a caller may
-       * check one thing and store another — and a file rejected for not
-       * containing text it never held is a false failure.
-       */
-      ...(prose ? { expectedContent: prose } : {}),
-    });
+    let artifact;
 
-    return {
-      output: {
-        artifactId: artifact.id,
-        filename: artifact.filename,
-        kind: artifact.kind,
-        validationStatus: artifact.validationStatus,
-        /* Surfaced rather than hidden: the user asked for something else. */
-        ...(kind !== requested ? { requestedFormat: requested } : {}),
+    try {
+      artifact = await storeArtifact({
+        userId: context.userId,
+        kind,
+        filename: `${title.slice(0, 60).replace(/[^\p{L}\p{N}\s-]/gu, '')}.${kind}`,
+        bytes,
+        projectId: (context.context.projectId as string) ?? null,
+        metadata: {
+          citationStyle: style,
+          taskId: context.taskId,
+          ...(kind !== requested ? { requestedFormat: requested, substituted: true } : {}),
+        },
+        ...(prose ? { quality: { text: prose, references } } : {}),
+        /*
+         * The prose is also what went into the file, so validation can confirm it
+         * arrived. Named separately from the quality text because a caller may
+         * check one thing and store another — and a file rejected for not
+         * containing text it never held is a false failure.
+         */
+        ...(prose ? { expectedContent: prose } : {}),
+      });
+    } catch (error) {
+      /*
+       * A genuine failure, reported as one.
+       *
+       * File generation is the one capability here that can fail for a reason
+       * the researcher cannot fix by answering a question: invalid bytes, a
+       * storage outage, a format the content cannot express. Returning
+       * `needs-input` would ask them something pointless, and returning
+       * `success` with no artifact is the fake-file failure the pipeline
+       * exists to prevent.
+       */
+      return failed([
+        {
+          code: 'artifact.generationFailed',
+          severity: 'error',
+          message: String(error).slice(0, 200),
+          metadata: { format: kind, title },
+        },
+      ]);
+    }
+
+    const generateStamp = producer(context, 'document.generate');
+
+    /*
+     * A substituted format is a warning, not a silent metadata field. The
+     * researcher asked for Word and received Markdown; the replanner can see
+     * that and the interface can say it.
+     */
+    const substitution: Finding[] =
+      kind !== requested
+        ? [
+            {
+              code: 'artifact.formatSubstituted',
+              severity: 'warning',
+              message: `"${requested}" is not a supported format; produced ${kind} instead`,
+              metadata: { requested, produced: kind },
+            },
+          ]
+        : [];
+
+    return succeeded(
+      [
+        makeOutput(generateStamp, 'artifact.v1', {
+          artifactId: artifact.id,
+          filename: artifact.filename,
+          kind: artifact.kind,
+          validationStatus: artifact.validationStatus,
+          /*
+           * A substituted format belongs in the output, not only the metadata.
+           * A consumer deciding whether to tell the researcher they asked for
+           * Word and received Markdown reads this; burying it in metadata means
+           * only a log sees it.
+           */
+          ...(kind !== requested ? { requestedFormat: requested } : {}),
+        }),
+      ],
+      {
+        artifacts: [
+          {
+            id: artifact.id,
+            kind: artifact.kind,
+            filename: artifact.filename,
+            validationStatus: artifact.validationStatus,
+          },
+        ],
+        warnings: substitution,
       },
-      artifactIds: [artifact.id],
-    };
+    );
   });
 
   /* ------------------------------- checking ----------------------------- */
 
-  registerHandler('quality.check', async (context): Promise<StepResult> => {
+  registerHandler('quality.check', async (context): Promise<Observation> => {
     const text = proseFrom(context) || textInput(context, 'text');
     const references = referencesFrom(context);
 
-    if (!text) return { output: { status: 'not-applicable', reason: 'nothing to check' } };
+    const qualityStamp = producer(context, 'quality.check');
+
+    if (!text) {
+      /*
+       * Nothing to check is a successful check of nothing, not a failure. A
+       * task whose quality step failed because no prose existed would report a
+       * problem the researcher does not have.
+       */
+      return succeeded([
+        makeOutput(qualityStamp, 'quality-report.v1', {
+          status: 'not-applicable',
+          reason: 'nothing to check',
+        }),
+      ]);
+    }
 
     const report = await checkQuality({ text, references, skipNetwork: true });
 
+    const output = makeOutput(qualityStamp, 'quality-report.v1', {
+      status: report.overallStatus,
+      errors: report.errors.length,
+      warnings: report.warnings.length,
+      unsupportedClaims: report.unsupportedClaims.count,
+      citationCoverage: report.citationCoverage.ratio,
+    });
+
     /*
-     * A failing check suggests more work rather than failing the step. The
-     * check did its job; what it found is a reason to fix something, and the
-     * planner decides whether that is worth a step.
+     * The engine's own findings, forwarded as findings rather than counted.
+     *
+     * This returned "Quality check found 3 errors" as free text; the replanner
+     * could only pass that to a model. The codes travel now, so a citation
+     * pointing at nothing can be acted on differently from an uncited claim.
      */
-    return {
-      output: {
-        status: report.overallStatus,
-        errors: report.errors.length,
-        warnings: report.warnings.length,
-        unsupportedClaims: report.unsupportedClaims.count,
-      },
-      ...(report.overallStatus === 'fail'
-        ? { suggestsMoreWork: `Quality check found ${report.errors.length} errors` }
-        : {}),
-    };
+    const errors: Finding[] = report.errors.map((finding) => ({
+      code: finding.code,
+      severity: 'error' as const,
+      message: finding.code,
+      reference: finding.target,
+      metadata: finding.detail,
+    }));
+
+    const warnings: Finding[] = report.warnings.slice(0, 20).map((finding) => ({
+      code: finding.code,
+      severity: 'warning' as const,
+      message: finding.code,
+      reference: finding.target,
+      metadata: finding.detail,
+    }));
+
+    /*
+     * A failing check is `partial`, not `failed`. The step did its work
+     * correctly — what it found is a problem in the document, and the
+     * distinction decides whether the replanner fixes the document or retries
+     * the check.
+     */
+    if (report.overallStatus === 'fail') {
+      return partial([output], [], {
+        errors,
+        warnings,
+        confidence: 0.4,
+        recommendedNextActions: [
+          {
+            capability: 'document.write',
+            reason: `the quality check found ${report.errors.length} errors`,
+            input: {},
+          },
+        ],
+      });
+    }
+
+    return succeeded([output], { warnings });
   });
 
-  registerHandler('citation.verify', async (context): Promise<StepResult> => {
+  registerHandler('citation.verify', async (context): Promise<Observation> => {
     const references = referencesFrom(context);
     const withDoi = references.filter((reference) => reference.doi);
+    const citeStamp = producer(context, 'citation.verify');
 
     if (withDoi.length === 0) {
       /*
@@ -603,51 +986,77 @@ export function registerAllHandlers(): void {
        * reporting their absence as a problem is the mistake the quality engine
        * was designed to avoid.
        */
-      return { output: { checked: 0, status: 'not-applicable' } };
+      return succeeded([
+        makeOutput(citeStamp, 'citations.v1', {
+          checked: 0,
+          status: 'not-applicable',
+          references: references.length,
+        }),
+      ]);
     }
 
     const results = await verifyDois(references);
+    const notFound = results.filter((result) => result.status === 'not-found');
 
-    return {
-      output: {
-        checked: results.length,
-        verified: results.filter((result) => result.status === 'verified').length,
-        notFound: results.filter((result) => result.status === 'not-found').length,
-        unchecked: results.filter((result) => result.status === 'unchecked').length,
-      },
-    };
+    const output = makeOutput(citeStamp, 'citations.v1', {
+      checked: results.length,
+      verified: results.filter((result) => result.status === 'verified').length,
+      notFound: notFound.length,
+      unchecked: results.filter((result) => result.status === 'unchecked').length,
+      results,
+    });
+
+    /*
+     * A DOI that does not resolve is the strongest signal of an invented
+     * reference, and it is reported per reference so the researcher knows
+     * which one — not as a count they would have to investigate themselves.
+     */
+    const errors: Finding[] = notFound.map((result) => ({
+      code: 'citation.doiNotFound',
+      severity: 'error' as const,
+      message: `The DOI ${result.doi} is not registered`,
+      reference: result.referenceId,
+      metadata: { doi: result.doi },
+    }));
+
+    if (errors.length > 0) {
+      return partial([output], [], { errors, confidence: 0.3 });
+    }
+
+    return succeeded([output]);
   });
 
-  registerHandler('file.analyse', async (context): Promise<StepResult> => {
+  registerHandler('file.analyse', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
 
-    if (!datasetId) return { output: {}, needsUserInput: 'Which file should I analyse?' };
+    if (!datasetId) return needsInput('Which file should I analyse?', 'datasetId');
 
     /*
      * Deliberately minimal: the dataset profile is computed on upload, so this
      * reads it rather than recomputing. A handler that reanalysed would be
      * doing work the product already did.
      */
-    return { output: { datasetId, ready: true } };
+    return succeeded([
+      makeOutput(producer(context, 'file.analyse'), 'dataset.v1', { datasetId, ready: true }),
+    ]);
   });
 
-  registerHandler('statistics.run', async (context): Promise<StepResult> => {
+  registerHandler('statistics.run', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
 
-    if (!datasetId) return { output: {}, needsUserInput: 'Which dataset should I analyse?' };
+    if (!datasetId) return needsInput('Which dataset should I analyse?', 'datasetId');
 
     /*
      * The specific test is chosen by the recommender, which needs the
      * researcher's question and their variables. Rather than guess, this step
      * asks — a wrong test produces numbers that look right.
      */
-    return {
-      output: {},
-      needsUserInput:
-        context.locale === 'ar'
-          ? 'أي تحليل إحصائي تريد، وعلى أي متغيّرات؟'
-          : 'Which analysis, and on which variables?',
-    };
+    return needsInput(
+      context.locale === 'ar'
+        ? 'أي تحليل إحصائي تريد، وعلى أي متغيّرات؟'
+        : 'Which analysis, and on which variables?',
+      'analysis',
+    );
   });
 
   logger.info('task.handlersRegistered', { count: 12 });

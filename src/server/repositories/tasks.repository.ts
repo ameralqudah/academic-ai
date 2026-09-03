@@ -168,6 +168,15 @@ export async function failStep(
   reasonKey: string,
   retryable: boolean,
   maxAttempts: number,
+  /**
+   * The failure as the handler described it.
+   *
+   * Stored so a replanner can read the structured errors rather than a reason
+   * key. Without it a failed step carries one string, and the whole point of
+   * structured findings — that a planner can act on a code — is lost at exactly
+   * the moment it matters.
+   */
+  observation?: Record<string, unknown>,
 ): Promise<{ willRetry: boolean }> {
   const [step] = await db.select().from(taskSteps).where(eq(taskSteps.id, stepId)).limit(1);
   if (!step) return { willRetry: false };
@@ -181,6 +190,7 @@ export async function failStep(
       status: willRetry ? 'PENDING' : 'FAILED',
       attempts,
       errorReasonKey: reasonKey,
+      ...(observation ? { output: { observation } } : {}),
       ...(willRetry ? { startedAt: null } : { finishedAt: new Date() }),
     })
     .where(eq(taskSteps.id, stepId));

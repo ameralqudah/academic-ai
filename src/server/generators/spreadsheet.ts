@@ -41,14 +41,34 @@ export async function generateXlsx(sheets: Sheet[]): Promise<Uint8Array> {
    */
   const usable = sheets.length > 0 ? sheets : [{ name: 'Sheet1', headers: [], rows: [] }];
 
+  /*
+   * Names already used. Two sheets with one name is not a warning — ExcelJS
+   * throws and the whole workbook is lost, which surfaced as a spreadsheet
+   * request failing whenever two steps produced a table with the same label.
+   */
+  const used = new Set<string>();
+
   for (const [index, sheet] of usable.entries()) {
     /*
-     * Excel forbids these characters in a sheet name and truncates at 31,
-     * and violating either produces a file that opens with a repair prompt.
+     * Excel forbids these characters in a sheet name and truncates at 31, and
+     * violating either produces a file that opens with a repair prompt.
      */
-    const safeName =
+    let safeName =
       (sheet.name || `Sheet${index + 1}`).replace(/[\\/?*[\]:]/g, ' ').slice(0, 31) ||
       `Sheet${index + 1}`;
+
+    if (used.has(safeName)) {
+      /* Suffixed rather than replaced, so the original label stays readable. */
+      for (let suffix = 2; suffix < 100; suffix += 1) {
+        const candidate = `${safeName.slice(0, 28)} ${suffix}`;
+        if (!used.has(candidate)) {
+          safeName = candidate;
+          break;
+        }
+      }
+    }
+
+    used.add(safeName);
 
     const worksheet = workbook.addWorksheet(safeName);
 

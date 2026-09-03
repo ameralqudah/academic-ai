@@ -633,7 +633,27 @@ async function executeStep(
     return { kind: 'completed', observation };
   } catch (error) {
     const aborted = controller.signal.aborted;
-    const code = aborted ? 'task.error.timeout' : 'task.error.stepThrew';
+
+    /*
+     * The specific cause, where it can be recognised.
+     *
+     * A researcher watched a literature review fail and saw only "failed after
+     * 1 attempt" — which could mean a quota, an outage, or a bug, and gives
+     * them nothing to act on. An exhausted allowance in particular is not a
+     * malfunction: it is a thing they can fix, and saying so is the difference
+     * between a dead end and a next step.
+     */
+    const detail = String(error);
+
+    const code = aborted
+      ? 'task.error.timeout'
+      : /quota|limit|allowance|429|rate.?limit/i.test(detail)
+        ? 'task.error.quota'
+        : /unauthor|api.?key|credential|401|403/i.test(detail)
+          ? 'task.error.credentials'
+          : /network|fetch failed|ENOTFOUND|ECONNREFUSED|timeout/i.test(detail)
+            ? 'task.error.network'
+            : 'task.error.stepThrew';
 
     return {
       kind: 'failed',

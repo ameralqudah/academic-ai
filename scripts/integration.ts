@@ -16,7 +16,7 @@
 
 import 'dotenv/config';
 
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -58,7 +58,7 @@ import {
   DEFAULT_BUDGET,
   type TaskBudget,
 } from '@/server/tasks/capabilities';
-import { hasHandler, registerHandler, runTask } from '@/server/tasks/executor';
+import { hasHandler, registerHandler, runTask, type ReplanTrigger } from '@/server/tasks/executor';
 import { registerAllHandlers } from '@/server/tasks/handlers';
 import { allCapabilities } from '@/server/tasks/capabilities';
 import {
@@ -2481,7 +2481,8 @@ async function main() {
 
     await runTask(task.id, {
       onSuggestion: async (current, trigger) => {
-        suggestion = trigger;
+        /* The structured trigger, not a sentence describing it. */
+        suggestion = trigger.capability;
 
         /* The planner would call this; here the step is added directly. */
         const added = await tasksRepo.addSteps([
@@ -3374,6 +3375,201 @@ async function main() {
     check('quality produces a report type', outputsOf(steps[0])[0]?.type, 'quality-report.v1');
   }
 
+
+
+  section('recommendations reach the planner structured');
+
+  /*
+   * The Phase A audit found this: the observation was flattened into a sentence
+   * before it reached the planner — "academic.search: rephrase" — throwing away
+   * the named capability and its input, and then needing a model call to
+   * reconstruct what the handler had already stated precisely.
+   *
+   * Structuring a recommendation only to stringify it at the last step defeats
+   * the contract entirely.
+   */
+  const replanOwner = await newUser('replan-owner');
+
+  async function captureTrigger(
+    handler: Parameters<typeof registerHandler>[1],
+  ): Promise<ReplanTrigger | null> {
+    registerHandler('academic.search', handler);
+
+    const task = await tasksRepo.create({
+      userId: replanOwner,
+      request: 'replan test',
+      locale: 'en',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    await tasksRepo.addSteps([
+      {
+        taskId: task.id, ordinal: 0, capability: 'academic.search',
+        label: 'Search', status: 'PENDING', dependsOn: [], input: {},
+      },
+    ]);
+
+    let captured: ReplanTrigger | null = null;
+
+    await runTask(task.id, {
+      onSuggestion: async (_task, trigger) => {
+        captured = trigger;
+        return 0;
+      },
+    });
+
+    return captured;
+  }
+
+  {
+    const trigger = await captureTrigger(async (context) =>
+      partial(
+        [
+          makeOutput(
+            {
+              taskId: context.taskId,
+              stepId: context.stepId,
+              capability: 'academic.search',
+              projectId: context.projectId,
+            },
+            'sources.v1',
+            { references: [], found: 0 },
+          ),
+        ],
+        ['on-topic sources'],
+        {
+          confidence: 0.2,
+          recommendedNextActions: [
+            {
+              capability: 'deep.research',
+              reason: 'the query found the wrong corpus',
+              input: { topic: 'hybrid learning', depth: 2 },
+            },
+          ],
+        },
+      ),
+    );
+
+    assertTrue('the planner is called', trigger !== null);
+
+    /* The structure survives: capability, reason and input, unchanged. */
+    check('one recommendation arrives', trigger?.recommendedNextActions.length, 1);
+    check(
+      'naming the capability',
+      trigger?.recommendedNextActions[0]?.capability,
+      'deep.research',
+    );
+    check(
+      'with its reason',
+      trigger?.recommendedNextActions[0]?.reason,
+      'the query found the wrong corpus',
+    );
+
+    /* The input is an object the planner can hand to a step, not prose. */
+    const input = trigger?.recommendedNextActions[0]?.input as Record<string, unknown>;
+    check('and its structured input', input?.topic, 'hybrid learning');
+    check('including non-string fields', input?.depth, 2);
+
+    /* Nothing was flattened. */
+    assertTrue(
+      'the trigger is an object, not a sentence',
+      typeof trigger === 'object' && trigger !== null,
+    );
+    check('the status travels', trigger?.status, 'partial');
+    check('and what is missing', trigger?.missingInformation.join(), 'on-topic sources');
+    check('and the confidence', trigger?.confidence, 0.2);
+    check('and the capability that observed it', trigger?.capability, 'academic.search');
+  }
+
+  {
+    /*
+     * A recommendation naming no capability cannot be acted on. Letting one
+     * through means the planner must guess, which is the behaviour the
+     * structured form replaced — so it is dropped before it arrives.
+     */
+    const trigger = await captureTrigger(async (context) =>
+      partial(
+        [
+          makeOutput(
+            {
+              taskId: context.taskId,
+              stepId: context.stepId,
+              capability: 'academic.search',
+              projectId: context.projectId,
+            },
+            'sources.v1',
+            { references: [], found: 0 },
+          ),
+        ],
+        ['something'],
+        {
+          recommendedNextActions: [
+            { capability: '', reason: 'vague' },
+            { capability: 'web.search', reason: 'try the web', input: { query: 'x' } },
+          ],
+        },
+      ),
+    );
+
+    check('the empty recommendation is dropped', trigger?.recommendedNextActions.length, 1);
+    check(
+      'leaving the actionable one',
+      trigger?.recommendedNextActions[0]?.capability,
+      'web.search',
+    );
+  }
+
+  {
+    /*
+     * The legacy bridge no longer manufactures an empty recommendation. Free
+     * text becomes `missingInformation`, which says something is lacking
+     * without pretending to say what would fix it.
+     */
+    const trigger = await captureTrigger(async () => ({
+      output: { found: 0 },
+      suggestsMoreWork: 'not enough sources were found',
+    }));
+
+    check('a legacy string produces no recommendation', trigger?.recommendedNextActions.length, 0);
+    assertTrue(
+      'it becomes missing information instead',
+      trigger?.missingInformation.includes('not enough sources were found') ?? false,
+    );
+  }
+
+  {
+    /* And the executor source contains no flattening. */
+    const executorSource = await readFile('src/server/tasks/executor.ts', 'utf8');
+
+    assertTrue(
+      'recommendations are not joined into a string',
+      !executorSource.includes("`${action.capability || 'unknown'}: ${action.reason}`"),
+    );
+    assertTrue(
+      'and no empty-capability recommendation is constructed',
+      !executorSource.includes("capability: ''"),
+    );
+  }
+
+  {
+    /*
+     * The planner acts on a structured recommendation without a model call.
+     * That is the point of the contract: the information was already exact.
+     */
+    const serviceSource = await readFile('src/server/services/task.service.ts', 'utf8');
+
+    assertTrue(
+      'a named recommendation is scheduled directly',
+      serviceSource.includes('trigger.recommendedNextActions.filter'),
+    );
+    assertTrue(
+      'and the model is asked only when nothing is recommended',
+      serviceSource.includes('direct.length > 0'),
+    );
+  }
 
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));

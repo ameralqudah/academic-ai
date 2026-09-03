@@ -226,6 +226,25 @@ export function TaskProgress({
         <p className="text-xs text-muted">{t('planning')}</p>
       )}
 
+      {/*
+        A task that failed before producing any steps.
+
+        Planning needs a model call, so an exhausted quota or a missing key
+        stops the task with nothing to show — and the panel rendered one word,
+        "Failed", with no steps and no reason. A failure the researcher cannot
+        act on is worse than no feature.
+      */}
+      {task.status === 'FAILED' && steps.length === 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-danger/40 bg-subtle p-3">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+          <span className="text-sm text-ink">
+            {task.errorReasonKey
+              ? t(`step.reason.${task.errorReasonKey.split('.').pop()}`)
+              : t('failedBeforePlanning')}
+          </span>
+        </div>
+      )}
+
       {steps.length > 0 && (
         <ol className="flex flex-col gap-1.5">
           {steps.map((step) => (

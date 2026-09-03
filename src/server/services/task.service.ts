@@ -14,6 +14,21 @@ import { capabilityFor, DEFAULT_BUDGET, type TaskBudget } from '@/server/tasks/c
 import { runTask } from '@/server/tasks/executor';
 import { planAdditionalSteps, planTask } from '@/server/tasks/planner';
 
+/**
+ * The reason behind a thrown error, where the message reveals one.
+ *
+ * Shared with the executor's step-level classification so a quota reads the
+ * same whether it stopped the planning or the tenth step. Pattern matching on
+ * a message is imprecise by nature; the generic key is the honest answer when
+ * nothing matches, rather than guessing.
+ */
+export function classifyFailure(detail: string): string {
+  if (/quota|limit|allowance|429|rate.?limit/i.test(detail)) return 'task.error.quota';
+  if (/unauthor|api.?key|credential|401|403/i.test(detail)) return 'task.error.credentials';
+  if (/network|fetch failed|ENOTFOUND|ECONNREFUSED/i.test(detail)) return 'task.error.network';
+  return 'task.error.crashed';
+}
+
 /** More than this in flight and the user is queueing work nobody will read. */
 const MAX_ACTIVE = 2;
 
@@ -63,7 +78,18 @@ export async function startTask(input: {
    */
   void planAndRun(task.id).catch((error: unknown) => {
     logger.error('task.crashed', { taskId: task.id, error: String(error) });
-    void tasksRepo.setStatus(task.id, 'FAILED', { errorReasonKey: 'task.error.crashed' });
+
+    /*
+     * The cause, where it can be recognised.
+     *
+     * A researcher watched a task fail before any step existed and saw one
+     * word: "Failed". Planning needs a model call, so an exhausted allowance or
+     * a missing key stops the task here — and both are things they can act on,
+     * where a bare failure is a dead end.
+     */
+    void tasksRepo.setStatus(task.id, 'FAILED', {
+      errorReasonKey: classifyFailure(String(error)),
+    });
   });
 
   return task;

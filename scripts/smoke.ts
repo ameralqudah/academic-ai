@@ -2175,6 +2175,79 @@ assertTrue(
   plannerSource.includes('Never one'),
 );
 
+
+console.log('\nfailure reasons');
+
+/*
+ * A researcher watched a task fail and saw one word: "Failed" — no steps, no
+ * reason, nothing to act on. Planning needs a model call, so an exhausted
+ * allowance stops the task before any step exists, and the panel had no branch
+ * for that state.
+ *
+ * A failure the researcher cannot act on is worse than no feature: it looks
+ * like the product is broken when the fix may be waiting an hour.
+ */
+const executorForReasons = await readFile('src/server/tasks/executor.ts', 'utf8');
+const serviceForReasons = await readFile('src/server/services/task.service.ts', 'utf8');
+const panelForReasons = await readFile('src/components/agent/task-progress.tsx', 'utf8');
+
+/* A step failure names its cause where the message reveals one. */
+assertTrue('a step recognises an exhausted quota', executorForReasons.includes("'task.error.quota'"));
+assertTrue('a credential problem', executorForReasons.includes("'task.error.credentials'"));
+assertTrue('and a network failure', executorForReasons.includes("'task.error.network'"));
+
+/* And so does a failure during planning, which produces no steps at all. */
+assertTrue('planning failures are classified too', serviceForReasons.includes('classifyFailure'));
+assertTrue(
+  'rather than one generic key',
+  !serviceForReasons.includes("errorReasonKey: 'task.error.crashed' }"),
+);
+
+/* The panel shows both. */
+assertTrue(
+  'a failed step shows its reason',
+  panelForReasons.includes('step.reason.') && panelForReasons.includes('step.errorReasonKey'),
+);
+assertTrue(
+  'and a task that failed before planning shows its own',
+  panelForReasons.includes("task.status === 'FAILED' && steps.length === 0"),
+);
+assertTrue(
+  'never rendering a bare "Failed" with nothing else',
+  panelForReasons.includes('failedBeforePlanning'),
+);
+
+/* Every reason reads as a sentence in both languages. */
+{
+  type Messages = {
+    task: { failedBeforePlanning: string; step: { reason: Record<string, string> } };
+  };
+
+  const ar = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Messages;
+  const en = JSON.parse(await readFile('messages/en.json', 'utf8')) as Messages;
+
+  for (const reason of ['quota', 'credentials', 'network', 'timeout', 'crashed']) {
+    assertTrue(`${reason} is explained in Arabic`, (ar.task.step.reason[reason]?.length ?? 0) > 5);
+    assertTrue(`${reason} is explained in English`, (en.task.step.reason[reason]?.length ?? 0) > 5);
+  }
+
+  check(
+    'the two languages carry the same reasons',
+    Object.keys(ar.task.step.reason).sort().join(),
+    Object.keys(en.task.step.reason).sort().join(),
+  );
+
+  assertTrue('and both explain a planning failure', ar.task.failedBeforePlanning.length > 5);
+  assertTrue('in English too', en.task.failedBeforePlanning.length > 5);
+
+  /*
+   * A quota message must point at the limit, not merely report trouble — that
+   * distinction is the entire reason for classifying failures.
+   */
+  assertTrue('the quota message names the limit', (ar.task.step.reason.quota ?? '').includes('حدّ'));
+  assertTrue('in English too', /limit/i.test(en.task.step.reason.quota ?? ''));
+}
+
 console.log('\ntask workspace UI');
 
 /*

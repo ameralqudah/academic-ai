@@ -3571,6 +3571,90 @@ async function main() {
     );
   }
 
+
+  {
+    /*
+     * Three defects a live run exposed, all of them in the replanning path and
+     * none visible in the tests that existed.
+     *
+     * A researcher asked for a paper and saw five steps, the fifth reading
+     * "the query found the wrong corpus" — a sentence explaining why a step was
+     * added, displayed as though it were the step.
+     */
+    const trigger = await captureTrigger(async (context) =>
+      partial(
+        [
+          makeOutput(
+            {
+              taskId: context.taskId,
+              stepId: context.stepId,
+              capability: 'academic.search',
+              projectId: context.projectId,
+            },
+            'sources.v1',
+            { references: [], found: 0, offTopic: true },
+          ),
+        ],
+        ['on-topic sources'],
+        {
+          recommendedNextActions: [
+            { capability: 'academic.search', reason: 'the query found the wrong corpus', input: {} },
+          ],
+        },
+      ),
+    );
+
+    /*
+     * The reason stays in the observation, where it explains. It must not
+     * become a step label, where it would read as work.
+     */
+    check('the reason travels in the recommendation', trigger?.recommendedNextActions[0]?.reason, 'the query found the wrong corpus');
+
+    const serviceSource = await readFile('src/server/services/task.service.ts', 'utf8');
+    assertTrue(
+      'but a step is labelled by its capability, not by the reason',
+      serviceSource.includes('capabilityFor(action.capability)?.labelKey') &&
+        !serviceSource.includes('label: action.reason'),
+    );
+  }
+
+  {
+    /*
+     * A search that found the wrong corpus must not recommend the same search.
+     * The second would return the same corpus, recommend a third, and the task
+     * would spend its budget repeating one mistake.
+     */
+    const handlerSource = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+    assertTrue(
+      'an off-topic search recommends no query rather than the failed one',
+      handlerSource.includes('report.offTopic\n              ? {}'),
+    );
+    assertTrue(
+      'and a thin result broadens instead of repeating',
+      handlerSource.includes('topic: broaden(query)'),
+    );
+
+    const serviceSource = await readFile('src/server/services/task.service.ts', 'utf8');
+    assertTrue(
+      'the planner refuses a recommendation identical to a completed step',
+      serviceSource.includes('JSON.stringify(step.input) === JSON.stringify(action.input'),
+    );
+  }
+
+  {
+    /* And the mode reads as a name, not as an identifier. */
+    const arModes = JSON.parse(await readFile('messages/ar.json', 'utf8')) as {
+      mode?: Record<string, unknown>;
+    };
+    const enModes = JSON.parse(await readFile('messages/en.json', 'utf8')) as {
+      mode?: Record<string, unknown>;
+    };
+
+    check('the workspace mode has an Arabic name', typeof arModes.mode?.workspace, 'string');
+    check('and an English one', typeof enModes.mode?.workspace, 'string');
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 

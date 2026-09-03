@@ -33,6 +33,7 @@ import {
   makeOutput,
   needsInput,
   succeeded,
+  type Finding,
   type Observation,
   type OutputReference,
   type ProducerContext,
@@ -146,11 +147,19 @@ function normalise(
     ...(result.suggestsMoreWork
       ? {
           /*
-           * Free text becomes a recommendation with no capability named, which
-           * is the most a string can express — and is why the structured form
-           * matters.
+           * Free text becomes `missingInformation`, never a recommendation.
+           *
+           * A recommendation names a capability the planner can schedule. A
+           * sentence names nothing, and putting one in that field produced an
+           * entry with an empty capability — an item that looks actionable,
+           * reaches the planner, and cannot be acted on.
+           *
+           * `missingInformation` is the honest home for a string: it says
+           * something is lacking without pretending to say what would fix it.
+           * The planner reasons about it with a model, which is the correct
+           * cost for information that was never structured.
            */
-          recommendedNextActions: [{ capability: '', reason: result.suggestsMoreWork }],
+          missingInformation: [result.suggestsMoreWork],
         }
       : {}),
   });
@@ -171,14 +180,40 @@ export function hasHandler(capability: string): boolean {
   return handlers.has(capability);
 }
 
+/**
+ * What a step observed that may warrant more work.
+ *
+ * Passed to the planner whole. Every field here is something a handler stated
+ * deliberately, and flattening any of it means the planner has to infer what
+ * was already known.
+ */
+export interface ReplanTrigger {
+  stepId: string;
+  /** The capability that observed this. */
+  capability: string;
+  status: Observation['status'];
+  missingInformation: string[];
+  /** Only recommendations naming a capability; the rest are dropped upstream. */
+  recommendedNextActions: Observation['recommendedNextActions'];
+  confidence: number;
+  warnings: Finding[];
+}
+
 export interface RunOptions {
   /** Checked between steps, so cancellation takes effect within one step. */
   shouldStop?: () => Promise<boolean>;
   onProgress?: (progress: { completed: number; total: number; current?: string }) => void;
   /** Extends the plan when a step suggests more work. */
+  /**
+   * Called when a step's observation implies more work.
+   *
+   * Receives the structured observation rather than a sentence describing it,
+   * so a recommendation naming a capability and its input can be acted on
+   * directly — no model call to recover information the handler already stated.
+   */
   onSuggestion?: (
     task: Task,
-    trigger: string,
+    trigger: ReplanTrigger,
     stepsAvailable: number,
   ) => Promise<number>;
 }
@@ -411,17 +446,43 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
       const room = budget.maxSteps - steps.length;
 
       if (room > 0) {
-        const trigger = [
-          observation.status === 'partial' ? 'The step completed only partially.' : '',
-          ...observation.missingInformation,
-          ...observation.recommendedNextActions.map(
-            (action) => `${action.capability || 'unknown'}: ${action.reason}`,
-          ),
-        ]
-          .filter(Boolean)
-          .join(' ');
+        /*
+         * The observation reaches the planner as it was written.
+         *
+         * It used to be flattened into a sentence — "academic.search: rephrase"
+         * — which threw away the named capability and the structured input, and
+         * then required a model call to reconstruct what the handler had
+         * already stated precisely. Structuring a recommendation only to
+         * stringify it at the last step is the whole failure the observation
+         * contract exists to prevent.
+         *
+         * Recommendations naming no capability are dropped here rather than
+         * passed on. An empty name cannot be acted upon, and letting one
+         * through means the planner must guess — which is the behaviour this
+         * replaced.
+         */
+        const actionable = observation.recommendedNextActions.filter(
+          (action) => action.capability.trim().length > 0,
+        );
 
-        const added = await options.onSuggestion(current, trigger, room);
+        if (actionable.length < observation.recommendedNextActions.length) {
+          logger.warn('task.recommendationWithoutCapability', {
+            taskId,
+            capability: claimed.capability,
+            dropped: observation.recommendedNextActions.length - actionable.length,
+          });
+        }
+
+        const added = await options.onSuggestion(current, {
+          stepId: claimed.id,
+          capability: claimed.capability,
+          status: observation.status,
+          missingInformation: observation.missingInformation,
+          recommendedNextActions: actionable,
+          confidence: observation.confidence,
+          warnings: observation.warnings,
+        }, room);
+
         if (added > 0) logger.info('task.stepsAdded', { taskId, added, from: observation.status });
       }
     }

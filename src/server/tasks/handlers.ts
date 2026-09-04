@@ -455,22 +455,104 @@ export function registerAllHandlers(): void {
 
     const topic = textInput(context, 'topic', 'the topic');
 
-    const reviewed = await answerGeneralQuestion({
-      userId: context.userId,
-      message:
-        context.locale === 'ar'
-          ? `اكتب مراجعة أدبيات عن «${topic}» من المصادر المرقّمة أدناه وحدها. استشهد برقم المصدر بعد كل معلومة. اذكر التعارضات والثغرات صراحةً.\n\n${references.map((reference, index) => `[${index + 1}] ${reference.title ?? ''} (${reference.year ?? ''})`).join('\n')}`
-          : `Write a literature review of "${topic}" using only the numbered sources below. Cite the source number after each claim. State disagreements and gaps explicitly.\n\n${references.map((reference, index) => `[${index + 1}] ${reference.title ?? ''} (${reference.year ?? ''})`).join('\n')}`,
-      locale: context.locale,
-      projectId: null,
-      history: [],
+    /*
+     * The output language, decided the same way the writing step decides it.
+     *
+     * A researcher asked in Arabic and received an English literature review:
+     * this handler read `context.locale`, which comes from the browser, while
+     * the writing handler had already been moved to reading the request. One
+     * of the two was fixed and the other was not, which is why the same
+     * document arrived half in each language.
+     */
+    const reviewDecision = decideOutputLanguage({
+      request: `${topic} ${String(context.context.request ?? '')}`,
+      contextLanguage: (context.context.language as 'ar' | 'en' | undefined) ?? null,
+      interfaceLocale: context.locale,
     });
+
+    const reviewLanguage = reviewDecision.language;
+
+    const sourceList = references
+      .map((reference, index) => `[${index + 1}] ${reference.title ?? ''} (${reference.year ?? ''})`)
+      .join('\n');
+
+    const reviewPrompt =
+      reviewLanguage === 'ar'
+        ? `اكتب مراجعة أدبيات عن «${topic}» من المصادر المرقّمة أدناه وحدها. استشهد برقم المصدر بعد كل معلومة. اذكر التعارضات والثغرات صراحةً. أنهِ النصّ بفقرة تامّة لا بقائمة مبتورة.\n\n${sourceList}`
+        : `Write a literature review of "${topic}" using only the numbered sources below. Cite the source number after each claim. State disagreements and gaps explicitly. End with a complete paragraph, not a truncated list.\n\n${sourceList}`;
+
+    /*
+     * Generated across as many rounds as the review needs.
+     *
+     * The old path made one call for two thousand tokens and handed over
+     * whatever came back — which for twelve sources meant a review ending
+     * "* **Robotics" with no closing sentence. A reader skimming it sees a
+     * finished document.
+     */
+    const reviewProvider = await resolveProvider();
+
+    const reviewed = await generateLongForm({
+      provider: reviewProvider,
+      system: `${languageInstruction(reviewLanguage)}\n\nYou are writing an academic literature review. Write connected prose. Cite only the numbered sources given, and never invent a source.`,
+      prompt: reviewPrompt,
+      locale: reviewLanguage,
+    });
+
+    if (reviewed.text.trim().length < 40) {
+      return failed([
+        {
+          code: 'review.empty',
+          severity: 'error',
+          message: `The model returned no usable review for "${topic}".`,
+          reference: topic,
+        },
+      ]);
+    }
+
+    const reviewNotice = incompleteNotice(reviewed, reviewLanguage);
+    const reviewBody = reviewNotice ? `${reviewed.text}\n\n${reviewNotice}` : reviewed.text;
+
+    /*
+     * An unfinished review is reported as partial, never as success — the same
+     * rule the writing step follows, for the same reason: a document that
+     * stopped at a length limit reads as complete.
+     */
+    if (!reviewed.complete) {
+      return partial(
+        [
+          makeOutput(producer(context, 'literature.review'), 'literature.v1', {
+            text: reviewBody,
+            references,
+            heading: topic,
+            complete: false,
+          }),
+        ],
+        [reviewLanguage === 'ar' ? 'بقيّة المراجعة' : 'the rest of the review'],
+        {
+          warnings: [
+            {
+              code: 'review.incomplete',
+              severity: 'warning',
+              message: `Review stopped early (${reviewed.incompleteReason ?? 'unknown'}) after ${reviewed.rounds} rounds.`,
+              reference: topic,
+            },
+          ],
+          confidence: 0.5,
+          recommendedNextActions: [
+            {
+              capability: 'literature.review',
+              reason: 'continue the unfinished review',
+              input: { topic, continueFrom: reviewed.text.slice(-400) },
+            },
+          ],
+        },
+      );
+    }
 
     return succeeded(
       [
         makeOutput(producer(context, 'literature.review'), 'literature.v1', {
-          /* `.content`; the service returns `{ content, usage }`. */
-          text: reviewed.content,
+          text: reviewBody,
           references,
           heading: topic,
         }),

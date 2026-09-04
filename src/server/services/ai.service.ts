@@ -124,6 +124,17 @@ export async function runCompletion(input: {
         provider: error.provider,
         status: error.status,
         task: input.task,
+        /*
+         * The model actually sent, and what the provider said about it.
+         *
+         * A 404 was chased for hours with the configured model correct
+         * everywhere it could be read — the environment, the health endpoint,
+         * the picker — because the log recorded the status and not the request.
+         * A status alone cannot distinguish a wrong model name from a wrong
+         * path, and the provider's own message names both.
+         */
+        model: input.provider.model,
+        detail: error.message.slice(0, 300),
       });
       throw AppError.aiUnavailable(error.message.slice(0, 400));
     }

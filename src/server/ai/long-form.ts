@@ -111,14 +111,53 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
         ]
       : [{ role: 'user' as const, content: input.prompt }];
 
-    const result = await input.provider.complete({
-      task: 'chat',
-      system: input.system,
-      messages,
-      maxTokens: tokensPerRound,
-      temperature: 0.6,
-      locale: input.locale,
-    });
+        /*
+     * Wrapped, because a provider error thrown from here reaches the user raw.
+     *
+     * A researcher saw "AIProviderError: {" — the message cut at the brace,
+     * with nothing in the logs, because this path calls the provider directly
+     * and `runCompletion` is where provider failures are caught, named and
+     * recorded. Catching here keeps that boundary intact without routing
+     * long-form generation through a function built for single calls.
+     */
+    let result: Awaited<ReturnType<typeof input.provider.complete>>;
+
+    try {
+      result = await input.provider.complete({
+        task: 'chat',
+        system: input.system,
+        messages,
+        maxTokens: tokensPerRound,
+        temperature: 0.6,
+        locale: input.locale,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+
+      logger.error('generation.providerFailed', {
+        round,
+        chars: text.length,
+        detail: detail.slice(0, 300),
+      });
+
+      /*
+       * What was written before the failure is kept. A chapter that reached
+       * round three and lost the provider on round four is three rounds of
+       * work, and discarding it would make a transient outage cost everything.
+       */
+      if (text.length > 0) {
+        return {
+          text,
+          complete: false,
+          rounds: round,
+          tokensIn,
+          tokensOut,
+          incompleteReason: 'length',
+        };
+      }
+
+      throw error;
+    }
 
     tokensIn += result.usage?.tokensIn ?? 0;
     tokensOut += result.usage?.tokensOut ?? 0;

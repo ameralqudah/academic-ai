@@ -4875,6 +4875,165 @@ const frag = (over: Partial<Parameters<typeof fragment>[0]> = {}) =>
 }
 
 
+
+console.log('\nsource relevance beyond a shared word');
+
+/*
+ * A researcher asked for hybrid learning and received papers on hybrid
+ * matrix-ensembles for kidney disease, hybrid control strategies for robots,
+ * and hybrid machine learning for spatial databases.
+ *
+ * Every one matched on "hybrid" — the rarest word in the query and therefore
+ * the one the filter trusted most. Rarity is the right thing to rank by and
+ * the wrong thing to decide by: "hybrid" is rare here precisely because it is
+ * a generic modifier that attaches to anything.
+ */
+
+const relNow = new Date().toISOString();
+const relSource = (title: string) => ({
+  kind: 'academic' as const,
+  title,
+  url: 'https://example.org',
+  language: 'en' as const,
+  provider: 'test',
+  retrievedAt: relNow,
+});
+
+/* The exact titles the researcher received. */
+const wrongHybrids = [
+  'Hybrid Matrix-Ensemble Framework for Chronic Kidney Disease Diagnosis',
+  'POSITION AND ORIENTATION CONTROL OF A MOBILE ROBOT USING HYBRID CONTROL STRATEGIES',
+].map(relSource);
+
+const rightHybrids = [
+  'The Effect of Design Thinking in Hybrid Learning Environment on Speaking Skills',
+  'دافعية الإنجاز في بيئة التعلم الهجين المرن',
+  'واقع التعلم الهجين بمرحلة رياض الاطفال',
+].map(relSource);
+
+{
+  const mixed = [...wrongHybrids, ...rightHybrids];
+  const result = filterByRelevance(mixed, 'hybrid learning');
+
+  assertTrue('the kidney-disease paper is discarded', !result.kept.some((s) => s.title.includes('Kidney')));
+  assertTrue('and the robotics paper', !result.kept.some((s) => s.title.includes('ROBOT')));
+  assertTrue('while the education papers survive', result.kept.some((s) => s.title.includes('Design Thinking')));
+  check('two off-topic sources are removed', result.discarded, 2);
+}
+
+{
+  /*
+   * The same judgement from an Arabic query. A researcher asking in Arabic
+   * wants the English literature on the same subject, so query terms are
+   * canonicalised across scripts before anything is compared.
+   */
+  const mixed = [...wrongHybrids, ...rightHybrids];
+
+  const arabic = filterByRelevance(mixed, 'التعلم الهجين');
+  const english = filterByRelevance(mixed, 'hybrid learning');
+
+  check('an Arabic query keeps the same sources as its English equivalent', arabic.kept.length, english.kept.length);
+  assertTrue('including the English-language papers', arabic.kept.some((s) => s.title.includes('Design Thinking')));
+  assertTrue('and excluding the wrong corpus', !arabic.kept.some((s) => s.title.includes('Kidney')));
+}
+
+{
+  /* A request phrased as an instruction is reduced to its topic first. */
+  const mixed = [...wrongHybrids, ...rightHybrids];
+  const result = filterByRelevance(mixed, 'اعمل بحث عن التعلم الهجين');
+
+  assertTrue('a full request still filters correctly', !result.kept.some((s) => s.title.includes('Kidney')));
+}
+
+{
+  /*
+   * A modifier cannot carry a match alone. This is the rule that separates
+   * "hybrid learning" from "hybrid anything else".
+   */
+  const modifierOnly = [relSource('A Hybrid Approach to Protein Folding Simulation')];
+  const result = filterByRelevance([...modifierOnly, ...rightHybrids], 'hybrid learning');
+
+  assertTrue(
+    'a source matching only the modifier is discarded',
+    !result.kept.some((s) => s.title.includes('Protein')),
+  );
+}
+
+{
+  /* A single-word query can only ask for itself, and one match is the whole of it. */
+  const single = [
+    relSource('Photosynthesis in C4 plants'),
+    relSource('Hybrid learning outcomes'),
+  ];
+
+  const result = filterByRelevance(single, 'photosynthesis');
+  check('a one-word query keeps its match', result.kept.length, 1);
+  assertTrue('the right one', result.kept[0]?.title.includes('Photosynthesis') ?? false);
+}
+
+{
+  /*
+   * Filtering still never returns nothing. Zero results hides what the
+   * provider found; the off-topic flag is what says the search went wrong.
+   */
+  const allWrong = filterByRelevance(wrongHybrids, 'hybrid learning');
+
+  check('an entirely wrong corpus is returned rather than emptied', allWrong.kept.length, 2);
+  assertTrue('but flagged as off-topic', looksOffTopic(wrongHybrids, 'hybrid learning'));
+}
+
+{
+  /* And a correct corpus raises no flag. */
+  assertTrue('relevant sources are not flagged', !looksOffTopic(rightHybrids, 'hybrid learning'));
+}
+
+console.log('\nliterature review generation');
+
+/*
+ * The review arrived in English for an Arabic request and stopped at
+ * "* **Robotics" with no closing sentence. Both defects had already been fixed
+ * in the writing handler and not in this one — the same document arrived half
+ * in each language, and half finished.
+ */
+const reviewHandlerSource = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+assertTrue(
+  'the review decides its output language from the request',
+  reviewHandlerSource.includes('const reviewDecision = decideOutputLanguage('),
+);
+assertTrue(
+  'and states it to the model',
+  reviewHandlerSource.includes('languageInstruction(reviewLanguage)'),
+);
+assertTrue(
+  'the review generates across rounds rather than one capped call',
+  reviewHandlerSource.includes('const reviewed = await generateLongForm('),
+);
+assertTrue(
+  'an unfinished review is reported as partial',
+  reviewHandlerSource.includes('if (!reviewed.complete)') &&
+    reviewHandlerSource.includes("code: 'review.incomplete'"),
+);
+assertTrue(
+  'with a notice carried into the document',
+  reviewHandlerSource.includes('incompleteNotice(reviewed, reviewLanguage)'),
+);
+assertTrue(
+  'and an empty review fails rather than passing',
+  reviewHandlerSource.includes("code: 'review.empty'"),
+);
+
+/* The writing handler keeps its own equivalents, unbroken. */
+assertTrue(
+  'the writing handler still decides its language',
+  reviewHandlerSource.includes('const decision = decideOutputLanguage('),
+);
+assertTrue(
+  'and still generates long-form',
+  reviewHandlerSource.includes('const generated = await generateLongForm('),
+);
+
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

@@ -97,16 +97,36 @@ function stripArabicPrefix(word: string): string {
  * a wrong claim silently changes what a search returns.
  */
 const EQUIVALENTS: Record<string, string> = {
-  تعليم: 'تعلم',
-  تعلم: 'تعلم',
-  مدمج: 'هجين',
-  هجين: 'هجين',
-  مدونه: 'مدونه',
-  education: 'learning',
+  تعليم: 'learning',
+  تعلم: 'learning',
   learning: 'learning',
-  blended: 'hybrid',
+  education: 'learning',
+  تعلّم: 'learning',
+
+  هجين: 'hybrid',
+  مدمج: 'hybrid',
   hybrid: 'hybrid',
+  blended: 'hybrid',
 };
+
+/**
+ * Words whose meaning depends entirely on what follows them.
+ *
+ * "Hybrid" is the clearest case: it modifies learning, matrix-ensembles,
+ * control strategies and machine learning with no shared subject between them.
+ * A search for hybrid learning returned papers on kidney disease and robotics
+ * because "hybrid" was the rarest word in the query, and rarity is why the
+ * filter trusted it.
+ *
+ * Terms listed here cannot carry a match alone. They still count towards
+ * coverage — the phrase they belong to is what the researcher asked for — but
+ * a source matching only these has matched a modifier, not a topic.
+ */
+const MODIFIERS = new Set([
+  'hybrid', 'blended', 'smart', 'digital', 'modern', 'advanced', 'novel',
+  'improved', 'enhanced', 'integrated', 'adaptive', 'intelligent',
+  'هجين', 'مدمج', 'ذكي', 'رقمي', 'حديث', 'متقدم', 'مطور', 'متكامل',
+]);
 
 /** Maps a term to its canonical form, when one is declared. */
 function canonical(word: string): string {
@@ -148,7 +168,13 @@ export function filterByRelevance(sources: Source[], query: string): RelevanceRe
    */
   if (terms.length === 0) return { kept: sources, discarded: 0 };
 
-  const normalisedTerms = terms.map(normalise);
+  /*
+   * Canonicalised, so an Arabic query matches an English title of the same
+   * subject. "التعلم الهجين" and "hybrid learning" name one topic, and a
+   * researcher asking in Arabic wants the English literature too — leaving the
+   * query in its own script made every comparison fail silently.
+   */
+  const normalisedTerms = terms.map((term) => canonical(normalise(stripArabicPrefix(term))));
 
   /*
    * The distinctive term decides, not any term.
@@ -182,6 +208,21 @@ export function filterByRelevance(sources: Source[], query: string): RelevanceRe
    */
   const matchOn = distinctive.length > 0 ? distinctive : normalisedTerms;
 
+  /*
+   * A single shared word is not a topic.
+   *
+   * A search for "hybrid learning" returned papers on hybrid matrix-ensembles
+   * for kidney disease, hybrid control strategies for robots, and hybrid
+   * machine learning for spatial databases. Every one matched on "hybrid", the
+   * rarest word in the query and therefore the one the filter trusted most.
+   *
+   * The rarest word is the right thing to rank by and the wrong thing to
+   * *decide* by: "hybrid" is rare in this corpus precisely because it is a
+   * generic technical modifier that attaches to anything. So a source must
+   * cover enough of the query, not merely its most distinctive fragment.
+   */
+  const required = coverageRequired(normalisedTerms.length);
+
   const kept = sources.filter((source) => {
     /*
      * Every word in the title is canonicalised too, so "التعليم الهجين" matches
@@ -194,7 +235,35 @@ export function filterByRelevance(sources: Source[], query: string): RelevanceRe
       .map((word) => canonical(stripArabicPrefix(word)))
       .join(' ');
 
-    return matchOn.some((term) => haystack.includes(term));
+    /*
+     * Counted over every meaningful term, not only the distinctive ones. A
+     * paper about hybrid learning contains both words; a paper about hybrid
+     * robotics contains one, and one is what let it through.
+     */
+    const present = normalisedTerms.filter((term) => haystack.includes(term));
+
+    /*
+     * A modifier cannot carry a match by itself. "Hybrid machine learning for
+     * spatial databases" contains both query words and is not about hybrid
+     * learning — the subject word must be there on its own terms.
+     */
+    const substantive = present.filter((term) => !MODIFIERS.has(term));
+
+    if (present.length >= required && substantive.length > 0) return true;
+
+    /*
+     * A distinctive term still earns a place when the query has only one
+     * meaningful word — "photosynthesis" cannot be asked to match two things.
+     */
+    /*
+     * A single-word query can only ask for itself, so one match is the whole
+     * of it — unless that word is a modifier, which asks for nothing.
+     */
+    return (
+      normalisedTerms.length <= 1 &&
+      !MODIFIERS.has(normalisedTerms[0] ?? '') &&
+      matchOn.some((term) => haystack.includes(term))
+    );
   });
 
   /*
@@ -207,6 +276,22 @@ export function filterByRelevance(sources: Source[], query: string): RelevanceRe
   if (kept.length === 0) return { kept: sources, discarded: 0 };
 
   return { kept, discarded: sources.length - kept.length };
+}
+
+/**
+ * How many of a query's terms a source must contain.
+ *
+ * One word can only ask for itself. Two must both appear — "hybrid learning"
+ * means both, and accepting either is what admitted the robotics papers. Longer
+ * queries relax, because a five-word phrase rarely appears whole in a title and
+ * demanding all five would discard the relevant along with the rest.
+ */
+function coverageRequired(termCount: number): number {
+  if (termCount <= 1) return 1;
+  if (termCount === 2) return 2;
+  if (termCount <= 4) return 2;
+
+  return Math.ceil(termCount * 0.5);
 }
 
 /**
@@ -228,18 +313,24 @@ export function looksOffTopic(sources: Source[], query: string): boolean {
    * distinctive word appears nowhere found the wrong corpus, however many
    * results contain the common one.
    */
-  const rarest = normalisedTerms
-    .map((term) => ({
-      term,
-      count: sources.filter((source) =>
-        normalise(`${source.title ?? ''} ${source.snippet ?? ''}`)
-          .split(/\s+/)
-          .map((word) => canonical(stripArabicPrefix(word)))
-          .join(' ')
-          .includes(term),
-      ).length,
-    }))
-    .sort((a, b) => a.count - b.count)[0];
+  /*
+   * Judged on how many sources cover the query, not on the rarest word.
+   *
+   * The rarest word was "hybrid", which appeared in every result — including
+   * the papers about kidney disease — so the corpus looked on-topic while being
+   * entirely wrong. Coverage answers the question actually being asked: do
+   * these sources concern the subject, or do they share a word with it?
+   */
+  const required = coverageRequired(normalisedTerms.length);
 
-  return (rarest?.count ?? 0) < sources.length / 3;
+  const covering = sources.filter((source) => {
+    const haystack = normalise(`${source.title ?? ''} ${source.snippet ?? ''}`)
+      .split(/\s+/)
+      .map((word) => canonical(stripArabicPrefix(word)))
+      .join(' ');
+
+    return normalisedTerms.filter((term) => haystack.includes(term)).length >= required;
+  });
+
+  return covering.length < sources.length / 3;
 }

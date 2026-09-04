@@ -2176,6 +2176,63 @@ assertTrue(
 );
 
 
+console.log('\nempty writing');
+
+/*
+ * The defect that produced an empty chapter.
+ *
+ * `answerGeneralQuestion` returns `{ content, usage }`. Three handlers assigned
+ * the whole object where a string belonged and stored it as `prose.v1`, so the
+ * generator — reading `.text` off a shape that had none — found nothing and
+ * produced a document with a title, a reference list, and no body.
+ *
+ * The types did not catch it because the payload field is `unknown`, which is
+ * what a typed output must be to hold anything. The guard is here instead.
+ */
+{
+  const source = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+  /* Every call must read `.content` rather than passing the object along. */
+  const calls = source.split('await answerGeneralQuestion(').length - 1;
+  const reads = source.split('.content').length - 1;
+
+  assertTrue('every model call reads its content', reads >= calls);
+  assertTrue(
+    'and no handler stores the whole result object as text',
+    !/text: (answer|written|reviewed),/.test(source),
+  );
+}
+
+/*
+ * A researcher received a Word file containing its title twice and a reference
+ * list, with no chapter between them. Every step reported success: the writing
+ * step returned nothing, said so was fine, and the generator filled the empty
+ * body with the title.
+ *
+ * A document that looks like work and contains none is worse than a failure —
+ * the failure is visible, and this was not until the file was opened.
+ */
+const handlersForEmpty = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+assertTrue(
+  'empty prose fails rather than reporting success',
+  handlersForEmpty.includes("code: 'write.empty'"),
+);
+assertTrue(
+  'and the generator does not use the title as a body',
+  !handlersForEmpty.includes('[{ paragraphs: [prose || title] }]'),
+);
+
+/*
+ * The instruction is written in the researcher's language. An English prompt
+ * about an Arabic topic is what produced the unusable text.
+ */
+assertTrue(
+  'the writing instruction follows the locale',
+  handlersForEmpty.includes("context.locale === 'ar'") &&
+    handlersForEmpty.includes('بالعربية الفصحى'),
+);
+
 console.log('\nfailure reasons');
 
 /*

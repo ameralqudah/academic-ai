@@ -47,6 +47,9 @@ import {
   type ProducerContext,
 } from './contracts';
 import { registerHandler, type StepContext } from './executor';
+import { resolveProvider } from '@/ai/registry';
+import { decideOutputLanguage, languageInstruction } from '@/server/context/language';
+import { generateLongForm, incompleteNotice } from '@/server/ai/long-form';
 import { broaden, topicOf } from './query';
 
 /**
@@ -633,38 +636,29 @@ export function registerAllHandlers(): void {
      * back was not usable as a chapter.
      */
     const instruction =
-      context.locale === 'ar'
-        ? `اكتب قسم «${section}» من البحث بالعربية الفصحى، بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}`
-        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}`;
-
-    /*
-     * `answerGeneralQuestion` returns `{ content, usage }`, not a string.
-     *
-     * The old code assigned the whole object to `text` and stored it as
-     * `prose.v1` — so the document generator, reading `.text` off a shape that
-     * had none, found nothing and produced a chapter with a title, a reference
-     * list, and no body. The types would have caught it; the value was passed
-     * through a field typed as `unknown`.
-     */
-    const written = await answerGeneralQuestion({
-      userId: context.userId,
-      message: instruction,
-      locale: context.locale,
-      projectId: null,
-      history: [],
+    const decision = decideOutputLanguage({
+      request: `${textInput(context, 'section')} ${textInput(context, 'topic')} ${String(context.context.request ?? '')}`,
+      contextLanguage: (context.context.language as 'ar' | 'en' | undefined) ?? null,
+      interfaceLocale: context.locale,
     });
 
-    const text = written.content;
+    const language = decision.language;
 
-    /*
-     * Empty prose fails rather than passing.
-     *
-     * A step that returns nothing and reports success produced a Word file
-     * containing a title and a reference list with no chapter between them —
-     * which looks like the product working and is unusable. Failing here blocks
-     * the export and tells the researcher, rather than leaving them to discover
-     * it when they open the file.
-     */
+    const instruction =
+      language === 'ar'
+        ? `اكتب قسم «${section}» من البحث بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}`
+        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}`;
+
+    const provider = await resolveProvider();
+
+    const generated = await generateLongForm({
+      provider,
+      system: `${languageInstruction(language)}\n\nYou are writing part of an academic document. Write prose, not bullet points. Cite only the numbered sources given.`,
+      prompt: instruction,
+      locale: language,
+    });
+
+    const text = generated.text;
     if (text.trim().length < 40) {
       return failed([
         {

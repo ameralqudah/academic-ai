@@ -194,3 +194,67 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
     ...(cutShort ? { incompleteReason: round >= maxRounds ? ('rounds' as const) : ('length' as const) } : {}),
   };
 }
+
+/**
+ * The end of what exists, for the model to continue from.
+ *
+ * Enough to re-establish the sentence and the paragraph, not enough to cost a
+ * fortune per round. Cut at a paragraph boundary where one is near, because
+ * resuming from a half-word confuses more than it helps.
+ */
+function tailOf(text: string, chars = 1200): string {
+  if (text.length <= chars) return text;
+
+  const tail = text.slice(-chars);
+  const boundary = tail.indexOf('\n\n');
+
+  return boundary > 0 && boundary < chars / 2 ? tail.slice(boundary + 2) : tail;
+}
+
+/**
+ * Joins a continuation to what came before.
+ *
+ * A model asked to continue often repeats the last sentence, and pasting
+ * naively leaves it twice — visible to a reader and embarrassing in a thesis.
+ */
+function joinContinuation(existing: string, addition: string): string {
+  const trimmed = addition.trimStart();
+
+  /* Look for the tail of what exists at the head of what arrived. */
+  for (let length = Math.min(200, existing.length); length >= 40; length -= 20) {
+    const tail = existing.slice(-length).trim();
+    if (trimmed.startsWith(tail)) return existing + trimmed.slice(tail.length);
+  }
+
+  /*
+   * Joined with a space when the existing text stopped mid-sentence, and with a
+   * paragraph break when it did not — which is what a reader expects and what
+   * `looksTruncated` already knows how to tell apart.
+   */
+  const needsSpace = /[\p{L}\p{N},؛:]$/u.test(existing.trim());
+  return existing.trimEnd() + (needsSpace ? ' ' : '\n\n') + trimmed;
+}
+
+/**
+ * A note telling the reader the text is unfinished.
+ *
+ * Returned rather than appended by this module, so a caller writing to a
+ * document can place it where it belongs and a caller writing to a chat can
+ * show it differently. Null when the work is complete.
+ */
+export function incompleteNotice(
+  result: GenerationResult,
+  locale: 'ar' | 'en',
+): string | null {
+  if (result.complete) return null;
+
+  if (locale === 'ar') {
+    return result.incompleteReason === 'refused'
+      ? '_[لم يُنتج النموذج نصًّا. حاول مرة أخرى أو اطلب نطاقًا أضيق.]_'
+      : '_[النصّ غير مكتمل: بلغ حدّ الطول قبل انتهائه. اطلب متابعة الكتابة أو قسّم العمل إلى أجزاء أصغر.]_';
+  }
+
+  return result.incompleteReason === 'refused'
+    ? '_[The model produced no text. Try again, or ask for a narrower scope.]_'
+    : '_[This text is incomplete: it reached the length limit before finishing. Ask to continue, or split the work into smaller parts.]_';
+}

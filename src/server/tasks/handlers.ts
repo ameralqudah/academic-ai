@@ -176,7 +176,8 @@ export function registerAllHandlers(): void {
     });
 
     return succeeded(
-      [makeOutput(producer(context, 'general.answer'), 'prose.v1', { text: answer })],
+      /* `.content`, because the service returns `{ content, usage }`. */
+      [makeOutput(producer(context, 'general.answer'), 'prose.v1', { text: answer.content })],
       { modelCalls: 1 },
     );
   });
@@ -451,7 +452,7 @@ export function registerAllHandlers(): void {
 
     const topic = textInput(context, 'topic', 'the topic');
 
-    const text = await answerGeneralQuestion({
+    const reviewed = await answerGeneralQuestion({
       userId: context.userId,
       message:
         context.locale === 'ar'
@@ -465,7 +466,8 @@ export function registerAllHandlers(): void {
     return succeeded(
       [
         makeOutput(producer(context, 'literature.review'), 'literature.v1', {
-          text,
+          /* `.content`; the service returns `{ content, usage }`. */
+          text: reviewed.content,
           references,
           heading: topic,
         }),
@@ -623,13 +625,57 @@ export function registerAllHandlers(): void {
       .map((result) => `\n\nAnalysis results: ${JSON.stringify(result).slice(0, 2000)}`)
       .join('');
 
-    const text = await answerGeneralQuestion({
+    /*
+     * The instruction in the researcher's own language.
+     *
+     * A researcher writing in Arabic received a document whose body was empty:
+     * the instruction was English prose about an Arabic topic, and what came
+     * back was not usable as a chapter.
+     */
+    const instruction =
+      context.locale === 'ar'
+        ? `اكتب قسم «${section}» من البحث بالعربية الفصحى، بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}`
+        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}`;
+
+    /*
+     * `answerGeneralQuestion` returns `{ content, usage }`, not a string.
+     *
+     * The old code assigned the whole object to `text` and stored it as
+     * `prose.v1` — so the document generator, reading `.text` off a shape that
+     * had none, found nothing and produced a chapter with a title, a reference
+     * list, and no body. The types would have caught it; the value was passed
+     * through a field typed as `unknown`.
+     */
+    const written = await answerGeneralQuestion({
       userId: context.userId,
-      message: `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}`,
+      message: instruction,
       locale: context.locale,
       projectId: null,
       history: [],
     });
+
+    const text = written.content;
+
+    /*
+     * Empty prose fails rather than passing.
+     *
+     * A step that returns nothing and reports success produced a Word file
+     * containing a title and a reference list with no chapter between them —
+     * which looks like the product working and is unusable. Failing here blocks
+     * the export and tells the researcher, rather than leaving them to discover
+     * it when they open the file.
+     */
+    if (text.trim().length < 40) {
+      return failed([
+        {
+          code: 'write.empty',
+          severity: 'error',
+          message: `The model returned no usable text for "${section}".`,
+          reference: section,
+          metadata: { returned: text.length },
+        },
+      ]);
+    }
 
     return succeeded(
       [
@@ -741,7 +787,21 @@ export function registerAllHandlers(): void {
     const content = {
       title,
       subtitle: textInput(context, 'subtitle') || undefined,
-      sections: sections.length > 0 ? sections : [{ paragraphs: [prose || title] }],
+      /*
+       * No filler when there is nothing to say.
+       *
+       * The fallback used to put the title in the body, producing a document
+       * that repeated its own heading and then listed references with no
+       * chapter between them. A document with no content should say so; an
+       * empty body is at least honest, and the writing step now fails before
+       * this is reached.
+       */
+      sections:
+        sections.length > 0
+          ? sections
+          : prose
+            ? [{ paragraphs: [prose] }]
+            : [],
       references: formatted.map((entry) => entry.formatted),
     };
 

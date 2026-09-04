@@ -635,7 +635,6 @@ export function registerAllHandlers(): void {
      * the instruction was English prose about an Arabic topic, and what came
      * back was not usable as a chapter.
      */
-    const instruction =
     const decision = decideOutputLanguage({
       request: `${textInput(context, 'section')} ${textInput(context, 'topic')} ${String(context.context.request ?? '')}`,
       contextLanguage: (context.context.language as 'ar' | 'en' | undefined) ?? null,

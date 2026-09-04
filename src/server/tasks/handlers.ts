@@ -669,7 +669,40 @@ export function registerAllHandlers(): void {
         },
       ]);
     }
+    const notice = incompleteNotice(generated, language);
+    const body = notice ? `${text}\n\n${notice}` : text;
 
+    if (!generated.complete) {
+      return partial(
+        [
+          makeOutput(producer(context, 'document.write'), 'prose.v1', {
+            text: body,
+            references,
+            heading: section,
+            complete: false,
+          }),
+        ],
+        [language === 'ar' ? 'بقيّة النصّ' : 'the rest of the text'],
+        {
+          warnings: [
+            {
+              code: 'write.incomplete',
+              severity: 'warning',
+              message: `Generation stopped early (${generated.incompleteReason ?? 'unknown'}) after ${generated.rounds} rounds.`,
+              reference: section,
+            },
+          ],
+          confidence: 0.5,
+          recommendedNextActions: [
+            {
+              capability: 'document.write',
+              reason: 'continue the unfinished section',
+              input: { section, continueFrom: text.slice(-400) },
+            },
+          ],
+        },
+      );
+    }
     return succeeded(
       [
         makeOutput(producer(context, 'document.write'), 'prose.v1', {

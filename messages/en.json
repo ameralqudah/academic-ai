@@ -1539,7 +1539,8 @@
         "network": "Stopped: the service could not be reached",
         "timeout": "Stopped: it took longer than allowed",
         "noHandler": "That capability is not available yet",
-        "crashed": "Stopped by an unexpected error"
+        "crashed": "Stopped by an unexpected error",
+        "empty": "Stopped: the model returned no usable text"
       }
     },
     "capability": {

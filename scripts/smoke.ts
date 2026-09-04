@@ -2227,10 +2227,18 @@ assertTrue(
  * The instruction is written in the researcher's language. An English prompt
  * about an Arabic topic is what produced the unusable text.
  */
+/*
+ * The language is now decided from the request rather than the interface, and
+ * the phrase moved into `language.ts` — so the guard checks the mechanism
+ * rather than a wording that a rewrite would break without changing anything.
+ */
 assertTrue(
-  'the writing instruction follows the locale',
-  handlersForEmpty.includes("context.locale === 'ar'") &&
-    handlersForEmpty.includes('بالعربية الفصحى'),
+  'the writing handler decides its output language',
+  handlersForEmpty.includes('decideOutputLanguage'),
+);
+assertTrue(
+  'and so does the literature review',
+  handlersForEmpty.includes('const reviewDecision = decideOutputLanguage('),
 );
 
 console.log('\nfailure reasons');

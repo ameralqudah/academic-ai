@@ -23,6 +23,7 @@ import { AIProviderError, type AIChatMessage, type AITask, type ProjectContext }
 import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
 import { countWords } from '@/lib/text';
 import { logger } from '@/lib/logger';
+import { buildContextPrompt } from '@/server/context/manager';
 import { looksTruncated, stripTrailingArtefact } from '@/server/services/output-cleanup';
 import type { ResearchProject, ResearchSection, TitleCandidate } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
@@ -485,10 +486,55 @@ export async function answerGeneralQuestion(input: {
   projectId?: string | null;
   projectTitle?: string | null;
   history?: AIChatMessage[];
+  /**
+   * What the assistant may draw on, assembled by the ContextManager.
+   *
+   * Optional, so every existing caller keeps working unchanged: without it the
+   * old `history` path runs exactly as before. With it, the answer is built
+   * from selected context rather than the last six messages — which is the
+   * difference between remembering an instruction from turn one and forgetting
+   * it on turn seven.
+   */
+  context?: {
+    conversationId?: string | null;
+    taskId?: string | null;
+    datasetId?: string | null;
+    instructions?: string[];
+  };
 }): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
   await assertCanUseAI(input.userId, 400);
 
   const provider = await resolveProvider(input.chosenModel ?? null);
+
+  /*
+   * Context replaces the history slice when the caller supplies a scope.
+   *
+   * Both paths exist during the migration rather than one being switched off:
+   * a caller that has not moved over still gets the behaviour it was written
+   * against, and nothing has to change in the same commit.
+   */
+  let contextPrompt = '';
+
+  if (input.context) {
+    try {
+      const built = await buildContextPrompt({
+        purpose: 'answer',
+        request: input.message,
+        userId: input.userId,
+        projectId: input.projectId ?? null,
+        locale: input.locale,
+        ...input.context,
+      });
+
+      contextPrompt = built.prompt;
+    } catch (error) {
+      /*
+       * A failed context build must not fail the answer. The assistant can
+       * reply without remembering; it cannot reply at all if this throws.
+       */
+      logger.warn('ai.contextFailed', { error: String(error).slice(0, 200) });
+    }
+  }
 
   const result = await runCompletion({
     userId: input.userId,
@@ -498,8 +544,18 @@ export async function answerGeneralQuestion(input: {
     provider,
     task: 'chat',
     locale: input.locale,
-    system: generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null }),
-    messages: [...(input.history ?? []).slice(-6), { role: 'user', content: input.message }],
+    system: contextPrompt
+      ? `${generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null })}\n\n${contextPrompt}`
+      : generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null }),
+    /*
+     * With context assembled, the message array carries only the question:
+     * the conversation is already in the envelope, selected and ordered by
+     * authority, and sending it twice would pay for it twice and let a draft
+     * appear once as history and once as evidence.
+     */
+    messages: contextPrompt
+      ? [{ role: 'user' as const, content: input.message }]
+      : [...(input.history ?? []).slice(-6), { role: 'user' as const, content: input.message }],
     maxTokens: 2000,
     temperature: 0.6,
   });

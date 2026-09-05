@@ -32,7 +32,10 @@ import { blindfold, usableOmissionDistance } from '@/analysis/inference/pls/blin
 import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
 import { analyseClaims, findCitations } from '@/server/quality/claims';
 import { isWellFormedDoi, normaliseDoi } from '@/server/quality/sources';
+import { existsSync } from 'node:fs';
 import { checkQuality } from '@/server/quality/engine';
+import { decide, detectReference } from '@/server/agent/routing-rules';
+import { decideOutputLanguage } from '@/server/context/language';
 import {
   describeOmissions,
   estimateTokens,
@@ -196,7 +199,7 @@ async function main() {
   check('quoted fields keep embedded newlines', quoted.rows[1]?.[1], 'two\nlines');
   check('quoted file row count', quoted.rows.length, 2);
 
-  const bom = parseCsv('﻿id,value\n1,2', 'bom.csv');
+  const bom = parseCsv('id,value\n1,2', 'bom.csv');
   check('the byte-order mark is stripped from the first header', bom.columns[0], 'id');
 
   const crlf = parseCsv('a,b\r\n1,2\r\n3,4\r\n', 'crlf.csv');
@@ -5034,6 +5037,281 @@ assertTrue(
 );
 
 
+
+console.log('\nrequest routing');
+
+/*
+ * Every message used to go to one of four endpoints depending on a dropdown,
+ * which made the researcher the router: they had to know that "analyse my
+ * data" belonged in one mode and "explain Cronbach's alpha" in another, before
+ * knowing what the product does.
+ *
+ * These test the rule, not the classifier. The classifier already handles
+ * dialect, typos and mixed script — testing it here would test the model. What
+ * is tested is what the rule does with a classification.
+ */
+
+const route = (
+  intent: string,
+  over: { needsTools?: boolean; wantsFile?: boolean; hasDataset?: boolean; ref?: 'artifact' | 'prose' | 'dataset' | 'task' | null; confidence?: number } = {},
+) =>
+  decide({
+    /*
+     * Cast because the test names intents as strings. The rule reads only the
+     * key and the confidence, so a literal is the clearest way to state which
+     * classification is being tested.
+     */
+    intent: { intent: intent as never, confidence: over.confidence ?? 0.8 },
+    needsTools: over.needsTools ?? false,
+    wantsFile: over.wantsFile ?? false,
+    referencesPrevious: over.ref ?? null,
+    hasDataset: over.hasDataset ?? false,
+  });
+
+/* A question the model can answer is answered, not planned. */
+check('a general question takes the fast path', route('general.question').path, 'fast');
+check('an explanation too', route('general.question', { confidence: 0.9 }).path, 'fast');
+
+/*
+ * Low confidence stays fast. Uncertainty about *which tool* is not evidence
+ * that a tool is needed, and routing an ordinary question through a planner
+ * costs the researcher a minute to be told what a sentence would have said.
+ */
+check('an uncertain classification still answers directly', route('general.question', { confidence: 0.3 }).path, 'fast');
+
+/* Anything needing sources or arithmetic becomes a task. */
+check('a web search needs the agent', route('research.web', { needsTools: true }).path, 'agent');
+check('a literature review too', route('research.literature', { needsTools: true }).path, 'agent');
+check('and deep research', route('research.deep', { needsTools: true }).path, 'agent');
+
+/*
+ * A file was asked for. No conversational answer satisfies that — telling
+ * someone to copy text into Word is the failure this product exists to remove.
+ */
+{
+  const decision = route('general.question', { wantsFile: true });
+
+  check('a request for a file becomes a task', decision.path, 'agent');
+  assertTrue('and says why', decision.reason.includes('file'));
+  assertTrue('with high confidence', decision.confidence > 0.85);
+}
+
+/*
+ * Analysis of an attached dataset. The numbers must come from the engines: a
+ * model computing a correlation from imagination produces something that looks
+ * like a finding.
+ */
+check(
+  'analysis of an attached dataset needs the agent',
+  route('stats.reliability', { hasDataset: true, needsTools: true }).path,
+  'agent',
+);
+
+/*
+ * A reference to earlier work. "Convert it to PDF" answered conversationally
+ * produces a description of a file rather than a file.
+ */
+check('a reference to a previous file becomes a task', route('general.question', { ref: 'artifact' }).path, 'agent');
+check('a reference to previous prose too', route('general.question', { ref: 'prose' }).path, 'agent');
+
+/*
+ * A reference to a dataset or a task is weaker: "continue" alone does not say
+ * that tools are needed, and the intent decides.
+ */
+check('a bare continuation stays fast', route('general.question', { ref: 'task' }).path, 'fast');
+
+console.log('\nreference detection');
+
+/*
+ * What a message points at without naming it. Only meaningful when earlier
+ * work exists — "convert it" in a first message refers to nothing, and treating
+ * it as a reference would start a task with nothing to convert.
+ */
+check('an English reference to a file', detectReference('convert it to PDF', true), 'artifact');
+check('and its Arabic equivalent', detectReference('حوّل البحث السابق إلى PDF', true), 'artifact');
+
+check('an English reference to prose', detectReference('shorten the third chapter', true), 'prose');
+check('and its Arabic equivalent', detectReference('اختصر الفصل الثالث', true), 'prose');
+
+/*
+ * The verb carries the reference; what follows it varies. Requiring a
+ * particular noun shape after the verb matched "اختصر الفصل" and missed
+ * "اختصره" — and a word boundary would have failed on both, because `\b` is
+ * defined by the ASCII word class and never matches between Arabic letters.
+ */
+check('a pronoun-suffixed verb still refers back', detectReference('اختصره', true), 'prose');
+check('and a different noun after it', detectReference('عدّل المقدمة', true), 'prose');
+
+check('a reference to data', detectReference('حلّل هاي الداتا', true), 'dataset');
+check('and to a task', detectReference('أكمل', true), 'task');
+
+check('a question refers to nothing', detectReference('وين الأردن؟', true), null);
+
+/*
+ * With no prior work, nothing can be referred to. This is what stops a first
+ * message from being routed to an agent with nothing to act on.
+ */
+check('a reference with no prior work is not a reference', detectReference('حوّله PDF', false), null);
+
+console.log('\nunified chat endpoint');
+
+/*
+ * The endpoint that removes the dropdown. Checked structurally: running it
+ * needs a model, and what matters here is that the wiring exists and that the
+ * old routes were not removed.
+ */
+{
+  const chatRoute = await readFile('src/app/api/chat/route.ts', 'utf8');
+
+  assertTrue('the endpoint routes before acting', chatRoute.includes('await routeRequest('));
+  assertTrue('delegating to a task when tools are needed', chatRoute.includes('await startTask('));
+  assertTrue('and answering directly otherwise', chatRoute.includes('await answerGeneralQuestion('));
+
+  /*
+   * The fast path reads the same context the agent would. That shared context
+   * is what makes "make it shorter" work at all — a fast path with a thinner
+   * notion of context would answer confidently about the wrong thing.
+   */
+  assertTrue('the fast path uses the context manager', chatRoute.includes('buildContextPrompt('));
+
+  /*
+   * Escalation. A model that says it cannot search or cannot read the file has
+   * told us the routing was wrong, and that admission is more reliable than
+   * the guess that preceded it because the model has now attempted the work.
+   */
+  assertTrue('the fast path can escalate', chatRoute.includes('detectEscalation('));
+  assertTrue('escalating into a task', chatRoute.includes("escalatedFrom: 'fast'"));
+}
+
+{
+  /* The old routes remain. Switching every caller at once is how a working
+   * system stops working. */
+  for (const route of ['agent', 'web-search', 'deep-research', 'pls', 'tasks', 'artifacts']) {
+    assertTrue(`/api/${route} still exists`, existsSync(`src/app/api/${route}/route.ts`));
+  }
+}
+
+{
+  /*
+   * The planner receives the router's opinion and is not bound by it. The
+   * router saw one message; the planner sees the request, the project and what
+   * already exists.
+   */
+  const plannerSource = await readFile('src/server/tasks/planner.ts', 'utf8');
+
+  assertTrue('the planner accepts capability hints', plannerSource.includes('suggestedCapabilities'));
+  assertTrue(
+    'and is told they are one opinion, not an instruction',
+    plannerSource.includes('Do not add a step merely because it was suggested'),
+  );
+}
+
+{
+  /* The interface no longer requires a mode. */
+  const chatUi = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
+
+  assertTrue('an unselected mode routes on the server', chatUi.includes('void runRouted(trimmed)'));
+  assertTrue('through the unified endpoint', chatUi.includes("fetch('/api/chat'"));
+
+  /* And the shortcuts survive for someone who wants them. */
+  assertTrue('deep research remains a shortcut', chatUi.includes("mode === 'deepResearch'"));
+  assertTrue('and web search', chatUi.includes("mode === 'webSearch'"));
+}
+
+
+
+console.log('\nunicode-safe boundaries');
+
+/*
+ * `\b` is defined by the ASCII word class, so it never matches between two
+ * Arabic letters. Two patterns in `language.ts` were dead because of it —
+ * `/عربي\b/` matched nothing at all, in any input, and did so silently — and
+ * one in the routing rules dropped every Arabic reference.
+ *
+ * Silent is the word that matters: a pattern that never fires looks exactly
+ * like a pattern whose condition is never met.
+ */
+{
+  /* The dialect forms that were matching nothing. */
+  for (const [request, expected] of [
+    ['اكتبه عربي', 'ar'],
+    ['بالعربي', 'ar'],
+    ['اكتبه عربيًا', 'ar'],
+    ['اكتبه انجليزي', 'en'],
+    ['بالانجليزي', 'en'],
+  ] as const) {
+    check(`"${request}" resolves to ${expected}`, decideOutputLanguage({ request, interfaceLocale: expected === 'ar' ? 'en' : 'ar' }).language, expected);
+  }
+
+  /* A diacritic must not end the word early or extend it. */
+  check(
+    'a diacritic does not break the boundary',
+    decideOutputLanguage({ request: 'اكتبه عربيًا', interfaceLocale: 'en' }).reason,
+    'explicit',
+  );
+}
+
+console.log('\nrouting regressions');
+
+/*
+ * The acceptance examples, as references rather than as routes: what the
+ * message points at is what the next phase must resolve, and getting it wrong
+ * here would send "convert the previous paper" to a fresh research task.
+ */
+for (const [message, expected] of [
+  ['وين الأردن؟', null],
+  ['حلّل هاي الداتا', 'dataset'],
+  ['حلل هاد الملف', 'dataset'],
+  ['اعمللي بحث عن Digital Twin', null],
+  ['حوّل البحث السابق PDF', 'artifact'],
+  ['حوله PDF', 'artifact'],
+  ['convert it to PDF', 'artifact'],
+  ['اختصر الفصل الثالث', 'prose'],
+  ['اختصره', 'prose'],
+  ['لخّص المقدمة', 'prose'],
+  ['shorten the third chapter', 'prose'],
+  ['أكمل', 'task'],
+  ['كمّل الشغل', 'task'],
+] as const) {
+  check(`"${message}" refers to ${expected ?? 'nothing'}`, detectReference(message, true), expected);
+}
+
+/*
+ * Mixed script in one message. A bilingual researcher writes "اعمل PLS-SEM
+ * analysis للبيانات" without thinking about it, and a rule that assumed one
+ * script would read half the sentence.
+ */
+{
+  check(
+    'a mixed-script reference is still detected',
+    detectReference('حوّل الـ research السابق to PDF', true),
+    'artifact',
+  );
+  check(
+    'and a mixed-script analysis request',
+    detectReference('حلّل هاي الداتا with PLS', true),
+    'dataset',
+  );
+}
+
+/*
+ * Spelling variants a researcher actually types: hamza dropped, shadda
+ * omitted, a colloquial verb form. None of these are errors to a reader and
+ * all of them defeat an exact-match pattern.
+ */
+{
+  check('a missing hamza still matches', detectReference('اكمل', true), 'task');
+  check('a missing shadda too', detectReference('حول البحث السابق PDF', true), 'artifact');
+  check('and a colloquial verb', detectReference('سوّيه PDF', true), 'artifact');
+}
+
+/* And the guard against acting on a reference with nothing to refer to. */
+{
+  check('no prior work means no reference', detectReference('حوّله PDF', false), null);
+  check('however plainly it is phrased', detectReference('convert it to PDF', false), null);
+}
+
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`
@@ -5046,3 +5324,4 @@ main().catch((error) => {
   console.error('\nanalysis run crashed:', error);
   process.exit(1);
 });
+

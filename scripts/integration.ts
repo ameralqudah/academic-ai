@@ -42,6 +42,8 @@ import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
+import { namedFormat, resolveReference } from '@/server/agent/continuity';
+import { generateDocx } from '@/server/generators/docx';
 import {
   failed as observationFailed,
   makeOutput,
@@ -3655,6 +3657,221 @@ async function main() {
     check('and an English one', typeof enModes.mode?.workspace, 'string');
   }
 
+
+  /* ------------------------------------------------ continuity */
+
+  section('references to earlier work resolve to the right thing');
+
+  /*
+   * A researcher writes "حوّله PDF" and means the paper produced two minutes
+   * ago. Nothing in that sentence names it, and starting a task without the
+   * subject had the planner search for a paper that already existed — then
+   * produce a second one, which the researcher discovers on opening the file.
+   */
+  const continuityOwner = await newUser('continuity-owner');
+
+  const continuityRoot = await mkdtemp(join(tmpdir(), 'academic-ai-continuity-'));
+  process.env.STORAGE_PROVIDER = 'local';
+  process.env.STORAGE_LOCAL_DIR = continuityRoot;
+  resetEnvCache();
+  resetStorageCache();
+
+  registerAllHandlers();
+
+  registerHandler('document.write', async (context) =>
+    succeeded([
+      makeOutput(
+        { taskId: context.taskId, stepId: context.stepId, capability: 'document.write', projectId: context.projectId },
+        'prose.v1',
+        { text: 'أظهرت الدراسات أن التوأم الرقمي يحسّن الكفاءة [1].', heading: 'مقدمة' },
+      ),
+      makeOutput(
+        { taskId: context.taskId, stepId: context.stepId, capability: 'document.write', projectId: context.projectId },
+        'sources.v1',
+        {
+          references: [
+            { id: '1', kind: 'journal-article', title: 'Digital Twin', authors: ['Smith, J.'], year: 2024, doi: '10.1111/x1234', provenance: 'retrieved' },
+          ],
+        },
+      ),
+    ]),
+  );
+
+  /** Runs a task and returns its steps. */
+  async function runContinuityTask(
+    request: string,
+    plan: { capability: string; input?: Record<string, unknown>; dependsOn?: number[] }[],
+    taskContext: Record<string, unknown> = {},
+  ) {
+    const task = await tasksRepo.create({
+      userId: continuityOwner,
+      request,
+      locale: 'ar',
+      status: 'QUEUED',
+      context: taskContext,
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const rows = await tasksRepo.addSteps(
+      plan.map((step, index) => ({
+        taskId: task.id,
+        ordinal: index,
+        capability: step.capability,
+        label: step.capability,
+        status: 'PENDING',
+        dependsOn: [],
+        input: step.input ?? {},
+      })),
+    );
+
+    for (const [index, step] of plan.entries()) {
+      const ids = (step.dependsOn ?? []).map((position) => rows[position]?.id as string);
+      if (ids.length > 0) await tasksRepo.updateDependencies(rows[index]?.id as string, ids);
+    }
+
+    await runTask(task.id);
+    return { task, steps: await tasksRepo.stepsOf(task.id) };
+  }
+
+  /* --- produce a paper, then convert it without naming it ---------------- */
+
+  {
+    const first = await runContinuityTask('اعمل بحث عن Digital Twin', [
+      { capability: 'document.write' },
+      { capability: 'document.generate', input: { format: 'docx', title: 'Digital Twin', citationStyle: 'apa' }, dependsOn: [0] },
+    ]);
+
+    const generated = first.steps.find((step) => step.capability === 'document.generate');
+    check('a Word paper is produced', generated?.artifactIds.length, 1);
+
+    /* "حوّله PDF" — the subject is not in the sentence. */
+    const resolution = await resolveReference({
+      userId: continuityOwner,
+      kind: 'artifact',
+      message: 'حوّله PDF',
+      locale: 'ar',
+    });
+
+    check('the reference resolves to one thing', resolution.status, 'resolved');
+
+    if (resolution.status === 'resolved') {
+      assertTrue('naming the paper', resolution.candidate.label.includes('Digital Twin'));
+
+      /*
+       * The Word file is the source, not the target: someone asking for PDF
+       * wants a PDF made from something that is not one.
+       */
+      check('and it is the Word file', resolution.candidate.artifact?.kind, 'docx');
+
+      /* Converting it carries the content, rather than writing a new paper. */
+      const second = await runContinuityTask(
+        'حوّله PDF',
+        [{ capability: 'document.generate', input: { format: 'pdf', title: 'Digital Twin' } }],
+        { references: { kind: 'artifact', id: resolution.candidate.id, targetFormat: 'pdf' } },
+      );
+
+      const converted = second.steps[0];
+      check('the conversion completes', converted?.status, 'COMPLETED');
+      check('producing a file', converted?.artifactIds.length, 1);
+
+      const { artifact, bytes } = await readArtifact(
+        converted?.artifactIds[0] as string,
+        continuityOwner,
+      );
+
+      check('which is a PDF', artifact.kind, 'pdf');
+      /*
+       * Larger than an empty document. The content came from the artifact the
+       * request referred to — a conversion that produced a title page and
+       * nothing else would be the failure this resolution exists to prevent.
+       */
+      assertTrue('carrying the original content', bytes.length > 1400);
+    }
+  }
+
+  /* --- prose: "اختصره" finds the text, not the file --------------------- */
+
+  {
+    const resolution = await resolveReference({
+      userId: continuityOwner,
+      kind: 'prose',
+      message: 'اختصره',
+      locale: 'ar',
+    });
+
+    assertTrue('written text can be referred to', resolution.status === 'resolved');
+
+    if (resolution.status === 'resolved') {
+      check('and it is prose, not a file', resolution.candidate.kind, 'prose');
+      assertTrue('with the text available', Boolean(resolution.candidate.output));
+    }
+  }
+
+  /* --- nothing to refer to -------------------------------------------- */
+
+  {
+    const stranger = await newUser('continuity-stranger');
+
+    const resolution = await resolveReference({
+      userId: stranger,
+      kind: 'artifact',
+      message: 'حوّله PDF',
+      locale: 'ar',
+    });
+
+    check('a user with no files gets no candidate', resolution.status, 'none');
+
+    if (resolution.status === 'none') {
+      assertTrue('and is asked what they mean', resolution.question.length > 10);
+      assertTrue('in their language', /لم أجد/.test(resolution.question));
+    }
+  }
+
+  /* --- ambiguity is asked about, never guessed ------------------------- */
+
+  {
+    /*
+     * Two files produced seconds apart. Picking the most recent would be right
+     * often enough to be dangerous: it would work until the day it rewrote the
+     * wrong chapter, and by then nobody would be checking.
+     */
+    const ambiguousOwner = await newUser('continuity-ambiguous');
+
+    for (const title of ['Chapter One', 'Chapter Two']) {
+      await storeArtifact({
+        userId: ambiguousOwner,
+        kind: 'docx',
+        filename: `${title}.docx`,
+        bytes: await generateDocx({ title, sections: [{ paragraphs: ['Some content here.'] }] }),
+      });
+    }
+
+    const resolution = await resolveReference({
+      userId: ambiguousOwner,
+      kind: 'artifact',
+      message: 'حوّله PDF',
+      locale: 'ar',
+    });
+
+    check('two close candidates are ambiguous', resolution.status, 'ambiguous');
+
+    if (resolution.status === 'ambiguous') {
+      check('both are offered', resolution.candidates.length, 2);
+      assertTrue('the question lists them', resolution.question.includes('Chapter'));
+      assertTrue('and asks rather than tells', /أيّها تقصد/.test(resolution.question));
+    }
+  }
+
+  /* --- a named format never matches itself ----------------------------- */
+
+  {
+    check('a PDF request finds pdf as the target', namedFormat('حوّله PDF'), 'pdf');
+    check('a PowerPoint request', namedFormat('اعمللي عرض تقديمي منه'), 'pptx');
+    check('and Word', namedFormat('اعطيني ملف وورد'), 'docx');
+    check('a message naming no format', namedFormat('اختصره'), null);
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 
@@ -3671,3 +3888,4 @@ main().catch(async (error) => {
   await db.delete(users).where(like(users.email, `${RUN}-%`)).catch(() => undefined);
   process.exit(1);
 });
+

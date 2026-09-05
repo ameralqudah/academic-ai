@@ -172,7 +172,50 @@ export async function planAndRun(taskId: string): Promise<void> {
       return;
     }
 
-    await persistPlan(taskId, plan.steps, false);
+    /*
+     * A conversion plan is trimmed to the conversion.
+     *
+     * The planner is told that the work already exists, and a planner
+     * sometimes plans a search anyway — which produces a second paper instead
+     * of the file the researcher asked for. Instructions the model may ignore
+     * are not a guarantee; this is.
+     *
+     * Only steps that transform are kept: generation, and rewriting when the
+     * request asked for a change rather than a format.
+     */
+    const referencing = task.context.references as { kind?: string } | undefined;
+
+    const steps =
+      referencing && plan.steps.length > 0
+        ? plan.steps.filter((step) =>
+            ['document.generate', 'document.write', 'quality.check'].includes(step.capability),
+          )
+        : plan.steps;
+
+    /*
+     * If trimming left nothing, the plan was entirely research — so the
+     * conversion itself becomes the plan. A single generate step is what
+     * "convert it to PDF" actually is.
+     */
+    const finalSteps =
+      referencing && steps.length === 0
+        ? [
+            {
+              key: 'convert',
+              capability: 'document.generate',
+              label: 'document.generate',
+              dependsOn: [],
+              input: {
+                format:
+                  (task.context.references as { targetFormat?: string } | undefined)
+                    ?.targetFormat ?? 'pdf',
+                title: task.request.slice(0, 80),
+              },
+            },
+          ]
+        : steps;
+
+    await persistPlan(taskId, finalSteps, false);
     await tasksRepo.mergeContext(taskId, { summary: plan.summary });
   }
 

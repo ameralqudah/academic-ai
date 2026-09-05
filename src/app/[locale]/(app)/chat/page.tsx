@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { getTranslations } from 'next-intl/server';
 
+import { ActiveTasks } from '@/components/agent/active-tasks';
 import { AgentChat } from '@/components/agent/agent-chat';
 import { requirePageUser } from '@/server/auth/guards';
 import { findOwned as findOwnedDataset } from '@/server/repositories/datasets.repository';
@@ -139,6 +140,16 @@ export default async function ChatPage({
         correct answer rather than syncing props into state — a chat is
         genuinely a different thing when it is a different conversation.
       */}
+      {/*
+        Work still running elsewhere, surfaced on arrival.
+
+        A researcher who closed the tab during a long run had no way back to
+        it: the task finished into a file nobody was watching, and they would
+        have started it again. Rendered above the thread because it is about
+        finding your way back, not about this conversation.
+      */}
+      <ActiveTasks currentConversationId={thread?.conversation.id ?? null} />
+
       <AgentChat
         key={thread?.conversation.id ?? 'new'}
         locale={locale === 'en' ? 'en' : 'ar'}
@@ -176,3 +187,4 @@ export default async function ChatPage({
     </div>
   );
 }
+

@@ -3919,6 +3919,357 @@ async function main() {
     );
   }
 
+
+  /* ------------------------------------------ live progress and resumption */
+
+  section('a task survives a reload and can be watched');
+
+  /*
+   * A researcher who reloaded the page during a ten-minute research run lost
+   * the panel: it lived in React state, and the conversation held nothing
+   * about the task. The work continued on the server, invisibly — which is
+   * worse than it having stopped, because they would have started it again.
+   */
+  const liveOwner = await newUser('live-owner');
+
+  registerAllHandlers();
+
+  registerHandler('quality.check', async (context) =>
+    succeeded([
+      makeOutput(
+        { taskId: context.taskId, stepId: context.stepId, capability: 'quality.check', projectId: context.projectId },
+        'quality-report.v1',
+        { status: 'pass' },
+      ),
+    ]),
+  );
+
+  async function makeLiveTask(capabilities: string[]) {
+    const task = await tasksRepo.create({
+      userId: liveOwner,
+      request: 'live test',
+      locale: 'ar',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const rows = await tasksRepo.addSteps(
+      capabilities.map((capability, index) => ({
+        taskId: task.id,
+        ordinal: index,
+        capability,
+        label: capability,
+        status: 'PENDING',
+        dependsOn: [],
+        input: {},
+      })),
+    );
+
+    for (let index = 1; index < rows.length; index += 1) {
+      await tasksRepo.updateDependencies(rows[index]?.id as string, [rows[index - 1]?.id as string]);
+    }
+
+    return task;
+  }
+
+  /* --- a crash mid-run leaves a step stranded; recovery finishes it ----- */
+
+  {
+    const task = await makeLiveTask(['quality.check', 'quality.check', 'quality.check']);
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    /*
+     * The state a crash leaves: one step completed, one claimed and running
+     * with nothing driving it. Without recovery the task hangs forever, which
+     * is what every deploy would do to work in flight.
+     */
+    await tasksRepo.claimStep(steps[0]?.id as string);
+    await tasksRepo.completeStep(steps[0]?.id as string, {});
+    await tasksRepo.claimStep(steps[1]?.id as string);
+    await tasksRepo.setStatus(task.id, 'RUNNING');
+
+    await runTask(task.id);
+
+    check('an interrupted task completes on resumption', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+
+    const finished = await tasksRepo.stepsOf(task.id);
+    check('with every step done', finished.filter((step) => step.status === 'COMPLETED').length, 3);
+  }
+
+  /* --- what a reopened app should find --------------------------------- */
+
+  {
+    registerHandler('survey.generate', async () =>
+      needsInput('Which constructs should the questionnaire measure?', 'constructs'),
+    );
+
+    const waiting = await makeLiveTask(['survey.generate']);
+    await runTask(waiting.id);
+
+    /*
+     * The listing the active-tasks endpoint performs. A task waiting for an
+     * answer is unfinished work the researcher must be able to find again —
+     * it will sit there indefinitely until they act.
+     */
+    const active = (await tasksRepo.listForUser(liveOwner, 20)).filter((task) =>
+      ['QUEUED', 'PLANNING', 'RUNNING', 'REPLANNING', 'WAITING_FOR_INPUT', 'PAUSED'].includes(task.status),
+    );
+
+    assertTrue('an unfinished task appears in the active list', active.length > 0);
+    assertTrue(
+      'including one waiting for input',
+      active.some((task) => task.status === 'WAITING_FOR_INPUT'),
+    );
+
+    const current = await tasksRepo.findAny(waiting.id);
+    check('the question is stored, not held in memory', current?.pendingQuestion, 'Which constructs should the questionnaire measure?');
+  }
+
+  /* --- a failure keeps what was already done --------------------------- */
+
+  {
+    registerHandler('web.search', async () =>
+      observationFailed([{ code: 'provider.down', severity: 'error', message: 'provider down' }]),
+    );
+
+    const task = await makeLiveTask(['quality.check', 'web.search']);
+    await runTask(task.id);
+
+    check('the task reports failure', (await tasksRepo.findAny(task.id))?.status, 'FAILED');
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    /*
+     * The completed step survives. Making the researcher start over would
+     * discard work that succeeded — and a step that failed on a quota or an
+     * outage will often succeed on the next attempt.
+     */
+    check('and the completed step is kept', steps.filter((step) => step.status === 'COMPLETED').length, 1);
+
+    /* Retrying continues from the failure rather than replanning. */
+    registerHandler('web.search', async (context) =>
+      succeeded([
+        makeOutput(
+          { taskId: context.taskId, stepId: context.stepId, capability: 'web.search', projectId: context.projectId },
+          'sources.v1',
+          { references: [], found: 0 },
+        ),
+      ]),
+    );
+
+    for (const step of steps) {
+      if (step.status === 'FAILED') await tasksRepo.failStep(step.id, 'retry', true, 99);
+    }
+
+    await tasksRepo.setStatus(task.id, 'RUNNING');
+    await runTask(task.id);
+
+    check('a retried task completes', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+
+    const after = await tasksRepo.stepsOf(task.id);
+    check('with both steps done', after.filter((step) => step.status === 'COMPLETED').length, 2);
+  }
+
+  /* --- the transports and the state machine ---------------------------- */
+
+  {
+    /*
+     * The stream reads stored state on an interval rather than receiving
+     * events from the executor. That matters because the executor may be a
+     * different process after a deploy, and a stream fed from memory would
+     * show a task that had already moved on.
+     */
+    const streamSource = await readFile('src/app/api/tasks/[id]/stream/route.ts', 'utf8');
+
+    assertTrue('the stream reads from the database', streamSource.includes('tasksRepo.findOwned'));
+    assertTrue('and re-reads on an interval', streamSource.includes('setInterval'));
+    assertTrue('checking ownership before opening', streamSource.includes("status: 404"));
+    assertTrue(
+      'closing when the client disconnects',
+      streamSource.includes("request.signal.addEventListener('abort'"),
+    );
+    assertTrue(
+      'and disabling proxy buffering, which would hold the stream to the end',
+      streamSource.includes("'x-accel-buffering': 'no'"),
+    );
+
+    const panelSource = await readFile('src/components/agent/task-progress.tsx', 'utf8');
+
+    assertTrue('the panel streams first', panelSource.includes('new EventSource('));
+    assertTrue('and falls back to polling', panelSource.includes('void poll()'));
+    assertTrue(
+      'only once the stream has given up entirely',
+      panelSource.includes('EventSource.CLOSED'),
+    );
+    assertTrue('a failed task can be retried from the panel', panelSource.includes("t('retry')"));
+
+    /* The task id is written where a reloaded conversation reads it back. */
+    const chatSource = await readFile('src/app/api/chat/route.ts', 'utf8');
+    assertTrue(
+      'a task is recorded in the conversation',
+      chatSource.includes("results: [{ kind: 'task', runId: task.id"),
+    );
+  }
+
+  {
+    /* Every state the panel can show has a name in both languages. */
+    type Messages = { task: { status: Record<string, string>; retry: string } };
+
+    const ar = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Messages;
+    const en = JSON.parse(await readFile('messages/en.json', 'utf8')) as Messages;
+
+    for (const status of [
+      'QUEUED', 'PLANNING', 'RUNNING', 'REPLANNING',
+      'WAITING_FOR_INPUT', 'PAUSED', 'COMPLETED', 'FAILED', 'CANCELLED',
+    ]) {
+      assertTrue(`${status} has an Arabic name`, (ar.task.status[status]?.length ?? 0) > 0);
+      assertTrue(`${status} has an English name`, (en.task.status[status]?.length ?? 0) > 0);
+    }
+
+    assertTrue('and retry is labelled', ar.task.retry.length > 0 && en.task.retry.length > 0);
+  }
+
+
+  /* --- what the stream sends, and when ---------------------------------- */
+
+  {
+    /*
+     * The stream re-reads stored state and sends a frame only when something a
+     * researcher can see has changed. A ten-minute task spends most of its
+     * time inside one step, and re-sending an identical payload every second
+     * and a half would cost bandwidth to say nothing.
+     *
+     * This drives the same signature the handler computes. The handler's own
+     * session check is not exercisable here — an ES module export cannot be
+     * replaced — and is covered by the 401 the running server returned.
+     */
+    const streamed = await makeLiveTask(['quality.check', 'quality.check']);
+    await tasksRepo.setStatus(streamed.id, 'RUNNING');
+
+    const signatureOf = async () => {
+      const task = await tasksRepo.findOwned(streamed.id, liveOwner);
+      const steps = await tasksRepo.stepsOf(streamed.id);
+
+      return JSON.stringify([
+        task?.status,
+        task?.pendingQuestion,
+        steps.map((step) => [step.status, step.attempts, step.artifactIds.length]),
+      ]);
+    };
+
+    const first = await signatureOf();
+    check('an unchanged task produces no new frame', await signatureOf(), first);
+
+    const steps = await tasksRepo.stepsOf(streamed.id);
+    await tasksRepo.claimStep(steps[0]?.id as string);
+
+    const afterClaim = await signatureOf();
+    assertTrue('a step starting produces a frame', afterClaim !== first);
+
+    await tasksRepo.completeStep(steps[0]?.id as string, {});
+    const afterComplete = await signatureOf();
+    assertTrue('and a step finishing produces another', afterComplete !== afterClaim);
+
+    /*
+     * A question changes the signature too. Without that the panel would keep
+     * showing "running" while the task waited for an answer nobody knew it
+     * wanted.
+     */
+    await tasksRepo.setStatus(streamed.id, 'WAITING_FOR_INPUT', {
+      pendingQuestion: 'Which construct?',
+    });
+
+    assertTrue('a pending question produces a frame', (await signatureOf()) !== afterComplete);
+
+    /* And a settled task is where the stream closes rather than idling. */
+    await tasksRepo.setStatus(streamed.id, 'COMPLETED');
+    const settled = await tasksRepo.findOwned(streamed.id, liveOwner);
+
+    assertTrue(
+      'a settled task ends the stream',
+      ['COMPLETED', 'FAILED', 'CANCELLED'].includes(settled?.status ?? ''),
+    );
+  }
+
+  /* --- a completed task keeps its results ------------------------------- */
+
+  {
+    /*
+     * The panel stops watching a completed task, so whatever it produced has
+     * to remain reachable without it. A file that only existed inside a live
+     * stream would vanish on the reload that follows every long run.
+     */
+    registerHandler('document.write', async (context) =>
+      succeeded([
+        makeOutput(
+          { taskId: context.taskId, stepId: context.stepId, capability: 'document.write', projectId: context.projectId },
+          'prose.v1',
+          { text: 'A finished section of text.', heading: 'Section' },
+        ),
+      ]),
+    );
+
+    const finished = await makeLiveTask(['document.write', 'document.generate']);
+
+    const steps = await tasksRepo.stepsOf(finished.id);
+    await tasksRepo.updateStepInput(steps[1]?.id as string, { format: 'md', title: 'Kept' });
+
+    await runTask(finished.id);
+
+    check('the task completes', (await tasksRepo.findAny(finished.id))?.status, 'COMPLETED');
+
+    const after = await tasksRepo.stepsOf(finished.id);
+    const generated = after.find((step) => step.capability === 'document.generate');
+
+    check('the artifact is recorded on the step', generated?.artifactIds.length, 1);
+
+    /* Reachable by id, with no stream and no panel involved. */
+    const { artifact, bytes } = await readArtifact(
+      generated?.artifactIds[0] as string,
+      liveOwner,
+    );
+
+    check('and readable afterwards', artifact.kind, 'md');
+    assertTrue('with its content', new TextDecoder().decode(bytes).includes('finished section'));
+  }
+
+  /* --- the active list, and what it excludes ----------------------------- */
+
+  {
+    const activeSource = await readFile('src/app/api/tasks/active/route.ts', 'utf8');
+
+    assertTrue(
+      'the active list covers every unfinished state',
+      ['QUEUED', 'PLANNING', 'RUNNING', 'REPLANNING', 'WAITING_FOR_INPUT', 'PAUSED'].every(
+        (status) => activeSource.includes(status),
+      ),
+    );
+    assertTrue(
+      'and reports progress without shipping every step',
+      activeSource.includes('completed:') && !activeSource.includes('steps: steps'),
+    );
+
+    const bannerSource = await readFile('src/components/agent/active-tasks.tsx', 'utf8');
+
+    assertTrue('the banner fetches the active list', bannerSource.includes("fetch('/api/tasks/active')"));
+    /*
+     * The task in the current conversation is already on screen as a panel.
+     * Listing it again would show the same work twice.
+     */
+    assertTrue(
+      'excluding the task already on screen',
+      bannerSource.includes('task.conversationId !== currentConversationId'),
+    );
+    assertTrue(
+      'and rendering nothing when nothing is running',
+      bannerSource.includes('if (tasks.length === 0) return null'),
+    );
+
+    const pageSource = await readFile('src/app/[locale]/(app)/chat/page.tsx', 'utf8');
+    assertTrue('the chat page mounts it', pageSource.includes('<ActiveTasks'));
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 
@@ -3935,4 +4286,5 @@ main().catch(async (error) => {
   await db.delete(users).where(like(users.email, `${RUN}-%`)).catch(() => undefined);
   process.exit(1);
 });
+
 

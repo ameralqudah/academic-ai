@@ -1519,7 +1519,8 @@
       "WAITING_FOR_INPUT": "Waiting for you",
       "COMPLETED": "Completed",
       "FAILED": "Failed",
-      "CANCELLED": "Cancelled"
+      "CANCELLED": "Cancelled",
+      "REPLANNING": "Replanning"
     },
     "paused": {
       "maxSteps": "The task reached its step limit.",
@@ -1562,6 +1563,7 @@
     "error": {
       "answerFailed": "The answer could not be sent."
     },
-    "failedBeforePlanning": "The task could not be planned"
+    "failedBeforePlanning": "The task could not be planned",
+    "retry": "Retry"
   }
 }

@@ -1519,7 +1519,8 @@
       "WAITING_FOR_INPUT": "بانتظار ردّك",
       "COMPLETED": "اكتملت",
       "FAILED": "فشلت",
-      "CANCELLED": "أُلغيت"
+      "CANCELLED": "أُلغيت",
+      "REPLANNING": "إعادة التخطيط"
     },
     "paused": {
       "maxSteps": "بلغت المهمة حدّ الخطوات المسموح.",
@@ -1562,6 +1563,7 @@
     "error": {
       "answerFailed": "تعذّر إرسال الإجابة."
     },
-    "failedBeforePlanning": "تعذّر تخطيط المهمة"
+    "failedBeforePlanning": "تعذّر تخطيط المهمة",
+    "retry": "أعد المحاولة"
   }
 }

@@ -61,6 +61,15 @@ export async function planTask(input: {
   locale: 'ar' | 'en';
   /** What the task already has: a dataset, a project, earlier results. */
   context: Record<string, unknown>;
+  /**
+   * Capabilities the router thought this request needs.
+   *
+   * A hint, never an instruction. The router saw one message; the planner sees
+   * the request, the project and what already exists — so where they disagree,
+   * the planner is right. Passing the hint saves the planner rediscovering an
+   * obvious case, and ignoring it costs nothing.
+   */
+  suggestedCapabilities?: string[];
 }): Promise<Plan> {
   const provider = await resolveProvider();
 
@@ -114,6 +123,12 @@ Rules:
 5. missingInformation is for things you genuinely cannot infer and that would change the work — the topic when there is none, the analysis when several are possible. Do not ask about things you can reasonably assume; asking is a cost to the user.
 
 6. Use at most 40 steps. If the request needs more, plan the first coherent portion and note the rest in summary.
+
+${
+  (input.suggestedCapabilities ?? []).length > 0
+    ? `\nA first reading of this request suggested these capabilities: ${input.suggestedCapabilities?.join(', ')}. Treat that as one opinion formed from the message alone. You can see more than it could — the project, the attached data, what already exists — so use them if they fit and ignore them if they do not. Do not add a step merely because it was suggested.\n`
+    : ''
+}
 
 7. SEARCH QUERIES ARE TOPICS, NOT REQUESTS.
 
@@ -465,3 +480,4 @@ export function blockedSteps<T extends { id: string; status: string; dependsOn: 
 
 export { capabilityFor };
 export { repairPrerequisites } from './prerequisites';
+

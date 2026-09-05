@@ -5312,6 +5312,54 @@ for (const [message, expected] of [
 }
 
 
+
+console.log('\nquota and language in the chat path');
+
+/*
+ * A researcher saw "The AI service is not reachable right now" when the
+ * provider had returned 429 — their allowance was spent.
+ *
+ * "Unreachable" describes something broken they cannot influence; "you have
+ * used your quota" describes something they can wait out or raise. The two
+ * lead to entirely different actions, and the generic message pointed at
+ * neither.
+ */
+{
+  const aiSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+
+  assertTrue(
+    'an exhausted quota is distinguished from an outage',
+    aiSource.includes('error.status === 429'),
+  );
+  assertTrue(
+    'and says the allowance resets',
+    aiSource.includes('quota has been used up') && aiSource.includes('تتجدّد تلقائيًا'),
+  );
+  assertTrue(
+    'while other failures keep the generic message',
+    aiSource.includes('throw AppError.aiUnavailable('),
+  );
+}
+
+/*
+ * The same request produced an English restatement of an Arabic sentence: the
+ * classifier was told to answer in the interface locale, which describes what
+ * the researcher is reading rather than what they wrote.
+ */
+{
+  const chatSource = await readFile('src/app/api/chat/route.ts', 'utf8');
+
+  assertTrue(
+    'the chat path decides its language from the request',
+    chatSource.includes('const requestLanguage = decideOutputLanguage('),
+  );
+  assertTrue(
+    'and uses it rather than the interface locale',
+    !chatSource.includes('locale: body.locale,'),
+  );
+}
+
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

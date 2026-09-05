@@ -9,6 +9,8 @@ import { answerGeneralQuestion } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
+import * as artifactsRepo from '@/server/repositories/artifacts.repository';
+import * as tasksRepo from '@/server/repositories/tasks.repository';
 
 /**
  * One place a message goes.
@@ -107,17 +109,34 @@ export const POST = withApi<Body>(
           }))
       : [];
 
+    /*
+     * Earlier work of any kind: a file produced, a task run, a dataset
+     * uploaded. Checked in parallel with the history because all three are
+     * cheap reads and any one of them makes a reference resolvable.
+     */
+    const [recentArtifacts, recentTasks] = await Promise.all([
+      artifactsRepo.listLatest(user.id, 3).catch(() => []),
+      tasksRepo.listForUser(user.id, 3).catch(() => []),
+    ]);
+
+    const hasEarlierWork =
+      recentArtifacts.length > 0 || recentTasks.length > 0 || Boolean(dataset);
+
     const decision = await routeRequest({
       message: body.message,
       locale: body.locale,
       hasDataset: Boolean(dataset),
       profile: (dataset?.profile as never) ?? null,
       /*
-       * Whether a reference could point at anything. In the first message of a
-       * conversation "convert it" refers to nothing, and treating it as a
-       * reference would start a task with nothing to convert.
+       * Whether a reference could point at anything.
+       *
+       * Message count is the wrong test. A task writes its output to a file
+       * and its progress to a panel — not to the conversation — so a researcher
+       * who received a Word document and then wrote "حوّله PDF" had an empty
+       * history and their reference was ignored. What matters is whether work
+       * exists, and files and tasks are where work lives.
        */
-      hasPriorWork: history.length > 0,
+      hasPriorWork: history.length > 0 || hasEarlierWork,
       history,
       userId: user.id,
     });

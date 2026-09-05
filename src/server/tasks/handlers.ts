@@ -30,7 +30,8 @@ import {
 import { generateDocx } from '@/server/generators/docx';
 import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
-import { storeArtifact, type ArtifactKind } from '@/server/services/artifact.service';
+import { readArtifact, storeArtifact, type ArtifactKind } from '@/server/services/artifact.service';
+import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { answerGeneralQuestion, generateSurveyItems } from '@/server/services/ai.service';
 import { runCbSem, runPls } from '@/server/services/pls.service';
 import { searchWeb } from '@/server/services/web-search.service';
@@ -44,6 +45,7 @@ import {
   succeeded,
   type Finding,
   type Observation,
+  type OutputReference,
   type ProducerContext,
 } from './contracts';
 import { registerHandler, type StepContext } from './executor';
@@ -884,13 +886,81 @@ export function registerAllHandlers(): void {
      * so the heading fell back to a capability name when none was given, and a
      * chapter appeared in a document titled `write`.
      */
-    const sections = sectionsFrom(context).map((section, index) => ({
-      heading: section.heading || `${index + 1}`,
-      level: 1,
-      paragraphs: section.text.split(/\n{2,}/).filter(Boolean),
-    }));
+    /*
+     * Content carried in from an artifact the request referred to, when this
+     * task produced none of its own.
+     */
+    const carried: { heading: string; paragraphs: string[] }[] = [];
+    const carriedReferences: Reference[] = [];
 
-    const formatted = formatReferenceList(references, style);
+    /*
+     * A conversion of something that already exists.
+     *
+     * "حوّل البحث السابق PDF" resolved to an artifact before the task started,
+     * and the content is in that file — not in this task's outputs, which are
+     * empty because no writing step ran. Reading the resolved reference is what
+     * turns a conversion into a conversion rather than a second paper.
+     */
+    const referenced = context.context.references as
+      | { kind?: string; id?: string; taskId?: string }
+      | undefined;
+
+    if (referenced?.kind === 'artifact' && referenced.id && sectionsFrom(context).length === 0) {
+      const source = await readArtifact(referenced.id, context.userId).catch(() => null);
+
+      if (source) {
+        /*
+         * The source's own outputs carry its prose. Fetched from the task that
+         * produced it rather than re-extracted from the file: the text is
+         * already structured there, and parsing a Word document back into
+         * sections would lose the headings it was built from.
+         */
+        const sourceTaskId = (source.artifact.metadata as { taskId?: string } | null)?.taskId;
+
+        if (sourceTaskId) {
+          const steps = await tasksRepo.stepsOf(sourceTaskId);
+
+          for (const step of steps) {
+            const outputs = (step.output as { outputs?: OutputReference[] } | null)?.outputs ?? [];
+
+            for (const output of outputs) {
+              if (output.type.startsWith('prose') || output.type.startsWith('literature')) {
+                const data = output.data as { text?: string; heading?: string } | null;
+
+                if (data?.text) {
+                  carried.push({
+                    heading: data.heading ?? '',
+                    paragraphs: data.text.split(/\n{2,}/).filter(Boolean),
+                  });
+                }
+              }
+
+              if (output.type.startsWith('sources')) {
+                const bundle = output.data as { references?: Reference[] } | null;
+                if (Array.isArray(bundle?.references)) carriedReferences.push(...bundle.references);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const sections = [
+      ...carried,
+      ...sectionsFrom(context).map((section, index) => ({
+        heading: section.heading || `${index + 1}`,
+        level: 1,
+        paragraphs: section.text.split(/\n{2,}/).filter(Boolean),
+      })),
+    ];
+
+    /*
+     * References from this task and from anything it converted. A PDF made
+     * from a Word paper must carry the paper's bibliography — dropping it
+     * would produce a document whose citations point at nothing.
+     */
+    const allReferences = [...references, ...carriedReferences];
+    const formatted = formatReferenceList(allReferences, style);
 
     const content = {
       title,
@@ -1245,3 +1315,4 @@ export function registerAllHandlers(): void {
 
   logger.info('task.handlersRegistered', { count: 12 });
 }
+

@@ -23,6 +23,15 @@ export type TaskStatus =
   | 'QUEUED'
   | 'PLANNING'
   | 'RUNNING'
+  /**
+   * Extending a plan while it runs.
+   *
+   * Distinct from RUNNING because the two answer different questions for a
+   * watching researcher: RUNNING means a step is working, REPLANNING means the
+   * shape of the work is changing. A panel that showed both as "running" would
+   * leave a pause of several seconds unexplained.
+   */
+  | 'REPLANNING'
   | 'PAUSED'
   | 'WAITING_FOR_INPUT'
   | 'COMPLETED'
@@ -260,3 +269,4 @@ export async function updateStepInput(
 ): Promise<void> {
   await db.update(taskSteps).set({ input }).where(eq(taskSteps.id, stepId));
 }
+

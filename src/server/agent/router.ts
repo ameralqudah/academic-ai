@@ -1,181 +1,214 @@
 /**
- * The routing rule, and nothing else.
+ * Deciding what a message needs, so the user does not have to.
  *
- * Separated from the router because this is arithmetic on a classification —
- * no model, no network, no database. Importing the router pulls in the intent
- * classifier and through it the AI service and the database, and a test
- * checking that "a request for a file becomes a task" should not need a
- * database to do it.
+ * Every message went to one of four places depending on a dropdown: chat, web
+ * search, deep research, or workspace. That works and it makes the researcher
+ * the router — they must know that "analyse my data" belongs in one mode and
+ * "explain Cronbach's alpha" in another, before they know what the product
+ * does. A researcher who picks wrong gets a conversational answer to a request
+ * that needed a file, which reads as the product being incapable.
  *
- * That coupling has now appeared nine times in this codebase. The pattern is
- * always the same: a module needs one small pure function, imports the module
- * that happens to contain it, and drags everything behind it.
+ * So the decision is made here, once, from the message and its context.
+ *
+ * **This is a routing decision, not a plan.** It says whether tools are needed
+ * and hints at which; the planner decides what actually runs. Keeping that line
+ * matters: a router that also planned would be a second planner, and the two
+ * would disagree.
+ *
+ * **Ambiguity goes to the fast path.** A slow answer to a simple question costs
+ * seconds; a conversational answer to a request that needed a dataset wastes
+ * the researcher's time and their trust. The fast path can escalate when it
+ * discovers it needs a tool — the reverse is not possible.
  */
 
-import type { IntentResult } from '@/agents/intent';
+import { logger } from '@/lib/logger';
+import { classifyIntent, type IntentResult } from '@/agents/intent';
+import { decide, detectReference } from './routing-rules';
+import type { DatasetProfile } from '@/analysis/types';
 
-/**
- * A word boundary that works in every script.
- *
- * `\b` is defined by the ASCII word class and never matches between two Arabic
- * letters, so an Arabic pattern anchored with it matches nothing — silently,
- * in every input. Two patterns elsewhere in this codebase were dead for that
- * reason before anyone noticed.
- *
- * This asserts that what follows is not a letter or digit in any script, which
- * is what a word boundary means when the alphabet is not Latin.
- */
-const WORD_END = String.raw`(?![\p{L}\p{N}])`;
+export type RoutePath = 'fast' | 'agent';
 
-/** The same, at the start: not preceded by a letter or digit. */
-const WORD_START = String.raw`(?<![\p{L}\p{N}])`;
-import type { RouteDecision, RoutePath } from './router';
+export interface RouteDecision {
+  path: RoutePath;
+  /**
+   * Why, in a phrase. Logged rather than shown: a wrong decision needs to be
+   * traceable, and explaining routing to the user is the mode dropdown by
+   * another name.
+   */
+  reason: string;
+  confidence: number;
+  /**
+   * Capabilities the request appears to need.
+   *
+   * A hint for the planner, never an instruction. The planner reads the whole
+   * request and the available context; this reads one message. Where they
+   * disagree, the planner is right.
+   */
+  suggestedCapabilities: string[];
+  /**
+   * What the message refers to without naming: "the previous file", "it".
+   *
+   * Resolved later against the context. Recorded here because the router is
+   * where the reference is noticed.
+   */
+  referencesPrevious: 'artifact' | 'prose' | 'dataset' | 'task' | null;
+  /** Carried through so the caller need not classify twice. */
+  intent: IntentResult;
+}
 
 /*
- * References to earlier work, by the kind of thing they point at.
+ * Intents that cannot be answered from the model's own knowledge.
  *
- * These are demonstratives — "it", "the previous one", "هاي" — and they are
- * genuinely lexical: a pronoun is a pronoun, and no amount of semantic
- * analysis changes which noun phrase it stands for. What the pronoun *resolves
- * to* is context work, done elsewhere; noticing that one is present is this.
+ * Derived from what each capability does rather than from phrasing: a request
+ * for current information needs a search whatever words carry it, and a
+ * reliability coefficient needs a dataset and arithmetic. Listing intents
+ * rather than keywords is what makes this work across dialects and typos —
+ * the classifier already handled the language, and this reads its answer.
  */
-const REFERS_BACK = {
-  artifact: [
-    /\b(?:the\s+)?(?:previous|last|earlier)\s+(?:file|document|report|paper)\b/i,
-    /\b(?:convert|turn|export)\s+(?:it|that|this)\b/i,
-    new RegExp(
-      `(?:الملف|البحث|المستند|التقرير|الورقة|الفصل)\\s*(?:السابق|السابقة|اللي\\s*قبل|الأخير|الأخيرة|الماضي)`,
-      'u',
-    ),
-    new RegExp(`${WORD_START}(?:حوّله|حوله|حوّل|حول|حوليه|خليه|اعمله|سوّيه)`, 'u'),
-  ],
-  prose: [
-    /\b(?:shorten|expand|rewrite|revise|edit)\s+(?:it|that|this|the\s+\w+)\b/i,
-    /*
-     * The verb is what carries the reference; what follows it varies. "اختصر
-     * الفصل الثالث" names a chapter, "اختصره" attaches a pronoun, and
-     * "اختصر اللي كتبته" names a clause — requiring a particular noun shape
-     * after the verb missed all but the first.
-     */
-    /*
-     * The verb carries the reference; what follows it varies. "اختصر الفصل
-     * الثالث" names a chapter, "اختصره" attaches a pronoun, "اختصر اللي كتبته"
-     * names a clause — requiring a particular noun shape missed all but one.
-     *
-     * No `\b` here: a word boundary is defined by the ASCII word character
-     * class, so it never matches between two Arabic letters and the anchor
-     * silently fails. The alternation is anchored to the start of a word by
-     * the optional prefix instead.
-     */
-    /*
-     * Anchored with a Unicode-safe boundary rather than `\b`, and matching the
-     * verb rather than what follows it: "اختصر الفصل الثالث" names a chapter,
-     * "اختصره" attaches a pronoun, "اختصر اللي كتبته" names a clause, and
-     * requiring a particular noun shape after the verb missed all but one.
-     */
-    new RegExp(
-      `${WORD_START}(?:اختصر|اختصري|طوّل|طول|أعد\\s*كتابة|اعد\\s*كتابة|عدّل|عدل|صحّح|صحح|راجع|لخّص|لخص)`,
-      'u',
-    ),
-  ],
-  dataset: [
-    /\b(?:this|the|my)\s+(?:data|dataset|file|spreadsheet)\b/i,
-    new RegExp(
-      `${WORD_START}(?:هاي|هذه|هذي|هاد|هذا)\\s*(?:الداتا|البيانات|الملف|الجدول|الإكسل|الاكسل)`,
-      'u',
-    ),
-  ],
-  task: [
-    /\b(?:continue|carry on|resume|finish)\b/i,
-    new RegExp(`${WORD_START}(?:أكمل|اكمل|كمّل|كمل|تابع|واصل|كفي)${WORD_END}`, 'u'),
-  ],
-} as const;
+const NEEDS_TOOLS = new Set([
+  /* Anything needing sources the model does not hold. */
+  'research.web',
+  'research.deep',
+  'research.literature',
+  'research.plan',
+  'research.section',
+  'research.results',
+  'research.survey',
 
+  /*
+   * Anything needing arithmetic over a dataset. The engines are authoritative
+   * here — a model that computes a correlation from imagination produces a
+   * number that looks like a finding.
+   */
+  'stats.reliability',
+  'stats.compare',
+  'stats.relate',
+  'stats.predict',
+  'stats.categorical',
+  'stats.nonparametric',
+  'stats.logistic',
+  'stats.plsSem',
+  'stats.cbSem',
+  'stats.recommend',
+  'data.clean',
+  'data.describe',
+  'data.inspect',
+]);
+
+/** Which capability each tool-needing intent points at. */
+const CAPABILITY_FOR: Record<string, string[]> = {
+  'research.web': ['web.search'],
+  'research.deep': ['deep.research'],
+  'research.literature': ['academic.search', 'literature.review'],
+  'research.plan': ['academic.search', 'document.write'],
+  'research.section': ['document.write'],
+  'research.results': ['document.write'],
+  'research.survey': ['survey.generate'],
+
+  'stats.reliability': ['statistics.run'],
+  'stats.compare': ['statistics.run'],
+  'stats.relate': ['statistics.run'],
+  'stats.predict': ['statistics.run'],
+  'stats.categorical': ['statistics.run'],
+  'stats.nonparametric': ['statistics.run'],
+  'stats.logistic': ['statistics.run'],
+  'stats.recommend': ['file.analyse'],
+  'stats.plsSem': ['statistics.pls'],
+  'stats.cbSem': ['statistics.cbsem'],
+
+  'data.clean': ['file.analyse'],
+  'data.describe': ['statistics.run'],
+  'data.inspect': ['file.analyse'],
+};
+
+/*
+ * Formats a request may name, and the fact that naming one implies a file.
+ *
+ * Matched as words rather than parsed, because this is the one place where a
+ * literal is genuinely what is meant: "PDF" names PDF in every language and
+ * dialect, and a classifier call to establish that would be a call spent on
+ * nothing. The semantic work is the classifier's; this is a lookup.
+ */
+const FORMAT_WORDS = [
+  /\b(?:word|docx)\b/i,
+  /\bpdf\b/i,
+  /\b(?:powerpoint|pptx|presentation)\b/i,
+  /\b(?:excel|xlsx|spreadsheet)\b/i,
+  /\bcsv\b/i,
+  /\b(?:bibtex|\.bib)\b/i,
+  /\bris\b/i,
+  /وورد|بي\s*دي\s*اف|بوربوينت|إكسل|اكسل|عرض\s*تقديمي|ملف\s*نصي/,
+];
+
+
+export interface RouteInput {
+  message: string;
+  locale: 'ar' | 'en';
+  /** Whether a file is attached or already in the conversation. */
+  hasDataset?: boolean;
+  profile?: DatasetProfile | null;
+  /** Whether earlier work exists that a reference could point at. */
+  hasPriorWork?: boolean;
+  history?: { role: 'user' | 'assistant'; content: string }[];
+  userId: string;
+}
 
 /**
- * The routing rule itself, separated so it can be tested without a model.
+ * Routes one message.
  *
- * Ordered from most certain to least. Each condition is a reason the request
- * cannot be answered conversationally, and the fast path is what remains.
+ * The classifier does the semantic work — it already handles dialects, typos
+ * and mixed script, and rebuilding that here would be a second, worse copy.
+ * This reads its answer and decides what kind of execution the request needs.
  */
-export function decide(input: {
-  intent: Pick<IntentResult, 'intent' | 'confidence'>;
-  needsTools: boolean;
-  wantsFile: boolean;
-  referencesPrevious: RouteDecision['referencesPrevious'];
-  hasDataset: boolean;
-}): { path: RoutePath; reason: string; confidence: number } {
-  /*
-   * A file was asked for. Producing one is a task with an artifact at the end,
-   * and no conversational answer satisfies it — telling someone to copy text
-   * into Word is the failure this product was built to remove.
-   */
-  if (input.wantsFile) {
-    return { path: 'agent', reason: 'a file was requested', confidence: 0.9 };
-  }
+export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
+  const intent = await classifyIntent({
+    message: input.message,
+    locale: input.locale,
+    profile: input.profile ?? null,
+    history: input.history,
+  });
 
-  /* The intent names work that needs a tool: a search, a computation, a file. */
-  if (input.needsTools) {
-    return { path: 'agent', reason: `intent ${input.intent.intent} needs tools`, confidence: 0.85 };
-  }
+  const referencesPrevious = detectReference(input.message, input.hasPriorWork ?? false);
+
+  const wantsFile = FORMAT_WORDS.some((pattern) => pattern.test(input.message));
+  const needsTools = NEEDS_TOOLS.has(intent.intent);
+
+  const suggested = new Set(CAPABILITY_FOR[intent.intent] ?? []);
+  if (wantsFile) suggested.add('document.generate');
 
   /*
-   * A reference to earlier work that produced a file or prose. Resolving it
-   * means reading artifacts and outputs, which is agent work — and answering
-   * "convert it to PDF" conversationally would produce a description of a file
-   * rather than a file.
+   * A dataset in the conversation and a request that mentions it. The intent
+   * classifier sees the column names, so it has already decided whether the
+   * message is about them — this only adds the capability.
    */
-  if (input.referencesPrevious === 'artifact' || input.referencesPrevious === 'prose') {
-    return { path: 'agent', reason: 'refers to earlier work', confidence: 0.75 };
+  if (input.hasDataset && intent.mentionedColumns.length > 0) {
+    suggested.add('file.analyse');
   }
 
-  /*
-   * A dataset present and an analysis intent. The classifier has seen the
-   * columns; if it thinks the message is about them, the numbers must come
-   * from the engines and not from the model's imagination.
-   */
-  if (input.hasDataset && input.intent.intent.startsWith('stats.')) {
-    return { path: 'agent', reason: 'analysis of an attached dataset', confidence: 0.9 };
-  }
+  const decision = decide({
+    intent,
+    needsTools,
+    wantsFile,
+    referencesPrevious,
+    hasDataset: input.hasDataset ?? false,
+  });
 
-  /*
-   * Everything else answers conversationally.
-   *
-   * Including low-confidence classifications: uncertainty about *which tool*
-   * is not evidence that a tool is needed, and sending an ordinary question
-   * through a planner costs the researcher a minute to be told what a sentence
-   * would have said. The fast path escalates if it turns out to be wrong,
-   * which is the safer direction to be wrong in.
-   */
+  logger.info('route.decided', {
+    path: decision.path,
+    intent: intent.intent,
+    reason: decision.reason,
+    confidence: decision.confidence,
+    suggested: [...suggested],
+    referencesPrevious,
+  });
+
   return {
-    path: 'fast',
-    reason: 'answerable directly',
-    confidence: input.intent.confidence,
+    ...decision,
+    suggestedCapabilities: [...suggested],
+    referencesPrevious,
+    intent,
   };
 }
 
-/**
- * Whether the message points at something earlier, and at what kind of thing.
- *
- * Only meaningful when earlier work exists: "convert it" in the first message
- * of a conversation refers to nothing, and treating it as a reference would
- * send the request to an agent that has nothing to convert.
- */
-export function detectReference(
-  message: string,
-  hasPriorWork: boolean,
-): RouteDecision['referencesPrevious'] {
-  if (!hasPriorWork) return null;
-
-  /*
-   * Ordered by specificity. "Convert the previous file to PDF" refers to an
-   * artifact and also matches the prose patterns; the artifact reading is the
-   * right one, so it is checked first.
-   */
-  for (const kind of ['artifact', 'prose', 'dataset', 'task'] as const) {
-    if (REFERS_BACK[kind].some((pattern) => pattern.test(message))) return kind;
-  }
-
-  return null;
-}
+export { decide, detectReference } from './routing-rules';
 

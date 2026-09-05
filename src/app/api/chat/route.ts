@@ -8,6 +8,7 @@ import { buildContextPrompt } from '@/server/context/manager';
 import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
+import { recordTurn } from '@/server/services/chat.service';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as artifactsRepo from '@/server/repositories/artifacts.repository';
@@ -239,6 +240,41 @@ export const POST = withApi<Body>(
           : {}),
       });
 
+      /*
+       * The task id written into the conversation.
+       *
+       * A task writes its progress to a panel and its output to a file — the
+       * conversation held nothing about it, so a page reload lost the panel
+       * and the researcher had a task running with no way to watch it. The
+       * message payload is where a turn's non-text content already lives, so
+       * this needs no migration.
+       */
+      if (body.conversationId) {
+        await recordTurn({
+          conversationId: body.conversationId,
+          userId: user.id,
+          userMessage: body.message,
+          assistantMessage: decision.intent.restatement || ' ',
+          /*
+           * Written in the shape the chat already reads back.
+           *
+           * `toTurns` maps `payload.results` onto a turn's results, so storing
+           * the task reference this way means a reloaded conversation renders
+           * the progress panel with no change to the loading path — and a
+           * researcher who reloads during a ten-minute run finds their task
+           * where they left it.
+           */
+          payload: { results: [{ kind: 'task', runId: task.id, payload: null }] },
+        }).catch((error: unknown) => {
+          /*
+           * A failed write must not fail the task. The work is already running;
+           * losing the ability to reattach after a reload is a smaller harm
+           * than refusing to start.
+           */
+          logger.warn('chat.turnNotRecorded', { error: String(error).slice(0, 200) });
+        });
+      }
+
       logger.info('chat.delegatedToAgent', {
         resolvedTo: resolved?.status === 'resolved' ? resolved.candidate.id : null,
         taskId: task.id,
@@ -364,4 +400,5 @@ export const POST = withApi<Body>(
     });
   },
 );
+
 

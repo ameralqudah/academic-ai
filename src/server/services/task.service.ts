@@ -40,6 +40,23 @@ export async function startTask(input: {
   conversationId?: string | null;
   datasetId?: string | null;
   budget?: Partial<TaskBudget>;
+  /**
+   * What the request referred to without naming.
+   *
+   * Resolved before the task starts, because a planner told to "convert it to
+   * PDF" with no subject searches for a paper that already exists and produces
+   * a second one — which the researcher discovers on opening the file.
+   *
+   * The id travels, not the content: a handler that needs the text fetches it,
+   * and one that only needs to know a file exists does not pay for its bytes.
+   */
+  references?: {
+    kind: 'artifact' | 'prose' | 'dataset' | 'task';
+    id: string;
+    taskId?: string;
+    /** The format asked for, when the request named one. */
+    targetFormat?: string;
+  };
 }): Promise<Task> {
   const active = (await tasksRepo.listForUser(input.userId, 20)).filter((task) =>
     ['QUEUED', 'PLANNING', 'RUNNING'].includes(task.status),
@@ -66,7 +83,12 @@ export async function startTask(input: {
     request: input.request,
     locale: input.locale,
     status: 'QUEUED',
-    context: input.datasetId ? { datasetId: input.datasetId } : {},
+    context: {
+      ...(input.datasetId ? { datasetId: input.datasetId } : {}),
+      ...(input.references ? { references: input.references } : {}),
+      /* The request itself, so a handler can read what was asked. */
+      request: input.request,
+    },
     budget: budget as unknown as Record<string, number>,
     spent: { modelCalls: 0, retries: 0 },
   });
@@ -411,3 +433,4 @@ export async function resumeInterrupted(): Promise<number> {
 
   return tasks.length;
 }
+

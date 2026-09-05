@@ -473,6 +473,13 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
           });
         }
 
+        /*
+         * Visible while it happens. Extending a plan takes a model call, and a
+         * researcher watching a step list that has stopped moving for ten
+         * seconds has no way to tell thinking from hanging.
+         */
+        await tasksRepo.setStatus(taskId, 'REPLANNING');
+
         const added = await options.onSuggestion(current, {
           stepId: claimed.id,
           capability: claimed.capability,
@@ -482,6 +489,8 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
           confidence: observation.confidence,
           warnings: observation.warnings,
         }, room);
+
+        await tasksRepo.setStatus(taskId, 'RUNNING');
 
         if (added > 0) logger.info('task.stepsAdded', { taskId, added, from: observation.status });
       }
@@ -676,3 +685,4 @@ async function executeStep(
     clearTimeout(timeout);
   }
 }
+

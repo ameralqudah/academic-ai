@@ -137,6 +137,25 @@ export async function runCompletion(input: {
         model: input.provider.model,
         detail: error.message.slice(0, 300),
       });
+      /*
+       * A quota is not an outage, and saying so matters.
+       *
+       * A researcher saw "The AI service is not reachable right now" when the
+       * provider had returned 429 — their allowance was spent. "Unreachable"
+       * describes something broken that they cannot influence; "you have used
+       * your quota" describes something they can wait out or raise. The two
+       * lead to entirely different actions, and the generic message pointed at
+       * neither.
+       */
+      if (error.status === 429 || /quota|rate.?limit/i.test(error.message)) {
+        throw new AppError(
+          'AI_UNAVAILABLE',
+          'The AI provider quota has been used up. It resets on its own — try again later, or raise the limit in the provider console.',
+          'انتهت حصّتك من مزوّد الذكاء الاصطناعي. تتجدّد تلقائيًا — أعد المحاولة لاحقًا أو ارفع الحدّ من لوحة المزوّد.',
+          error.message.slice(0, 400),
+        );
+      }
+
       throw AppError.aiUnavailable(error.message.slice(0, 400));
     }
     throw error;
@@ -1332,3 +1351,4 @@ export async function listProjectSections(userId: string, projectId: string) {
   await getOwnedProject(projectId, userId);
   return projectsRepo.listSections(projectId);
 }
+

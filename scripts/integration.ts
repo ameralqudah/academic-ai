@@ -3872,6 +3872,53 @@ async function main() {
     check('a message naming no format', namedFormat('اختصره'), null);
   }
 
+
+  /* --- prior work is detected from files, not from messages ------------ */
+
+  {
+    /*
+     * The defect a live run exposed. A task writes its output to a file and
+     * its progress to a panel — not to the conversation — so a researcher who
+     * received a Word document and then wrote "حوّله PDF" had an empty message
+     * history, and the reference was ignored as though nothing existed.
+     */
+    const chatSource = await readFile('src/app/api/chat/route.ts', 'utf8');
+
+    assertTrue(
+      'prior work is detected from artifacts and tasks',
+      chatSource.includes('hasEarlierWork'),
+    );
+    assertTrue(
+      'not from the message count alone',
+      !chatSource.includes('hasPriorWork: history.length > 0,'),
+    );
+  }
+
+  {
+    /*
+     * A conversion plan is trimmed to the conversion. The planner is told the
+     * work exists and sometimes plans a search anyway, which produces a second
+     * paper instead of the file that was asked for.
+     */
+    const serviceSource = await readFile('src/server/services/task.service.ts', 'utf8');
+
+    assertTrue(
+      'a referencing task keeps only transforming steps',
+      serviceSource.includes("['document.generate', 'document.write', 'quality.check']"),
+    );
+    assertTrue(
+      'and falls back to a single generate step',
+      serviceSource.includes("capability: 'document.generate'") &&
+        serviceSource.includes('referencing && steps.length === 0'),
+    );
+
+    const plannerSource = await readFile('src/server/tasks/planner.ts', 'utf8');
+    assertTrue(
+      'the planner is told the work already exists',
+      plannerSource.includes('THIS REQUEST REFERS TO EXISTING WORK'),
+    );
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 

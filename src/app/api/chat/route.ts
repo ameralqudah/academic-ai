@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { logger } from '@/lib/logger';
 import { routeRequest } from '@/server/agent/router';
 import { namedFormat, resolveReference, type Resolution } from '@/server/agent/continuity';
+import { decideOutputLanguage } from '@/server/context/language';
 import { buildContextPrompt } from '@/server/context/manager';
 import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion } from '@/server/services/ai.service';
@@ -122,9 +123,25 @@ export const POST = withApi<Body>(
     const hasEarlierWork =
       recentArtifacts.length > 0 || recentTasks.length > 0 || Boolean(dataset);
 
+    /*
+     * The language the request was written in, not the one the interface is
+     * set to.
+     *
+     * A researcher writing Arabic in an English interface received an English
+     * restatement of their own Arabic sentence — the classifier was told to
+     * answer in `body.locale`, which describes what they are reading rather
+     * than what they wrote. The writing handlers were moved off this months
+     * ago in product time; the classifier was not.
+     */
+    const requestLanguage = decideOutputLanguage({
+      request: body.message,
+      history: history.filter((turn) => turn.role === 'user').map((turn) => turn.content),
+      interfaceLocale: body.locale,
+    }).language;
+
     const decision = await routeRequest({
       message: body.message,
-      locale: body.locale,
+      locale: requestLanguage,
       hasDataset: Boolean(dataset),
       profile: (dataset?.profile as never) ?? null,
       /*
@@ -156,7 +173,7 @@ export const POST = withApi<Body>(
         userId: user.id,
         kind: decision.referencesPrevious,
         message: body.message,
-        locale: body.locale,
+        locale: requestLanguage,
         conversationId: body.conversationId ?? null,
         projectId: body.projectId ?? null,
       });
@@ -203,7 +220,7 @@ export const POST = withApi<Body>(
       const task = await startTask({
         userId: user.id,
         request: body.message,
-        locale: body.locale,
+        locale: requestLanguage,
         projectId: body.projectId ?? null,
         conversationId: body.conversationId ?? null,
         datasetId:
@@ -258,7 +275,7 @@ export const POST = withApi<Body>(
         conversationId: body.conversationId ?? null,
         projectId: body.projectId ?? null,
         datasetId: body.datasetId ?? null,
-        locale: body.locale,
+        locale: requestLanguage,
       });
 
       contextPrompt = built.prompt;
@@ -273,7 +290,7 @@ export const POST = withApi<Body>(
     const answer = await answerGeneralQuestion({
       userId: user.id,
       message: body.message,
-      locale: body.locale,
+      locale: requestLanguage,
       projectId: body.projectId ?? null,
       history: [],
       ...(contextPrompt
@@ -305,7 +322,7 @@ export const POST = withApi<Body>(
       const task = await startTask({
         userId: user.id,
         request: body.message,
-        locale: body.locale,
+        locale: requestLanguage,
         projectId: body.projectId ?? null,
         conversationId: body.conversationId ?? null,
         datasetId: body.datasetId ?? null,

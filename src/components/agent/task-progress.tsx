@@ -77,13 +77,42 @@ export function TaskProgress({
   const [answer, setAnswer] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /* Whether live updates are arriving, shown as a quiet indicator. */
+  const [streaming, setStreaming] = useState(false);
 
   /* Guards against the finish callback firing twice on a late poll. */
   const finished = useRef(false);
 
   useEffect(() => {
     let active = true;
+    let source: EventSource | null = null;
 
+    /**
+     * Applies a payload from either transport.
+     *
+     * Shared so the stream and the poll cannot drift: two copies of "what to do
+     * with an update" is two places for the finish callback to be forgotten.
+     */
+    function apply(data: { task: TaskView; steps: TaskStepView[] }) {
+      if (!active) return;
+
+      setTask(data.task);
+      setSteps(data.steps);
+
+      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(data.task.status) && !finished.current) {
+        finished.current = true;
+        onFinished?.(data.task, data.steps);
+      }
+    }
+
+    /**
+     * Polling, kept as the fallback it always was.
+     *
+     * A proxy that buffers, a network that drops idle connections, a browser
+     * without EventSource — any of these breaks the stream, and none of them
+     * should leave the researcher watching a frozen panel. Slower is not
+     * broken.
+     */
     async function poll() {
       for (let attempt = 0; attempt < 900 && active; attempt += 1) {
         try {
@@ -93,25 +122,14 @@ export function TaskProgress({
           if (!json.ok) break;
 
           const data = json.data as { task: TaskView; steps: TaskStepView[] };
+          apply(data);
 
-          if (!active) return;
-
-          setTask(data.task);
-          setSteps(data.steps);
-
-          const settled = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(data.task.status);
-
-          if (settled && !finished.current) {
-            finished.current = true;
-            onFinished?.(data.task, data.steps);
-            return;
-          }
+          if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(data.task.status)) return;
 
           /*
            * Polling stops while the task waits for an answer or sits at a
            * limit. Nothing will change until the person acts, and continuing
-           * to poll every two seconds for an hour is load nobody benefits
-           * from.
+           * every two seconds for an hour is load nobody benefits from.
            */
           if (data.task.status === 'WAITING_FOR_INPUT' || data.task.status === 'PAUSED') return;
         } catch {
@@ -122,10 +140,67 @@ export function TaskProgress({
       }
     }
 
-    void poll();
+    /**
+     * The stream, which is the normal path.
+     *
+     * `EventSource` reconnects on its own when a connection drops, so a brief
+     * network interruption costs nothing visible. What it cannot recover from
+     * is a server that refuses the stream at all, and that is what the error
+     * handler falls back from.
+     */
+    function connect() {
+      try {
+        source = new EventSource(`/api/tasks/${taskId}/stream`);
+
+        source.addEventListener('update', (event) => {
+          try {
+            apply(JSON.parse((event as MessageEvent).data));
+            setStreaming(true);
+          } catch {
+            /* A malformed frame is skipped; the next one carries the state. */
+          }
+        });
+
+        source.addEventListener('done', () => {
+          source?.close();
+          source = null;
+        });
+
+        /*
+         * The stream ending at its own time limit. Reconnecting is deliberate
+         * rather than left to EventSource, because the server closed cleanly
+         * and the browser would otherwise wait out its backoff.
+         */
+        source.addEventListener('reconnect', () => {
+          source?.close();
+          source = null;
+          if (active) connect();
+        });
+
+        source.onerror = () => {
+          /*
+           * EventSource retries by itself while the connection can be made at
+           * all. Falling back to polling only when it has given up entirely
+           * avoids running both transports at once.
+           */
+          if (source?.readyState === EventSource.CLOSED) {
+            source = null;
+            setStreaming(false);
+            void poll();
+          }
+        };
+      } catch {
+        /* No EventSource in this environment. */
+        setStreaming(false);
+        void poll();
+      }
+    }
+
+    connect();
 
     return () => {
       active = false;
+      source?.close();
     };
   }, [taskId, onFinished]);
 
@@ -172,7 +247,9 @@ export function TaskProgress({
       });
 
       finished.current = false;
-      setTask((current) => (current ? { ...current, status: 'RUNNING', pauseReasonKey: null } : current));
+      setTask((current) =>
+        current ? { ...current, status: 'RUNNING', pauseReasonKey: null, errorReasonKey: null } : current,
+      );
     } finally {
       setSending(false);
     }
@@ -205,6 +282,15 @@ export function TaskProgress({
           <span className="text-xs text-muted">
             {t('stepCount', { done: completed, total: steps.length })}
           </span>
+        )}
+
+        {/*
+          A quiet mark that updates are live. Not a label: a researcher does
+          not need to know which transport is carrying their progress, only
+          that it is moving.
+        */}
+        {running && streaming && (
+          <span className="size-1.5 rounded-full bg-accent" aria-hidden />
         )}
 
         {running && (
@@ -293,6 +379,33 @@ export function TaskProgress({
         A pause at a limit, which is not a failure: the work done is kept and
         the person decides whether to continue.
       */}
+      {/*
+        A failed task offers a retry.
+
+        A step that failed on a quota or a provider outage will succeed on the
+        next attempt, and the work already done is still there — making the
+        researcher start over would discard steps that completed. The button
+        continues from the failed step rather than replanning.
+      */}
+      {task.status === 'FAILED' && (
+        <div className="flex items-start gap-2 rounded-lg border border-danger/40 bg-subtle p-3">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+          <span className="flex-1 text-sm text-ink">
+            {task.errorReasonKey
+              ? t(`step.reason.${task.errorReasonKey.split('.').pop()}`)
+              : t('failedBeforePlanning')}
+          </span>
+          <button
+            type="button"
+            onClick={() => void resume()}
+            disabled={sending}
+            className="shrink-0 rounded-lg border border-line px-2 py-1 text-xs text-accent hover:border-accent disabled:opacity-50"
+          >
+            {t('retry')}
+          </button>
+        </div>
+      )}
+
       {task.status === 'PAUSED' && (
         <div className="flex items-center gap-2 rounded-lg border border-line bg-subtle p-3">
           <Pause className="size-4 shrink-0 text-muted" aria-hidden />
@@ -461,3 +574,4 @@ function StepRow({ step }: { step: TaskStepView }) {
     </li>
   );
 }
+

@@ -409,18 +409,31 @@ export function AgentChat({
       return;
     }
 
-    /*
-     * A request that describes work rather than asking a question goes to the
-     * task system: it is planned, executed across steps, and produces files.
-     *
-     * Detected by the composer's mode rather than by guessing, because the
-     * difference between "explain PLS-SEM" and "run PLS-SEM on my data and
-     * write the results chapter" is a difference in what the person wants
-     * done, and getting it wrong either way is worse than asking them to
-     * choose once.
-     */
     if (mode === 'workspace') {
       void runWorkspaceTask(trimmed);
+      return;
+    }
+
+    /*
+     * No mode chosen: the agent decides.
+     *
+     * The modes above remain as shortcuts for someone who knows they want a
+     * deep research run and does not want it reasoned about. But choosing is
+     * no longer the price of using the product — a researcher who writes
+     * "analyse my data" gets an analysis without first knowing which mode
+     * analyses data, and one who writes "explain Cronbach's alpha" gets an
+     * answer without a planner deciding how to explain it.
+     */
+    /*
+     * The routed path replaces the streaming one for an unselected mode.
+     *
+     * Everything below belongs to the old `/api/agent` stream and is kept for
+     * the mode shortcuts above — returning here would leave it unreachable and
+     * TypeScript would stop narrowing inside it, which is how two real errors
+     * appeared in code that had not changed.
+     */
+    if (mode === 'chat') {
+      void runRouted(trimmed);
       return;
     }
 
@@ -1097,6 +1110,76 @@ export function AgentChat({
       ]);
     } catch {
       setError(te('network'));
+    }
+  }
+
+  /**
+   * Sends a message and lets the server decide what it needs.
+   *
+   * Two outcomes: an answer, which appears as a normal turn, or a task, which
+   * appears as the progress panel. The client does not choose between them and
+   * does not need to know how the choice was made — that reasoning is the mode
+   * dropdown by another name.
+   */
+  async function runRouted(message: string) {
+    setError(null);
+    setDraft('');
+    setBusy(true);
+
+    const thread = conversationId ?? (await ensureConversation(message));
+
+    setTurns((current) => [
+      ...current,
+      { id: crypto.randomUUID(), role: 'user', text: message },
+    ]);
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          locale,
+          conversationId: thread ?? undefined,
+          projectId: projectId ?? undefined,
+          datasetId: file?.datasetId ?? undefined,
+        }),
+      });
+
+      const json = await response.json();
+
+      if (!response.ok || !json.ok) {
+        setError((locale === 'ar' ? json?.error?.messageAr : json?.error?.message) ?? te('generic'));
+        return;
+      }
+
+      if (json.data.path === 'agent') {
+        /*
+         * A task, shown as the progress panel. The restatement appears with it
+         * so the wait is not silent while the plan is built — a blank panel for
+         * twenty seconds reads as a hang.
+         */
+        setTurns((current) => [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            ...(json.data.restatement ? { text: json.data.restatement } : {}),
+            results: [{ kind: 'task', runId: json.data.task.id as string, payload: null }],
+          },
+        ]);
+
+        return;
+      }
+
+      setTurns((current) => [
+        ...current,
+        { id: crypto.randomUUID(), role: 'assistant', text: json.data.content as string },
+      ]);
+    } catch {
+      setError(te('network'));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -1877,3 +1960,4 @@ function Welcome({ onPick }: { onPick: (text: string) => void }) {
     </div>
   );
 }
+

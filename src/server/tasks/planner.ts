@@ -160,7 +160,13 @@ ${
 
    Omitting the format silently produces a Markdown file, which is not what someone asking for Word wanted and gives them no way to tell what happened.
 
-9. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
+${
+  input.context.references
+    ? `\n9. THIS REQUEST REFERS TO EXISTING WORK. A ${(input.context.references as { kind?: string }).kind} the researcher already has was identified before planning began, and it is in the task context. Plan the transformation only — a single document.generate step, or one rewrite step and then generation. Do not plan a search, a review or a fresh chapter: the content exists, and producing it again would give the researcher a second paper instead of the file they asked for.\n`
+    : ''
+}
+
+10. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
 
   const result = await runCompletion({
     userId: input.userId,

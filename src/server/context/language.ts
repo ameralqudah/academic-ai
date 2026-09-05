@@ -25,6 +25,20 @@ export interface LanguageDecision {
   confidence: number;
 }
 
+/**
+ * A word boundary that works in every script.
+ *
+ * `\b` is defined by the ASCII word class, so it never matches between two
+ * Arabic letters — `/عربي\b/` matched nothing at all, in any input, and did so
+ * silently. Two patterns in this file were dead for that reason.
+ *
+ * The replacement asserts that what follows is not a letter or digit in any
+ * script, which is what a word boundary means when the alphabet is not
+ * Latin. Diacritics are excluded from the "letter" class deliberately, so
+ * "عربيًا" still ends the word "عربي".
+ */
+const WORD_END = '(?![\\p{L}\\p{N}])';
+
 /*
  * Phrases that name an output language directly.
  *
@@ -39,7 +53,7 @@ const WANTS_ENGLISH = [
   /بالانجليزي(?:ة|ه)?/,
   /باللغة\s*الإنجليزية/,
   /باللغة\s*الانجليزية/,
-  /انجليزي\b/,
+  new RegExp(`انجليزي${WORD_END}`, 'u'),
 ];
 
 const WANTS_ARABIC = [
@@ -47,7 +61,7 @@ const WANTS_ARABIC = [
   /\barabic\s+(?:version|output|please|only)\b/i,
   /بالعربي(?:ة|ه)?/,
   /باللغة\s*العربية/,
-  /عربي\b/,
+  new RegExp(`عربي${WORD_END}`, 'u'),
 ];
 
 /** How much of the text is Arabic script, ignoring digits and punctuation. */
@@ -152,3 +166,4 @@ export function languageInstruction(language: OutputLanguage): string {
     ? 'اكتب ردّك كاملًا بالعربية الفصحى. لا تكتب أي جملة بالإنجليزية إلا للمصطلحات التقنية التي لا مقابل لها.'
     : 'Write your entire response in English.';
 }
+

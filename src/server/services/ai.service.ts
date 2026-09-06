@@ -18,6 +18,9 @@ import {
   titleImprovementPrompt,
 } from '@/ai/prompts/titles';
 import { resolveProvider } from '@/ai/registry';
+import { requirementsFor } from '@/server/ai/model-requirements';
+import { alternativeProvider, selectModel } from '@/server/ai/model-router';
+import { shouldFailOver } from '@/server/ai/model-requirements';
 import type { AIProvider } from '@/ai/provider';
 import { AIProviderError, type AIChatMessage, type AITask, type ProjectContext } from '@/ai/types';
 import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
@@ -65,6 +68,15 @@ async function prepare(
   await assertCanUseAI(userId, estimatedWords);
 
   const { project, sections } = await getProjectWithSections(projectId, userId);
+
+  /*
+   * Resolved rather than routed, deliberately.
+   *
+   * This is a configuration check — "is any provider usable at all" — and it
+   * runs before the work is known. Routing here would ask the router to pick a
+   * model for a task that has not been described yet, and the answer would be
+   * discarded: the callers below route their own calls.
+   */
   const provider = await resolveProvider();
 
   if (!provider.isConfigured()) {
@@ -84,6 +96,43 @@ async function prepare(
  * A second implementation would be a second place for the quota check to be
  * forgotten.
  */
+/**
+ * Runs a completion, moving to another configured provider when the first one
+ * fails for its own reasons.
+ *
+ * Thin on purpose: the decision of *whether* a failure is worth retrying
+ * elsewhere lives in `shouldFailOver`, and the choice of *which* provider lives
+ * in the router. This only sequences them.
+ *
+ * With one provider configured — the usual case — there is nothing to fail
+ * over to, and the original error is thrown unchanged. Wrapping it would hide
+ * the cause that the service layer turns into a message naming the quota or
+ * the outage.
+ */
+async function runWithFailover<T>(
+  input: { provider: AIProvider; task: AITask },
+  run: (provider: AIProvider) => Promise<T>,
+): Promise<T> {
+  try {
+    return await run(input.provider);
+  } catch (error) {
+    if (!shouldFailOver(error)) throw error;
+
+    const alternative = await alternativeProvider(input.provider.name);
+
+    if (!alternative) throw error;
+
+    logger.warn('ai.failover', {
+      task: input.task,
+      from: input.provider.name,
+      to: alternative.name,
+      reason: String(error).slice(0, 200),
+    });
+
+    return run(alternative);
+  }
+}
+
 export async function runCompletion(input: {
   userId: string;
   projectId: string;
@@ -97,15 +146,28 @@ export async function runCompletion(input: {
   json?: boolean;
 }) {
   try {
-    const result = await input.provider.complete({
-      task: input.task,
-      locale: input.locale,
-      system: input.system,
-      messages: input.messages,
-      maxTokens: input.maxTokens,
-      temperature: input.temperature,
-      json: input.json,
-    });
+    /*
+     * Failover lives here because this is the one place every model call
+     * passes through. Putting it at the ten call sites would mean ten copies
+     * of the same retry, and the one that was forgotten would be the one that
+     * mattered.
+     *
+     * Only provider-side failures move to another provider: a quota, an
+     * outage, a timeout. A malformed request or a refusal would fail
+     * identically elsewhere, and retrying spends a second call to receive the
+     * same answer.
+     */
+    const result = await runWithFailover(input, (provider) =>
+      provider.complete({
+        task: input.task,
+        locale: input.locale,
+        system: input.system,
+        messages: input.messages,
+        maxTokens: input.maxTokens,
+        temperature: input.temperature,
+        json: input.json,
+      }),
+    );
 
     await recordAIUsage({
       userId: input.userId,
@@ -499,6 +561,14 @@ export async function answerGeneralQuestion(input: {
    * to diverge.
    */
   chosenModel?: { provider: 'anthropic' | 'openai' | 'google'; model: string } | null;
+  /**
+   * The capability this answer belongs to, when it belongs to one.
+   *
+   * Optional so that a plain chat message keeps its existing behaviour — it is
+   * a general answer, and that is what the default says. A capability naming
+   * itself gets a model chosen for its actual requirements instead.
+   */
+  capability?: string;
   userId: string;
   message: string;
   locale: 'ar' | 'en';
@@ -523,7 +593,23 @@ export async function answerGeneralQuestion(input: {
 }): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
   await assertCanUseAI(input.userId, 400);
 
-  const provider = await resolveProvider(input.chosenModel ?? null);
+  /*
+    * Routed rather than resolved.
+    *
+    * `resolveProvider` answers "which provider is configured"; the router
+    * answers "which model should run this particular work". Ten call sites in
+    * this file asked the first question, so a one-line classification and a
+    * chapter of prose reached the same model — the router existed and almost
+    * nothing went through it.
+    *
+    * The user's explicit choice still wins: it is passed as `preferred`, and
+    * the router returns it untouched.
+    */
+   const provider = (
+     await selectModel(requirementsFor({ capability: input.capability ?? 'general.answer' }), {
+       preferred: input.chosenModel ?? null,
+     })
+   ).provider;
 
   /*
    * Context replaces the history slice when the caller supplies a scope.
@@ -601,7 +687,8 @@ export async function extractModelStructure(input: {
 }): Promise<{ text: string; usage: { tokensIn: number; tokensOut: number } }> {
   await assertCanUseAI(input.userId, 200);
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'statistics.pls' }))).provider;
 
   const result = await runCompletion({
     userId: input.userId,
@@ -647,7 +734,8 @@ export async function answerFromSources(input: {
 }): Promise<string> {
   await assertCanUseAI(input.userId, 800);
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'general.answer' }))).provider;
 
   const rendered = input.sources
     .map(
@@ -732,7 +820,8 @@ export async function planResearch(input: {
 }): Promise<string[]> {
   await assertCanUseAI(input.userId, 300);
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
   const system =
     input.locale === 'ar'
@@ -787,7 +876,8 @@ export async function extractEvidence(input: {
 }): Promise<string> {
   await assertCanUseAI(input.userId, 500);
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'citation.verify' }))).provider;
 
   const rendered = input.sources
     .map(
@@ -864,7 +954,8 @@ export async function identifyGaps(input: {
 }): Promise<string[]> {
   await assertCanUseAI(input.userId, 300);
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'literature.review' }))).provider;
 
   const rendered = input.evidence
     .map((entry) => `Q: ${entry.subQuestion}\nFound: ${entry.findings.slice(0, 1500)}`)
@@ -926,7 +1017,8 @@ export async function synthesiseReport(input: {
 }): Promise<string> {
   await assertCanUseAI(input.userId, 1200);
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
   const evidenceBlock = input.evidence
     .map((entry) => `## ${entry.subQuestion}\n${entry.findings}`)
@@ -1015,7 +1107,8 @@ export async function generateSurveyItems(input: {
 }): Promise<string> {
   await assertCanUseAI(input.userId, Math.round(input.maxTokens / 2));
 
-  const provider = await resolveProvider();
+  /* Routed by what this work needs; see `answerGeneralQuestion` above. */
+  const provider = (await selectModel(requirementsFor({ capability: 'survey.generate' }))).provider;
 
   const result = await runCompletion({
     userId: input.userId,
@@ -1067,7 +1160,8 @@ export async function summariseSources(input: {
 }): Promise<string> {
   await assertCanUseAI(input.userId, 600);
 
-  const provider = await resolveProvider();
+  /* Routed: summarising retrieved sources, which needs no reasoning. */
+  const provider = (await selectModel(requirementsFor({ capability: 'academic.search' }))).provider;
 
   const listed = input.sources
     .map((source, index) => {

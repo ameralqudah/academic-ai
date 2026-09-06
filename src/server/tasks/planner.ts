@@ -23,7 +23,8 @@
 
 import { logger } from '@/lib/logger';
 import { runCompletion } from '@/server/services/ai.service';
-import { resolveProvider } from '@/ai/registry';
+import { requirementsFor } from '@/server/ai/model-requirements';
+import { selectModel } from '@/server/ai/model-router';
 
 import { allCapabilities, capabilityFor, isKnownCapability } from './capabilities';
 import { repairPrerequisites } from './prerequisites';
@@ -71,7 +72,12 @@ export async function planTask(input: {
    */
   suggestedCapabilities?: string[];
 }): Promise<Plan> {
-  const provider = await resolveProvider();
+  /*
+   * Routed. Planning is reasoning over a request and a context — a different
+   * call from a one-line classification, and it was reaching whichever model
+   * the environment named.
+   */
+  const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
   const capabilities = allCapabilities()
     .map(
@@ -243,7 +249,12 @@ export async function planAdditionalSteps(input: {
 }): Promise<PlannedStep[]> {
   if (input.stepsAvailable <= 0) return [];
 
-  const provider = await resolveProvider();
+  /*
+   * Routed. Planning is reasoning over a request and a context — a different
+   * call from a one-line classification, and it was reaching whichever model
+   * the environment named.
+   */
+  const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
   const capabilities = allCapabilities()
     .map((capability) => `- ${capability.id}`)

@@ -33,7 +33,8 @@
  */
 
 import { parseJsonOutput } from '@/ai/guardrails';
-import { resolveProvider } from '@/ai/registry';
+import { requirementsFor } from '@/server/ai/model-requirements';
+import { selectModel } from '@/server/ai/model-router';
 import type { AIResult } from '@/ai/types';
 import type { DatasetProfile } from '@/analysis';
 import { logger } from '@/lib/logger';
@@ -275,7 +276,11 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
    * recognised as general questions. That is deliberate: the rules are a
    * shortcut for certainty, and the model is what understands people.
    */
-  const provider = await resolveProvider();
+  /*
+   * Routed as the short, latency-sensitive classification it is. This runs on
+   * every message, so the model it reaches matters more here than anywhere.
+   */
+  const provider = (await selectModel(requirementsFor({ capability: 'general.answer' }))).provider;
 
   const history = (input.history ?? []).slice(-6);
   const result = await provider.complete({

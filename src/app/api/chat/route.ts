@@ -9,6 +9,7 @@ import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
 import { recordTurn } from '@/server/services/chat.service';
+import { ensureTasksReady } from '@/server/services/startup';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as artifactsRepo from '@/server/repositories/artifacts.repository';
@@ -93,6 +94,20 @@ export const POST = withApi<Body>(
      * message refers to real variables, and the rows are neither useful for
      * that nor safe to put in a prompt.
      */
+    /*
+     * Handlers registered before anything can start a task.
+     *
+     * `/api/tasks` did this and `/api/chat` did not — so the unified path,
+     * which is now the main way a task begins, planned work against an empty
+     * handler registry and every step failed with "that capability is not
+     * available yet". The capability list and the handler list were identical;
+     * the handlers had simply never been registered in this process.
+     *
+     * Idempotent, so calling it on every message costs one boolean check after
+     * the first.
+     */
+    await ensureTasksReady();
+
     const dataset = body.datasetId
       ? await datasetsRepo.findOwned(body.datasetId, user.id)
       : undefined;

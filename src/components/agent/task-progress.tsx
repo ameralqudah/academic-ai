@@ -325,7 +325,7 @@ export function TaskProgress({
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
           <span className="text-sm text-ink">
             {task.errorReasonKey && task.errorReasonKey !== 'task.error.crashed'
-              ? t(`step.reason.${task.errorReasonKey.split('.').pop()}`)
+              ? (reasonText(t, task.errorReasonKey) ?? t('failedBeforePlanning'))
               : /*
                  * The provider's own message when the cause was not recognised.
                  * "Stopped by an unexpected error" is true and useless — it
@@ -391,9 +391,7 @@ export function TaskProgress({
         <div className="flex items-start gap-2 rounded-lg border border-danger/40 bg-subtle p-3">
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
           <span className="flex-1 text-sm text-ink">
-            {task.errorReasonKey
-              ? t(`step.reason.${task.errorReasonKey.split('.').pop()}`)
-              : t('failedBeforePlanning')}
+            {reasonText(t, task.errorReasonKey) ?? t('failedBeforePlanning')}
           </span>
           <button
             type="button"
@@ -485,6 +483,27 @@ function taskFailureDetail(task: TaskView): string | null {
  * step list is not the place for it — the first sentence is what identifies the
  * problem.
  */
+/**
+ * A reason key's text, or null when there is none.
+ *
+ * A researcher saw `task.step.reason.stepFailed` printed on screen: the key
+ * existed in the code and not in the messages, and `next-intl` renders the
+ * path when a lookup misses. That is a debugging aid leaking into a product —
+ * it tells them nothing and looks broken.
+ *
+ * Checked rather than assumed, so a reason added tomorrow degrades to the
+ * generic sentence instead of showing its own name.
+ */
+function reasonText(t: (key: string) => string, reasonKey: string | null): string | null {
+  if (!reasonKey) return null;
+
+  const leaf = reasonKey.split('.').pop() ?? '';
+  const text = t(`step.reason.${leaf}`);
+
+  /* next-intl returns the key path when the message is missing. */
+  return text.startsWith('task.step.reason.') || text === leaf ? null : text;
+}
+
 function failureMessage(step: TaskStepView): string | null {
   const observation = (step.output as { observation?: { errors?: { message?: string }[] } } | null)
     ?.observation;
@@ -546,7 +565,7 @@ function StepRow({ step }: { step: TaskStepView }) {
               next step.
             */}
             {step.errorReasonKey && step.errorReasonKey !== 'task.error.stepThrew'
-              ? t(`step.reason.${step.errorReasonKey.split('.').pop()}`)
+              ? (reasonText(t, step.errorReasonKey) ?? t('step.failed', { attempts: step.attempts }))
               : (failureMessage(step) ?? t('step.failed', { attempts: step.attempts }))}
           </span>
         )}

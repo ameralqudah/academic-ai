@@ -199,7 +199,20 @@ export interface ReplanTrigger {
   warnings: Finding[];
 }
 
+/**
+ * How many steps may run at once by default.
+ *
+ * Three is a compromise rather than a maximum: concurrent calls to one
+ * provider hit rate limits, and a step that fails on a 429 fails for a reason
+ * unrelated to its own work. Raising it helps only when the provider allows it,
+ * which is why it is an option rather than a constant.
+ */
+const DEFAULT_CONCURRENCY = 3;
+
 export interface RunOptions {
+  /** Overrides the default. One reproduces the old serial behaviour exactly. */
+  concurrency?: number;
+
   /** Checked between steps, so cancellation takes effect within one step. */
   shouldStop?: () => Promise<boolean>;
   onProgress?: (progress: { completed: number; total: number; current?: string }) => void;
@@ -331,147 +344,193 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
     }
 
     /*
-     * One step per iteration. The readiness computation already identifies
-     * every independent step, so running them concurrently is a change to this
-     * line rather than to the design — deliberately not made yet, because
-     * concurrent model calls against one provider hit rate limits that would
-     * fail steps for reasons unrelated to their work.
+     * Every ready step at once, up to the concurrency limit.
+     *
+     * The readiness computation already identifies which steps are independent
+     * — that is what a dependency graph is for — so running them one at a time
+     * was leaving the graph's main benefit on the floor. Two searches on
+     * different topics have no reason to wait for each other, and a researcher
+     * watching them run in series waits twice as long for the same work.
+     *
+     * The limit exists because concurrent calls to one provider hit rate
+     * limits, and a step that fails on a 429 fails for a reason unrelated to
+     * its own work.
      */
-    const next = ready[0] as unknown as TaskStep;
-    const capability = capabilityFor(next.capability);
+    const maxParallel = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
+    const batch: TaskStep[] = [];
+    const projected = { ...spent };
 
-    if (!capability || !hasHandler(next.capability)) {
-      await tasksRepo.failStep(next.id, 'task.error.noHandler', false, 1);
+    for (const candidate of ready) {
+      if (batch.length >= maxParallel) break;
+
+      const step = candidate as unknown as TaskStep;
+      const capability = capabilityFor(step.capability);
+
+      if (!capability || !hasHandler(step.capability)) {
+        await tasksRepo.failStep(step.id, 'task.error.noHandler', false, 1);
+        continue;
+      }
+
+      /*
+       * Budget checked against the batch as it is assembled, not against the
+       * task's state before it. Admitting four steps that each fit the
+       * remaining budget individually would spend four times what was left.
+       */
+      if (!fitsInBudget(budget, projected, capability)) break;
+
+      /*
+       * Steps that cannot run beside another are admitted alone. A bootstrap
+       * and a deep research run are each heavy enough that pairing them makes
+       * both slower, and `parallelSafe` is where a capability says so.
+       */
+      if (!capability.parallelSafe && batch.length > 0) break;
+
+      batch.push(step);
+      projected.steps += 1;
+      projected.modelCalls += capability.estimatedModelCalls;
+
+      if (!capability.parallelSafe) break;
+    }
+
+    /*
+     * Nothing could be admitted — every ready step failed its handler check or
+     * exceeded the budget. Looping again would spin, so the budget is what
+     * stops the task.
+     */
+    if (batch.length === 0) {
+      if (ready.length > 0) {
+        await pauseAtLimit(taskId, 'maxModelCalls');
+        return;
+      }
+
       continue;
     }
-
-    if (!fitsInBudget(budget, spent, capability)) {
-      await pauseAtLimit(taskId, 'maxModelCalls');
-      return;
-    }
-
-    const claimed = await tasksRepo.claimStep(next.id);
-
-    /* Another worker took it, or it changed underneath. Re-evaluate. */
-    if (!claimed) continue;
 
     options.onProgress?.({
       completed: spent.steps,
       total: steps.length,
-      current: next.label,
+      current: batch.map((step) => step.label).join(', '),
     });
 
-    const result = await executeStep(current, claimed, steps, capability.timeoutMs);
+    /*
+     * Claimed and run together. `claimStep` is conditional on the step still
+     * being pending, so two workers racing for one step produce one winner and
+     * one `undefined` — which is what makes duplicate execution impossible
+     * rather than unlikely.
+     */
+    const outcomes = await Promise.all(
+      batch.map(async (step) => {
+        const capability = capabilityFor(step.capability);
+        if (!capability) return null;
 
-    if (result.kind === 'needs-input') {
-      /*
-       * The step is returned to pending, not failed. When the user answers, the
-       * task resumes from here rather than restarting — which is the difference
-       * between asking a question and losing an hour of work.
-       */
-      await tasksRepo.failStep(claimed.id, 'task.step.needsInput', true, capability.maxAttempts + 1);
+        const claimed = await tasksRepo.claimStep(step.id);
+        if (!claimed) return null;
+
+        const result = await executeStep(current, claimed, steps, capability.timeoutMs);
+        return { step: claimed, capability, result };
+      }),
+    );
+
+    /*
+     * Results applied after every step in the batch has finished.
+     *
+     * Writing as each one lands would let a failure stop the loop while its
+     * siblings were still running, and their writes would then land against a
+     * task that had already moved on. Collecting first means the task's state
+     * changes once per batch, from a complete picture.
+     */
+    let needsInput: { question: string } | null = null;
+
+    for (const outcome of outcomes) {
+      if (!outcome) continue;
+
+      const { step, capability, result } = outcome;
+
+      if (result.kind === 'needs-input') {
+        /*
+         * The step returns to pending, so answering resumes from here rather
+         * than restarting. Its siblings keep whatever they achieved — a
+         * question about one step is not a reason to discard another's work.
+         */
+        await tasksRepo.failStep(step.id, 'task.step.needsInput', true, capability.maxAttempts + 1);
+        needsInput = { question: result.question };
+        continue;
+      }
+
+      if (result.kind === 'failed') {
+        const { willRetry } = await tasksRepo.failStep(
+          step.id,
+          result.reasonKey,
+          capability.retryable,
+          capability.maxAttempts,
+          result.observation as unknown as Record<string, unknown>,
+        );
+
+        await tasksRepo.recordSpend(taskId, { retries: willRetry ? 1 : 0 });
+
+        logger.info('task.stepFailed', {
+          taskId,
+          capability: step.capability,
+          reason: result.reasonKey,
+          willRetry,
+        });
+
+        continue;
+      }
+
+      const observation = result.observation;
+
+      await tasksRepo.completeStep(
+        step.id,
+        {
+          outputs: observation.outputs as unknown as Record<string, unknown>[],
+          legacy: legacyShape(observation),
+          observation: observation as unknown as Record<string, unknown>,
+          status: observation.status,
+          confidence: observation.confidence,
+        } as unknown as Record<string, unknown>,
+        observation.artifacts.map((artifact) => artifact.id),
+      );
+
+      await tasksRepo.recordSpend(taskId, { modelCalls: observation.modelCalls ?? 0 });
+    }
+
+    /*
+     * A question stops the task after the batch settles, not during it. Its
+     * siblings ran to completion and their outputs are stored — stopping mid-
+     * batch would leave work finished but unrecorded.
+     */
+    if (needsInput) {
       await tasksRepo.setStatus(taskId, 'WAITING_FOR_INPUT', {
-        pendingQuestion: result.question,
+        pendingQuestion: needsInput.question,
       });
+
       return;
     }
 
-    if (result.kind === 'failed') {
-      const { willRetry } = await tasksRepo.failStep(
-        claimed.id,
-        result.reasonKey,
-        capability.retryable,
-        capability.maxAttempts,
-        result.observation as unknown as Record<string, unknown>,
-      );
-
-      await tasksRepo.recordSpend(taskId, { retries: willRetry ? 1 : 0 });
-
-      logger.info('task.stepFailed', {
-        taskId,
-        capability: next.capability,
-        reason: result.reasonKey,
-        willRetry,
-      });
-
-      continue;
-    }
-
-    const observation = result.observation;
-
     /*
-     * The typed outputs are stored alongside the legacy shape.
-     *
-     * `outputs` is what a migrated consumer reads by type; `legacy` is what an
-     * unmigrated one reads by capability name. Keeping both means producers and
-     * consumers can migrate independently rather than in one change.
+     * Replanning considered once per batch, from every observation it
+     * produced. Three signals reach the planner where one string did: a
+     * partial result with named gaps, an explicit recommendation, or low
+     * confidence.
      */
-    await tasksRepo.completeStep(
-      claimed.id,
-      {
-        outputs: observation.outputs as unknown as Record<string, unknown>[],
-        legacy: legacyShape(observation),
-        /*
-         * The whole observation, not a selection of its fields.
-         *
-         * The first version stored status, confidence, warnings and evidence
-         * individually — and a replanner reading a resumed task then had no
-         * `recommendedNextActions` and no `missingInformation`, which are
-         * exactly the fields it reasons over. Storing the record entire means a
-         * task resumed after a restart can be replanned as well as one that
-         * never stopped.
-         */
-        observation: observation as unknown as Record<string, unknown>,
-        status: observation.status,
-        confidence: observation.confidence,
-      } as unknown as Record<string, unknown>,
-      observation.artifacts.map((artifact) => artifact.id),
+    const observations = outcomes
+      .filter((outcome) => outcome?.result.kind === 'completed')
+      .map((outcome) => (outcome as { result: { observation: Observation } }).result.observation);
+
+    const wantsMore = observations.some(
+      (observation) =>
+        observation.status === 'partial' ||
+        observation.recommendedNextActions.length > 0 ||
+        observation.missingInformation.length > 0,
     );
-
-    await tasksRepo.recordSpend(taskId, { modelCalls: observation.modelCalls ?? 0 });
-
-    /*
-     * Replanning driven by structure rather than prose.
-     *
-     * Three signals now reach the planner where one string did: a partial
-     * result with named gaps, an explicit recommendation, or low confidence.
-     * The planner can act on the first two without a model call.
-     */
-    const wantsMore =
-      observation.status === 'partial' ||
-      observation.recommendedNextActions.length > 0 ||
-      observation.missingInformation.length > 0;
 
     if (wantsMore && options.onSuggestion) {
       const room = budget.maxSteps - steps.length;
 
       if (room > 0) {
-        /*
-         * The observation reaches the planner as it was written.
-         *
-         * It used to be flattened into a sentence — "academic.search: rephrase"
-         * — which threw away the named capability and the structured input, and
-         * then required a model call to reconstruct what the handler had
-         * already stated precisely. Structuring a recommendation only to
-         * stringify it at the last step is the whole failure the observation
-         * contract exists to prevent.
-         *
-         * Recommendations naming no capability are dropped here rather than
-         * passed on. An empty name cannot be acted upon, and letting one
-         * through means the planner must guess — which is the behaviour this
-         * replaced.
-         */
-        const actionable = observation.recommendedNextActions.filter(
-          (action) => action.capability.trim().length > 0,
-        );
-
-        if (actionable.length < observation.recommendedNextActions.length) {
-          logger.warn('task.recommendationWithoutCapability', {
-            taskId,
-            capability: claimed.capability,
-            dropped: observation.recommendedNextActions.length - actionable.length,
-          });
-        }
+        const refreshed = await tasksRepo.findAny(taskId);
+        if (!refreshed) return;
 
         /*
          * Visible while it happens. Extending a plan takes a model call, and a
@@ -480,19 +539,37 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
          */
         await tasksRepo.setStatus(taskId, 'REPLANNING');
 
-        const added = await options.onSuggestion(current, {
-          stepId: claimed.id,
-          capability: claimed.capability,
-          status: observation.status,
-          missingInformation: observation.missingInformation,
-          recommendedNextActions: actionable,
-          confidence: observation.confidence,
-          warnings: observation.warnings,
-        }, room);
+        /*
+         * Recommendations naming no capability are dropped rather than passed
+         * on. An empty name cannot be acted upon, and letting one through means
+         * the planner must guess — which is the behaviour the structured
+         * contract replaced.
+         */
+        const actionable = observations.flatMap((observation) =>
+          observation.recommendedNextActions.filter((action) => action.capability.trim().length > 0),
+        );
+
+        const missing = observations.flatMap((observation) => observation.missingInformation);
+
+        const leading = observations[0] as Observation | undefined;
+
+        const added = await options.onSuggestion(
+          refreshed,
+          {
+            stepId: batch[0]?.id ?? '',
+            capability: batch[0]?.capability ?? '',
+            status: leading?.status ?? 'partial',
+            missingInformation: missing,
+            recommendedNextActions: actionable,
+            confidence: leading?.confidence ?? 0.5,
+            warnings: observations.flatMap((observation) => observation.warnings),
+          },
+          room,
+        );
 
         await tasksRepo.setStatus(taskId, 'RUNNING');
 
-        if (added > 0) logger.info('task.stepsAdded', { taskId, added, from: observation.status });
+        if (added > 0) logger.info('task.stepsAdded', { taskId, added, batch: batch.length });
       }
     }
   }

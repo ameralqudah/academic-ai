@@ -2,7 +2,8 @@ import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
 import { inspectOutput, type GuardrailResult } from '@/ai/guardrails';
 import { toolPrompt } from '@/ai/prompts/tools';
-import { resolveProvider } from '@/ai/registry';
+import { requirementsFor } from '@/server/ai/model-requirements';
+import { selectModel } from '@/server/ai/model-router';
 import { AIProviderError, type ProjectContext } from '@/ai/types';
 import type { ToolKey } from '@/config/research';
 import { logger } from '@/lib/logger';
@@ -29,7 +30,8 @@ export async function runTool(input: {
   await assertToolAllowed(input.userId, input.toolKey);
   await assertCanUseAI(input.userId, countWords(input.text));
 
-  const provider = await resolveProvider();
+  /* Routed; tool selection is structured extraction rather than prose. */
+  const provider = (await selectModel(requirementsFor({ capability: 'file.analyse' }))).provider;
   if (!provider.isConfigured()) {
     throw AppError.aiUnavailable('No AI provider API key is configured.');
   }

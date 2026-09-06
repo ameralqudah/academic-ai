@@ -49,7 +49,8 @@ import {
   type ProducerContext,
 } from './contracts';
 import { registerHandler, type StepContext } from './executor';
-import { resolveProvider } from '@/ai/registry';
+import { requirementsFor, selectModel } from '@/server/ai/model-router';
+import { estimateTokens } from '@/server/context/envelope';
 import { decideOutputLanguage, languageInstruction } from '@/server/context/language';
 import { generateLongForm, incompleteNotice } from '@/server/ai/long-form';
 import { broaden, topicOf } from './query';
@@ -491,10 +492,16 @@ export function registerAllHandlers(): void {
      * "* **Robotics" with no closing sentence. A reader skimming it sees a
      * finished document.
      */
-    const reviewProvider = await resolveProvider();
+    /* The same routing for a review, which is longer still. */
+    const reviewSelection = await selectModel(
+      requirementsFor({
+        capability: 'literature.review',
+        contextTokens: estimateTokens(reviewPrompt),
+      }),
+    );
 
     const reviewed = await generateLongForm({
-      provider: reviewProvider,
+      provider: reviewSelection.provider,
       system: `${languageInstruction(reviewLanguage)}\n\nYou are writing an academic literature review. Write connected prose. Cite only the numbered sources given, and never invent a source.`,
       prompt: reviewPrompt,
       locale: reviewLanguage,
@@ -732,10 +739,24 @@ export function registerAllHandlers(): void {
         ? `اكتب قسم «${section}» من البحث بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}`
         : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}`;
 
-    const provider = await resolveProvider();
+    /*
+     * The model chosen for this step, rather than the one configured globally.
+     *
+     * Writing a chapter needs reasoning, carries whatever sources were found,
+     * and produces thousands of tokens — a very different call from a one-line
+     * classification, and previously served by the same environment variable.
+     * The router is given the step's requirements and returns a provider; it
+     * does not decide what to run, which is the planner's job.
+     */
+    const requirements = requirementsFor({
+      capability: 'document.write',
+      contextTokens: estimateTokens(`${instruction}${sourceBlock}${analysisBlock}`),
+    });
+
+    const selection = await selectModel(requirements);
 
     const generated = await generateLongForm({
-      provider,
+      provider: selection.provider,
       system: `${languageInstruction(language)}\n\nYou are writing part of an academic document. Write prose, not bullet points. Cite only the numbered sources given.`,
       prompt: instruction,
       locale: language,

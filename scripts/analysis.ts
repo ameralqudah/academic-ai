@@ -5549,6 +5549,153 @@ console.log('\nno model call bypasses the router');
 }
 
 
+
+console.log('\nquery words must appear together');
+
+/*
+ * "Hybrid learning" is a phrase, not two independent words. Requiring both to
+ * be present admitted "Hybrid Machine Learning for Spatial Databases" — which
+ * contains both, three words apart, in different noun phrases, and is about
+ * neither hybrid learning nor anything a researcher asking for it wants.
+ *
+ * The modifier list caught "hybrid" alone; it could not catch "hybrid" and
+ * "learning" both present and unrelated. Adjacency can.
+ */
+{
+  const phraseNow = new Date().toISOString();
+  const source = (title: string) => ({
+    kind: 'academic' as const,
+    title,
+    url: 'https://example.org',
+    language: 'en' as const,
+    provider: 'test',
+    retrievedAt: phraseNow,
+  });
+
+  /* Both query words, never adjacent, entirely different subjects. */
+  const scattered = [
+    source('Improving Performance of Spatial Database Based on Hybrid Machine Learning'),
+    source('A Hybrid Deep Learning Model for Network Intrusion Detection'),
+  ];
+
+  const genuine = [
+    source('The Effect of Design Thinking in Hybrid Learning Environment on Speaking Skills'),
+    source('Student engagement in hybrid learning classrooms'),
+    source('دافعية الإنجاز في بيئة التعلم الهجين المرن'),
+  ];
+
+  const result = filterByRelevance([...scattered, ...genuine], 'hybrid learning');
+
+  assertTrue(
+    'a paper about hybrid machine learning is discarded',
+    !result.kept.some((entry) => entry.title.includes('Spatial Database')),
+  );
+  assertTrue(
+    'and one about hybrid deep learning',
+    !result.kept.some((entry) => entry.title.includes('Intrusion')),
+  );
+  check('while the genuine papers survive', result.kept.length, 3);
+
+  /* The same judgement from an Arabic query, since the terms canonicalise. */
+  const arabic = filterByRelevance([...scattered, ...genuine], 'التعلم الهجين');
+  check('an Arabic query agrees', arabic.kept.length, result.kept.length);
+}
+
+{
+  /*
+   * Word order varies, so proximity is the test rather than sequence:
+   * "learning environments that are hybrid" names the same subject.
+   */
+  const reversedNow = new Date().toISOString();
+  const source = (title: string) => ({
+    kind: 'academic' as const,
+    title,
+    url: 'https://example.org',
+    language: 'en' as const,
+    provider: 'test',
+    retrievedAt: reversedNow,
+  });
+
+  const result = filterByRelevance(
+    [source('Learning hybrid models in the classroom'), source('Kidney disease diagnosis')],
+    'hybrid learning',
+  );
+
+  assertTrue(
+    'reversed order still counts as together',
+    result.kept.some((entry) => entry.title.includes('Learning hybrid')),
+  );
+}
+
+{
+  /*
+   * Only two-word queries are held to adjacency. A five-word phrase rarely
+   * appears intact in a title, and demanding it would discard the relevant
+   * along with the rest.
+   */
+  const longNow = new Date().toISOString();
+  const source = (title: string) => ({
+    kind: 'academic' as const,
+    title,
+    url: 'https://example.org',
+    language: 'en' as const,
+    provider: 'test',
+    retrievedAt: longNow,
+  });
+
+  const result = filterByRelevance(
+    [source('The Effect of Design Thinking in Hybrid Learning Environment')],
+    'design thinking hybrid learning environment',
+  );
+
+  assertTrue('a longer query is not held to adjacency', result.kept.length === 1);
+}
+
+{
+  /* A one-word query cannot be adjacent to anything, and must still work. */
+  const singleNow = new Date().toISOString();
+  const source = (title: string) => ({
+    kind: 'academic' as const,
+    title,
+    url: 'https://example.org',
+    language: 'en' as const,
+    provider: 'test',
+    retrievedAt: singleNow,
+  });
+
+  const result = filterByRelevance(
+    [source('Photosynthesis in C4 plants'), source('Hybrid learning outcomes')],
+    'photosynthesis',
+  );
+
+  check('a single-word query keeps its match', result.kept.length, 1);
+  assertTrue('the right one', result.kept[0]?.title.includes('Photosynthesis') ?? false);
+}
+
+{
+  /*
+   * Filtering still never returns nothing. Zero results hides what the
+   * provider found; the off-topic flag is what says the search went wrong.
+   */
+  const emptyNow = new Date().toISOString();
+  const wrong = [
+    {
+      kind: 'academic' as const,
+      title: 'Hybrid Matrix-Ensemble Framework for Chronic Kidney Disease',
+      url: 'https://example.org',
+      language: 'en' as const,
+      provider: 'test',
+      retrievedAt: emptyNow,
+    },
+  ];
+
+  const result = filterByRelevance(wrong, 'hybrid learning');
+
+  check('an entirely wrong corpus is returned rather than emptied', result.kept.length, 1);
+  assertTrue('but flagged as off-topic', looksOffTopic(wrong, 'hybrid learning'));
+}
+
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

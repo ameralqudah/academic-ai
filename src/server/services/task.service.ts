@@ -29,6 +29,18 @@ export function classifyFailure(detail: string): string {
   return 'task.error.crashed';
 }
 
+/**
+ * The format actually produced, which is not always the one asked for.
+ *
+ * Only one substitution exists and it is forced by a font: PDF cannot render
+ * Arabic without an embedded font file, and shipping one adds a megabyte to
+ * the bundle for a format Word already covers. Everything else is produced as
+ * requested.
+ */
+export function substituteFormat(requested: string, locale: 'ar' | 'en'): string {
+  return requested === 'pdf' && locale === 'ar' ? 'docx' : requested;
+}
+
 /** More than this in flight and the user is queueing work nobody will read. */
 const MAX_ACTIVE = 2;
 
@@ -206,9 +218,21 @@ export async function planAndRun(taskId: string): Promise<void> {
               label: 'document.generate',
               dependsOn: [],
               input: {
-                format:
-                  (task.context.references as { targetFormat?: string } | undefined)
-                    ?.targetFormat ?? 'pdf',
+                /*
+                 * PDF is replaced by Word for Arabic work.
+                 *
+                 * `pdf-lib`'s standard fonts contain no Arabic glyphs, so an
+                 * Arabic PDF opens to a blank page — the generator refuses it
+                 * now rather than delivering one. Refusing is honest and still
+                 * leaves the researcher without the file they asked for, and
+                 * a Word document that renders correctly is closer to what
+                 * they wanted than an accurate refusal.
+                 */
+                format: substituteFormat(
+                  (task.context.references as { targetFormat?: string } | undefined)?.targetFormat ??
+                    'pdf',
+                  (task.locale as 'ar' | 'en') ?? 'en',
+                ),
                 title: task.request.slice(0, 80),
               },
             },

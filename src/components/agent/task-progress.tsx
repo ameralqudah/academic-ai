@@ -477,6 +477,43 @@ function taskFailureDetail(task: TaskView): string | null {
 }
 
 /**
+ * What a step warned about while succeeding.
+ *
+ * A step can complete and still have something to say — three sources found
+ * where ten were expected, a section written without evidence, a coefficient
+ * computed on a sample too small to trust. The observation has carried these
+ * since Phase A and the panel showed none of them, so partial work looked
+ * identical to complete work.
+ *
+ * That is the more dangerous half of the pair: a failure is visible and gets
+ * investigated, while a quiet gap gets submitted.
+ */
+function stepWarnings(step: TaskStepView): string[] {
+  const observation = (step.output as { observation?: { warnings?: { message?: string }[] } } | null)
+    ?.observation;
+
+  return (observation?.warnings ?? [])
+    .map((warning) => warning.message ?? '')
+    .filter((message) => message.length > 0)
+    .slice(0, 3);
+}
+
+/**
+ * What a step said it could not find out.
+ *
+ * Distinct from a warning: a warning describes what happened, this describes
+ * what would have made it better. A researcher who is told "I could not
+ * determine the sample size" can supply it; one who is told nothing assumes
+ * the result is whole.
+ */
+function stepGaps(step: TaskStepView): string[] {
+  const observation = (step.output as { observation?: { missingInformation?: string[] } } | null)
+    ?.observation;
+
+  return (observation?.missingInformation ?? []).filter((gap) => gap.length > 0).slice(0, 3);
+}
+
+/**
  * The message a failed step recorded, when it left one.
  *
  * Truncated, because a provider error can run to several lines of stack and the
@@ -552,6 +589,20 @@ function StepRow({ step }: { step: TaskStepView }) {
         {step.status === 'BLOCKED' && (
           <span className="text-[11px] text-muted">{t('step.blocked')}</span>
         )}
+
+        {/*
+          A completed step that has something to report.
+
+          Rendered quietly — muted, small, at most three — because most steps
+          have nothing to say and a panel that shouts on every line teaches the
+          researcher to stop reading it.
+        */}
+        {step.status === 'COMPLETED' &&
+          [...stepWarnings(step), ...stepGaps(step)].map((note, index) => (
+            <span key={index} className="text-[11px] text-muted">
+              {note}
+            </span>
+          ))}
 
         {step.status === 'FAILED' && (
           <span className="text-[11px] text-danger">

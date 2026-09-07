@@ -36,6 +36,7 @@ import { existsSync } from 'node:fs';
 import { checkQuality } from '@/server/quality/engine';
 import { decide, detectReference } from '@/server/agent/routing-rules';
 import { decideOutputLanguage } from '@/server/context/language';
+import { requirementsFor, shouldFailOver } from '@/server/ai/model-requirements';
 import {
   describeOmissions,
   estimateTokens,
@@ -5356,6 +5357,194 @@ console.log('\nquota and language in the chat path');
   assertTrue(
     'and uses it rather than the interface locale',
     !chatSource.includes('locale: body.locale,'),
+  );
+}
+
+
+
+console.log('\nmodel routing');
+
+/*
+ * The planner decides what capability is needed; this decides which model runs
+ * it. One environment variable answered both questions for every call in the
+ * product — which was adequate with one provider and stopped being so the
+ * moment a task mixed a one-line classification with a chapter of prose. The
+ * two have different context sizes, latencies and costs.
+ */
+
+{
+  /*
+   * Requirements come from the capability, not from the call site. A handler
+   * that named its own model would have to be found and edited every time the
+   * model list changed, which is how model names end up scattered.
+   */
+  const quick = requirementsFor({ capability: 'general.answer' });
+  const long = requirementsFor({ capability: 'literature.review' });
+
+  check('a short answer is not reasoning work', quick.needsReasoning, false);
+  assertTrue('and someone is waiting on it', quick.latencySensitive);
+
+  check('a literature review is reasoning work', long.needsReasoning, true);
+  assertTrue('with far more output', long.expectedOutputTokens > quick.expectedOutputTokens * 5);
+  assertTrue('and nobody staring at it', !long.latencySensitive);
+}
+
+{
+  /* An unknown capability still routes rather than failing. */
+  const unknown = requirementsFor({ capability: 'something.new' });
+
+  assertTrue('an unlisted capability gets defaults', unknown.expectedOutputTokens > 0);
+  check('and is treated as reasoning work', unknown.needsReasoning, true);
+}
+
+{
+  /* Context size travels, because it decides which models can hold the call. */
+  const small = requirementsFor({ capability: 'document.write', contextTokens: 1000 });
+  const large = requirementsFor({ capability: 'document.write', contextTokens: 120_000 });
+
+  check('a small context is recorded', small.contextTokens, 1000);
+  check('and a large one', large.contextTokens, 120_000);
+}
+
+/*
+ * Which failures are worth trying another provider for.
+ *
+ * A quota, an outage or a timeout is about the provider and says nothing about
+ * the request. A refusal or a malformed request would fail identically
+ * everywhere, and retrying spends a second call to receive the same answer.
+ */
+{
+  const quota = Object.assign(new Error('You exceeded your current quota'), { status: 429 });
+  const down = Object.assign(new Error('Service Unavailable'), { status: 503 });
+  const gateway = Object.assign(new Error('Bad Gateway'), { status: 502 });
+
+  assertTrue('an exhausted quota fails over', shouldFailOver(quota));
+  assertTrue('so does an outage', shouldFailOver(down));
+  assertTrue('and a gateway failure', shouldFailOver(gateway));
+  assertTrue('and a timeout', shouldFailOver(new Error('ETIMEDOUT')));
+  assertTrue('and a rate limit named in the message', shouldFailOver(new Error('rate limit reached')));
+
+  /* These would fail the same way everywhere. */
+  const malformed = Object.assign(new Error('invalid request schema'), { status: 400 });
+
+  assertTrue('a malformed request does not', !shouldFailOver(malformed));
+  assertTrue('nor a refusal', !shouldFailOver(new Error('I cannot help with that')));
+}
+
+{
+  /*
+   * Model names live in the environment, not in this file and not in the
+   * handlers. A name written here would be a second source of truth that
+   * drifts from the configured one.
+   */
+  const routerSource = await readFile('src/server/ai/model-router.ts', 'utf8');
+
+  assertTrue('the router reads models from the environment', routerSource.includes('env.GOOGLE_MODEL'));
+  assertTrue(
+    'and does not hardcode a model name',
+    !/['"]gemini-[\d.]+|['"]claude-[a-z]+-\d|['"]gpt-[\d.]/.test(routerSource),
+  );
+
+  /* Candidates are the providers with keys — a keyless model is not an option. */
+  assertTrue(
+    'only configured providers are candidates',
+    routerSource.includes('ANTHROPIC_API_KEY') && routerSource.includes('key.trim().length > 0'),
+  );
+
+  /* The reason is logged, and never the key. */
+  assertTrue('the selection is logged', routerSource.includes("logger.info('model.selected'"));
+  assertTrue(
+    'without any part of a key',
+    !routerSource.includes('apiKey') && !routerSource.includes('API_KEY,'),
+  );
+}
+
+{
+  /* The handlers ask the router rather than resolving a provider themselves. */
+  const handlerSource = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+  assertTrue('writing routes its model', handlerSource.includes('await selectModel('));
+  assertTrue(
+    'from requirements derived for the step',
+    handlerSource.includes("requirementsFor({\n      capability: 'document.write'"),
+  );
+  assertTrue(
+    'and no longer resolves a provider directly',
+    !handlerSource.includes('await resolveProvider()'),
+  );
+}
+
+
+
+console.log('\nno model call bypasses the router');
+
+/*
+ * `model-router.ts` existed and almost nothing used it: ten call sites in the
+ * AI service, two in the planner, one in intent classification and one in tool
+ * selection each resolved a provider directly. A router nothing routes through
+ * is a claim, not an architecture.
+ *
+ * This guard fails if a new direct resolution appears. The two that remain are
+ * named and explained — both are configuration checks rather than model calls.
+ */
+{
+  const files = [
+    'src/server/services/ai.service.ts',
+    'src/server/tasks/planner.ts',
+    'src/agents/intent.ts',
+    'src/server/services/tool.service.ts',
+    'src/server/tasks/handlers.ts',
+  ];
+
+  let direct = 0;
+
+  for (const file of files) {
+    const source = await readFile(file, 'utf8');
+    direct += source.split('await resolveProvider(').length - 1;
+  }
+
+  /*
+   * One: the configuration check in `prepare`, which runs before the work is
+   * known and asks only whether any provider is usable. Routing there would
+   * request a model for a task not yet described, and the answer would be
+   * discarded.
+   */
+  check('exactly one direct resolution remains, and it is a config check', direct, 1);
+
+  const prepareSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+  assertTrue(
+    'and it says why it is not routed',
+    prepareSource.includes('Resolved rather than routed, deliberately'),
+  );
+}
+
+{
+  /* Every model-using path routes. */
+  for (const [file, label] of [
+    ['src/server/services/ai.service.ts', 'the AI service'],
+    ['src/server/tasks/planner.ts', 'the planner'],
+    ['src/agents/intent.ts', 'intent classification'],
+    ['src/server/services/tool.service.ts', 'tool selection'],
+    ['src/server/tasks/handlers.ts', 'the capability handlers'],
+  ] as const) {
+    const source = await readFile(file, 'utf8');
+    assertTrue(`${label} routes its model`, source.includes('selectModel('));
+  }
+}
+
+{
+  /*
+   * Failover is wired at the one point every completion passes through.
+   * Putting it at each call site would mean one copy per caller, and the one
+   * that was forgotten would be the one that mattered.
+   */
+  const serviceSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+
+  assertTrue('failover wraps the provider call', serviceSource.includes('runWithFailover(input,'));
+  assertTrue('deciding by the failure, not the caller', serviceSource.includes('shouldFailOver(error)'));
+  assertTrue(
+    'and throwing the original error when there is nothing to fall back to',
+    serviceSource.includes('if (!alternative) throw error'),
   );
 }
 

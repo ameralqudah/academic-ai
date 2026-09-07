@@ -24,10 +24,14 @@ import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import type { OutputReference } from '@/server/tasks/contracts';
 
+import { retrievePassages } from '@/server/files/retrieve';
+
 import { fragment, type ContextFragment } from './envelope';
 
 export interface SourceScope {
   userId: string;
+  /** What was asked, so document retrieval knows what to look for. */
+  request?: string;
   conversationId?: string | null;
   projectId?: string | null;
   taskId?: string | null;
@@ -309,8 +313,55 @@ async function fileFragments(scope: SourceScope): Promise<ContextFragment[]> {
    * file to describe it would be slow and would put its contents in memory for
    * no reason.
    */
-  const profile = dataset.profile as { columns?: { name?: string; type?: string }[] } | null;
+  const profile = dataset.profile as {
+    columns?: { name?: string; type?: string }[];
+    /* Extracted passages, for an uploaded document rather than a table. */
+    document?: { sections?: number; words?: number; chunks?: { heading: string; text: string }[] };
+  } | null;
+
   const columns = profile?.columns ?? [];
+
+  /*
+   * A document rather than a dataset.
+   *
+   * Uploads were tabular only, because the product grew out of statistics —
+   * so "what does the study I uploaded say about sample size" could not be
+   * answered at all. The passages that bear on the request are included; the
+   * whole paper is not, because forty pages would consume the budget and bury
+   * the sentence that answers the question.
+   */
+  const chunks = profile?.document?.chunks ?? [];
+
+  if (chunks.length > 0) {
+    const passages = retrievePassages(
+      chunks.map((chunk, index) => ({ id: `c${index}`, ordinal: index, ...chunk })),
+      scope.request ?? '',
+      3,
+    );
+
+    return [
+      fragment({
+        id: `document-${dataset.id}`,
+        kind: 'file',
+        /*
+         * A tool read this file, so it is a measurement rather than a claim —
+         * but its content is the researcher's own material, which is why it
+         * outranks anything the model wrote.
+         */
+        authority: 'tool-result',
+        content: [
+          `Document: ${dataset.originalName ?? dataset.id}`,
+          profile?.document?.words ? `Length: ${profile.document.words} words` : '',
+          '',
+          ...passages.map((passage) => passage.text),
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        provenance: { source: 'document', id: dataset.id },
+        relevance: 0.9,
+      }),
+    ];
+  }
 
   return [
     fragment({

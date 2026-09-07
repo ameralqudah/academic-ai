@@ -1856,9 +1856,23 @@ assertTrue(
 assertTrue('and passes it to the agent', agentRouteModel.includes('chosenModel,'));
 assertTrue('the agent carries it', orchestratorModel.includes('chosenModel?:'));
 assertTrue('and hands it to the answer', orchestratorModel.includes('chosenModel: request.chosenModel'));
+/*
+ * The user's choice now travels through the model router as `preferred`,
+ * which returns it untouched. The guard checks the guarantee — that an
+ * explicit choice is honoured — rather than the function that used to
+ * implement it: they were shown a model and told they could use it, and
+ * answering with a different one would leave them unable to say which
+ * produced their result.
+ */
 assertTrue(
-  'which passes it to the provider resolver',
-  aiServiceModel.includes('resolveProvider(input.chosenModel'),
+  'which passes it to the model router as a preference',
+  aiServiceModel.includes('preferred: input.chosenModel'),
+);
+assertTrue(
+  'and the router honours an explicit choice above its own reasoning',
+  (await readFile('src/server/ai/model-router.ts', 'utf8')).includes(
+    'if (options.preferred)',
+  ),
 );
 assertTrue(
   'and the resolver builds that provider',

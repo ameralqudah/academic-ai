@@ -1541,7 +1541,9 @@
         "timeout": "Stopped: it took longer than allowed",
         "noHandler": "That capability is not available yet",
         "crashed": "Stopped by an unexpected error",
-        "empty": "Stopped: the model returned no usable text"
+        "empty": "Stopped: the model returned no usable text",
+        "stepFailed": "Stopped by a failure in this step",
+        "stepThrew": "Stopped by a failure in this step"
       }
     },
     "capability": {

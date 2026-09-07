@@ -43,6 +43,8 @@ import {
   type DatasetProfile,
 } from '@/analysis';
 import { logger } from '@/lib/logger';
+import { extractDocument, isReadableDocument } from '@/server/files/extract';
+import { chunkDocument } from '@/server/files/retrieve';
 import type { Dataset as DatasetRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { resolveReason } from '@/server/http/reasons';
@@ -94,6 +96,78 @@ const PREVIEW_ROWS = 15;
 /*                                   Saving                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * An uploaded document, chunked for retrieval.
+ *
+ * Returns the same shape a table does, with the table-shaped fields empty. One
+ * upload flow, one quota, one storage scheme — a second path would drift from
+ * this one within a release.
+ */
+async function storeDocument(input: SaveDatasetInput): Promise<SavedDataset> {
+  const bytes = new Uint8Array(input.file.bytes);
+  const extracted = await extractDocument(bytes, input.file.name);
+
+  /*
+   * A file that cannot be read is refused rather than stored empty.
+   *
+   * A scanned PDF has no text layer, and accepting it would leave the
+   * researcher with a file the assistant claims to have and cannot quote —
+   * which they would discover only when an answer cited nothing.
+   */
+  if (extracted.limitation !== 'none') {
+    throw new AppError(
+      'VALIDATION',
+      extracted.limitation === 'no-text-layer'
+        ? 'This PDF has no text layer — it is probably a scan. Run OCR on it first, or upload a Word version.'
+        : 'This file could not be read. Try Word, PDF, Markdown or plain text.',
+      extracted.limitation === 'no-text-layer'
+        ? 'هذا الملف صورة ممسوحة بلا نصّ. حوّله بالتعرّف الضوئي أولًا، أو ارفع نسخة Word.'
+        : 'تعذّرت قراءة هذا الملف. جرّب Word أو PDF أو نصًّا عاديًا.',
+    );
+  }
+
+  const chunks = chunkDocument(extracted);
+  const datasetId = randomUUID();
+  const key = datasetKey({ userId: input.userId, datasetId, kind: 'ORIGINAL', extension: 'csv' });
+
+  await storageProvider().put(key, Buffer.from(bytes), 'application/octet-stream');
+
+  const dataset = await datasetsRepo.create({
+    id: datasetId,
+    userId: input.userId,
+    projectId: input.projectId ?? null,
+    conversationId: input.conversationId ?? null,
+    kind: 'ORIGINAL',
+    originalName: input.file.name,
+    storageKey: key,
+    mimeType: 'application/octet-stream',
+    byteSize: bytes.byteLength,
+    checksum: checksumOf(Buffer.from(bytes)),
+    rowCount: 0,
+    columnCount: 0,
+    profile: {
+      document: {
+        sections: extracted.sections.length,
+        words: extracted.wordCount,
+        /*
+         * Capped: a book would otherwise put megabytes into a JSON column, and
+         * the first hundred passages of an academic paper are the paper.
+         */
+        chunks: chunks.slice(0, 100).map(({ heading, text }) => ({ heading, text })),
+      },
+    } as unknown as Record<string, unknown>,
+  });
+
+  return {
+    dataset,
+    /* Empty where a table would have columns; a document has none. */
+    profile: { columns: [], rowCount: 0, issues: [] } as unknown as DatasetProfile,
+    proposals: [],
+    preview: { columns: [], rows: [] },
+    notices: [],
+  };
+}
+
 export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset> {
   const { userId, file } = input;
 
@@ -112,6 +186,22 @@ export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset>
       `You are storing the maximum of ${MAX_DATASETS_PER_USER} files. Delete one to upload another.`,
       `لديك الحد الأقصى وهو ${MAX_DATASETS_PER_USER} ملفًا. احذف ملفًا لرفع آخر.`,
     );
+  }
+
+  /*
+   * A document rather than a table.
+   *
+   * Uploads were tabular only — CSV, TSV, XLSX — because the product grew out
+   * of statistics. A researcher's folder is mostly papers, and one of those
+   * could not be uploaded at all, so "what does the study say about sample
+   * size" was a question the product could not reach.
+   *
+   * Stored through the same path: one upload flow, one storage key scheme, one
+   * quota. The profile carries passages where a table's carries columns, which
+   * is why this needs no migration.
+   */
+  if (isReadableDocument(file.name)) {
+    return storeDocument(input);
   }
 
   const parsed = await parse(file);

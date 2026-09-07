@@ -43,6 +43,7 @@ import { PDFDocument } from 'pdf-lib';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { namedFormat, resolveReference } from '@/server/agent/continuity';
+import { shouldFailOver } from '@/server/ai/model-requirements';
 import { generateDocx } from '@/server/generators/docx';
 import {
   failed as observationFailed,
@@ -4268,6 +4269,634 @@ async function main() {
 
     const pageSource = await readFile('src/app/[locale]/(app)/chat/page.tsx', 'utf8');
     assertTrue('the chat page mounts it', pageSource.includes('<ActiveTasks'));
+  }
+
+
+  /* --------------------------------------------------- parallel execution */
+
+  section('independent steps run together');
+
+  /*
+   * The dependency graph existed to say which steps are independent, and the
+   * executor then ran them one at a time anyway — leaving the graph's main
+   * benefit unused. Two searches on different topics have no reason to wait
+   * for each other, and a researcher watching them run in series waits twice
+   * as long for the same work.
+   */
+  const parallelOwner = await newUser('parallel-owner');
+
+  /* Observable concurrency: the handler reports how many are running at once. */
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const startedSteps: string[] = [];
+
+  registerHandler('quality.check', async (context) => {
+    inFlight += 1;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    startedSteps.push(context.stepId);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    inFlight -= 1;
+
+    return succeeded([
+      makeOutput(
+        { taskId: context.taskId, stepId: context.stepId, capability: 'quality.check', projectId: context.projectId },
+        'quality-report.v1',
+        { status: 'pass' },
+      ),
+    ]);
+  });
+
+  async function makeGraph(plan: { capability: string; dependsOn?: number[] }[]) {
+    const task = await tasksRepo.create({
+      userId: parallelOwner,
+      request: 'parallel test',
+      locale: 'ar',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const rows = await tasksRepo.addSteps(
+      plan.map((step, index) => ({
+        taskId: task.id,
+        ordinal: index,
+        capability: step.capability,
+        label: `s${index}`,
+        status: 'PENDING',
+        dependsOn: [],
+        input: {},
+      })),
+    );
+
+    for (const [index, step] of plan.entries()) {
+      if (step.dependsOn?.length) {
+        await tasksRepo.updateDependencies(
+          rows[index]?.id as string,
+          step.dependsOn.map((position) => rows[position]?.id as string),
+        );
+      }
+    }
+
+    return task;
+  }
+
+  /* --- 1: two independent steps run at the same time -------------------- */
+
+  {
+    peakInFlight = 0;
+    inFlight = 0;
+
+    const task = await makeGraph([{ capability: 'quality.check' }, { capability: 'quality.check' }]);
+    await runTask(task.id);
+
+    /*
+     * Measured by the handler, not by elapsed time. Wall-clock would make this
+     * flaky on a loaded machine, where two concurrent steps can take longer
+     * than two serial ones on an idle one.
+     */
+    check('two independent steps overlap', peakInFlight, 2);
+    check('and both complete', (await tasksRepo.stepsOf(task.id)).filter((step) => step.status === 'COMPLETED').length, 2);
+  }
+
+  /* --- 2: a dependent step waits for all its prerequisites -------------- */
+
+  {
+    peakInFlight = 0;
+    inFlight = 0;
+
+    const task = await makeGraph([
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+      { capability: 'quality.check', dependsOn: [0, 1] },
+    ]);
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    const dependent = steps.find((step) => step.label === 's2');
+    const prerequisites = steps.filter((step) => step.label !== 's2');
+
+    check('the dependent step completes', dependent?.status, 'COMPLETED');
+
+    /*
+     * Started after both finished, not merely after one. A step that ran while
+     * a prerequisite was still working would read outputs that did not exist.
+     */
+    assertTrue(
+      'and started only after both prerequisites finished',
+      prerequisites.every(
+        (step) => (step.finishedAt?.getTime() ?? 0) <= (dependent?.startedAt?.getTime() ?? 0),
+      ),
+    );
+  }
+
+  /* --- 3: a failure does not cancel unrelated work ---------------------- */
+
+  {
+    registerHandler('web.search', async () =>
+      observationFailed([{ code: 'provider.down', severity: 'error', message: 'down' }]),
+    );
+
+    const task = await makeGraph([{ capability: 'web.search' }, { capability: 'quality.check' }]);
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    check('the failing step is failed', steps.find((step) => step.label === 's0')?.status, 'FAILED');
+    /*
+     * The sibling keeps its result. Discarding it would mean a transient
+     * provider outage in one branch destroyed work in another that had nothing
+     * to do with it.
+     */
+    check('and the unrelated step still completed', steps.find((step) => step.label === 's1')?.status, 'COMPLETED');
+  }
+
+  /* --- 4: a dependent step does not run when its prerequisite failed ---- */
+
+  {
+    const task = await makeGraph([
+      { capability: 'web.search' },
+      { capability: 'quality.check', dependsOn: [0] },
+      { capability: 'quality.check' },
+    ]);
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    check('the dependent step is blocked', steps.find((step) => step.label === 's1')?.status, 'BLOCKED');
+    check('while the independent one runs', steps.find((step) => step.label === 's2')?.status, 'COMPLETED');
+  }
+
+  /* --- 5: the concurrency limit is respected ---------------------------- */
+
+  {
+    peakInFlight = 0;
+    inFlight = 0;
+
+    const task = await makeGraph([
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+    ]);
+
+    await runTask(task.id, { concurrency: 2 });
+
+    /*
+     * The limit exists because concurrent calls to one provider hit rate
+     * limits, and a step that fails on a 429 fails for a reason unrelated to
+     * its own work.
+     */
+    assertTrue('no more than the limit run at once', peakInFlight <= 2);
+    check('and all four still complete', (await tasksRepo.stepsOf(task.id)).filter((step) => step.status === 'COMPLETED').length, 4);
+  }
+
+  {
+    /* One reproduces the old serial behaviour exactly. */
+    peakInFlight = 0;
+    inFlight = 0;
+
+    const task = await makeGraph([{ capability: 'quality.check' }, { capability: 'quality.check' }]);
+    await runTask(task.id, { concurrency: 1 });
+
+    check('a limit of one is serial', peakInFlight, 1);
+  }
+
+  /* --- 6: no step runs twice -------------------------------------------- */
+
+  {
+    startedSteps.length = 0;
+
+    const task = await makeGraph([
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+    ]);
+
+    await runTask(task.id);
+
+    /*
+     * `claimStep` is conditional on the step still being pending, so two
+     * workers racing for one produce one winner and one `undefined`. That is
+     * what makes duplicate execution impossible rather than unlikely.
+     */
+    check('each step ran once', new Set(startedSteps).size, startedSteps.length);
+    check('and exactly three ran', startedSteps.length, 3);
+  }
+
+  /* --- 7: a crash mid-batch is recoverable ------------------------------ */
+
+  {
+    const task = await makeGraph([
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+      { capability: 'quality.check', dependsOn: [0, 1] },
+    ]);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    /*
+     * The state a crash leaves mid-batch: one step done, one claimed and
+     * running with nothing driving it. Recovery returns the stranded step to
+     * pending — otherwise the dependent step waits forever on a prerequisite
+     * nothing will finish.
+     */
+    await tasksRepo.claimStep(steps[0]?.id as string);
+    await tasksRepo.completeStep(steps[0]?.id as string, {});
+    await tasksRepo.claimStep(steps[1]?.id as string);
+    await tasksRepo.setStatus(task.id, 'RUNNING');
+
+    await runTask(task.id);
+
+    check('the task recovers and completes', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+    check('with every step done', (await tasksRepo.stepsOf(task.id)).filter((step) => step.status === 'COMPLETED').length, 3);
+  }
+
+  /* --- 8: a question stops the task, siblings keep their work ----------- */
+
+  {
+    registerHandler('survey.generate', async () => needsInput('Which constructs?', 'constructs'));
+
+    const task = await makeGraph([{ capability: 'survey.generate' }, { capability: 'quality.check' }]);
+    await runTask(task.id);
+
+    check('the task waits for the answer', (await tasksRepo.findAny(task.id))?.status, 'WAITING_FOR_INPUT');
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    /*
+     * The sibling ran to completion and its output is stored. Stopping the
+     * batch the moment one step asked a question would leave finished work
+     * unrecorded.
+     */
+    check(
+      'and the sibling keeps its result',
+      steps.find((step) => step.capability === 'quality.check')?.status,
+      'COMPLETED',
+    );
+  }
+
+  /* --- 8b: five independent steps, and the limit that holds them back --- */
+
+  {
+    peakInFlight = 0;
+    inFlight = 0;
+
+    const task = await makeGraph(
+      Array.from({ length: 5 }, () => ({ capability: 'quality.check' })),
+    );
+
+    await runTask(task.id);
+
+    /*
+     * Five ready steps against a default limit of three. All five must finish;
+     * no more than three may be in flight, because concurrent calls to one
+     * provider hit rate limits and a step that fails on a 429 fails for a
+     * reason unrelated to its own work.
+     */
+    check('all five complete', (await tasksRepo.stepsOf(task.id)).filter((step) => step.status === 'COMPLETED').length, 5);
+    assertTrue('without exceeding the default limit', peakInFlight <= 3);
+    assertTrue('and more than one ran at a time', peakInFlight > 1);
+  }
+
+  {
+    /*
+     * A mixed graph: two independent, one depending on both, one independent
+     * of everything. The last must not wait for the dependent chain — that is
+     * the whole reason a graph is not a list.
+     */
+    peakInFlight = 0;
+    inFlight = 0;
+
+    const task = await makeGraph([
+      { capability: 'quality.check' },
+      { capability: 'quality.check' },
+      { capability: 'quality.check', dependsOn: [0, 1] },
+      { capability: 'quality.check' },
+    ]);
+
+    await runTask(task.id);
+
+    const steps = await tasksRepo.stepsOf(task.id);
+    check('every step in a mixed graph completes', steps.filter((step) => step.status === 'COMPLETED').length, 4);
+
+    const dependent = steps.find((step) => step.label === 's2');
+    const independent = steps.find((step) => step.label === 's3');
+
+    assertTrue(
+      'the unrelated step did not wait for the dependent chain',
+      (independent?.startedAt?.getTime() ?? 0) <= (dependent?.startedAt?.getTime() ?? Infinity),
+    );
+  }
+
+  /* --- 9: replanning happens once per batch ----------------------------- */
+
+  {
+    registerHandler('academic.search', async (context) =>
+      partial(
+        [
+          makeOutput(
+            { taskId: context.taskId, stepId: context.stepId, capability: 'academic.search', projectId: context.projectId },
+            'sources.v1',
+            { references: [], found: 0 },
+          ),
+        ],
+        ['more sources'],
+        {
+          recommendedNextActions: [
+            { capability: 'web.search', reason: 'broaden', input: { query: 'x' } },
+          ],
+        },
+      ),
+    );
+
+    const task = await makeGraph([{ capability: 'academic.search' }, { capability: 'academic.search' }]);
+
+    let suggestions = 0;
+
+    await runTask(task.id, {
+      onSuggestion: async () => {
+        suggestions += 1;
+        return 0;
+      },
+    });
+
+    /*
+     * Once for the batch, not once per step. Two partial results in one batch
+     * describe one situation, and asking the planner twice would spend two
+     * model calls to answer the same question.
+     */
+    check('replanning is considered once per batch', suggestions, 1);
+  }
+
+
+  /* ------------------------------------------------------ model failover */
+
+  section('a provider failure moves to another provider');
+
+  /*
+   * `withFailover` existed and nothing called it, which made it a claim rather
+   * than a behaviour. This drives the real sequence through deterministic
+   * providers: one fails the way a real provider fails, the other answers.
+   *
+   * The providers here are test doubles by construction — they implement the
+   * interface and return fixed values — and they exist only in this file.
+   * Nothing in production configuration refers to them.
+   */
+
+  /** A provider that fails a set number of times, then answers. */
+  function stubProvider(options: {
+    name: 'anthropic' | 'openai' | 'google';
+    failWith?: { message: string; status?: number };
+    answer?: string;
+  }) {
+    let calls = 0;
+
+    return {
+      name: options.name,
+      model: `${options.name}-test`,
+      isConfigured: () => true,
+      countTokens: (text: string) => text.length,
+      stream: async function* () {
+        yield '';
+      },
+      complete: async () => {
+        calls += 1;
+
+        if (options.failWith) {
+          const error = new Error(options.failWith.message);
+          if (options.failWith.status) {
+            (error as unknown as { status: number }).status = options.failWith.status;
+          }
+          throw error;
+        }
+
+        return {
+          text: options.answer ?? 'ok',
+          stopReason: 'STOP',
+          usage: { tokensIn: 10, tokensOut: 10 },
+        };
+      },
+      get calls() {
+        return calls;
+      },
+    };
+  }
+
+  /**
+   * The failover sequence, driven directly.
+   *
+   * Mirrors what `runWithFailover` does inside the AI service: try, decide
+   * whether the failure is the provider's, try the alternative if there is
+   * one. Driving it here rather than through `runCompletion` avoids needing a
+   * real key while still exercising the decision and the sequence.
+   */
+  async function attemptWithFailover(
+    primary: ReturnType<typeof stubProvider>,
+    alternative: ReturnType<typeof stubProvider> | null,
+  ): Promise<{ text: string; usedAlternative: boolean } | { error: string }> {
+    try {
+      const result = await primary.complete();
+      return { text: result.text, usedAlternative: false };
+    } catch (error) {
+      if (!shouldFailOver(error)) return { error: 'not-retryable' };
+      if (!alternative) return { error: 'no-alternative' };
+
+      const result = await alternative.complete();
+      return { text: result.text, usedAlternative: true };
+    }
+  }
+
+  /* --- 429 on the first provider, the second answers -------------------- */
+
+  {
+    const primary = stubProvider({
+      name: 'google',
+      failWith: { message: 'You exceeded your current quota', status: 429 },
+    });
+
+    const alternative = stubProvider({ name: 'anthropic', answer: 'answered by the fallback' });
+
+    const outcome = await attemptWithFailover(primary, alternative);
+
+    assertTrue('a quota failure reaches the fallback', 'text' in outcome);
+
+    if ('text' in outcome) {
+      check('and the fallback answered', outcome.text, 'answered by the fallback');
+      check('having actually been used', outcome.usedAlternative, true);
+    }
+
+    check('the first provider was tried once', primary.calls, 1);
+    check('and the second once', alternative.calls, 1);
+  }
+
+  /* --- a service outage behaves the same --------------------------------- */
+
+  {
+    const primary = stubProvider({
+      name: 'google',
+      failWith: { message: 'Service Unavailable', status: 503 },
+    });
+
+    const outcome = await attemptWithFailover(primary, stubProvider({ name: 'openai', answer: 'ok' }));
+    assertTrue('a 503 reaches the fallback', 'text' in outcome);
+  }
+
+  /* --- and a timeout ------------------------------------------------------ */
+
+  {
+    const primary = stubProvider({ name: 'google', failWith: { message: 'ETIMEDOUT' } });
+
+    const outcome = await attemptWithFailover(primary, stubProvider({ name: 'openai', answer: 'ok' }));
+    assertTrue('a timeout reaches the fallback', 'text' in outcome);
+  }
+
+  /* --- a malformed request does not ------------------------------------- */
+
+  {
+    /*
+     * A 400 would fail identically on every provider. Retrying spends a second
+     * call to receive the same answer, and hides a bug in the request behind
+     * what looks like an outage.
+     */
+    const primary = stubProvider({
+      name: 'google',
+      failWith: { message: 'invalid request schema', status: 400 },
+    });
+
+    const alternative = stubProvider({ name: 'anthropic', answer: 'should not be reached' });
+
+    const outcome = await attemptWithFailover(primary, alternative);
+
+    assertTrue('a malformed request is not retried elsewhere', 'error' in outcome);
+    check('the alternative was never called', alternative.calls, 0);
+  }
+
+  /* --- nor a refusal ------------------------------------------------------ */
+
+  {
+    const primary = stubProvider({
+      name: 'google',
+      failWith: { message: 'I cannot help with that request' },
+    });
+
+    const alternative = stubProvider({ name: 'anthropic', answer: 'should not be reached' });
+
+    const outcome = await attemptWithFailover(primary, alternative);
+
+    assertTrue('a refusal is not retried elsewhere', 'error' in outcome);
+    check('the alternative was never called', alternative.calls, 0);
+  }
+
+  /* --- with nothing to fall back to, the failure is clear ---------------- */
+
+  {
+    /*
+     * The state of this deployment: one provider configured. The error must
+     * reach the caller unchanged, because the service layer turns it into a
+     * message that names the quota or the outage — and a wrapper would hide
+     * exactly the detail the researcher needs.
+     */
+    const primary = stubProvider({
+      name: 'google',
+      failWith: { message: 'quota exceeded', status: 429 },
+    });
+
+    const outcome = await attemptWithFailover(primary, null);
+
+    assertTrue('a retryable failure with no alternative still fails', 'error' in outcome);
+
+    if ('error' in outcome) {
+      check('and says why', outcome.error, 'no-alternative');
+    }
+  }
+
+  {
+    /* The service wires failover at the single point every call passes through. */
+    const serviceSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+
+    assertTrue('the completion path fails over', serviceSource.includes('runWithFailover(input,'));
+    assertTrue(
+      'choosing the alternative through the router',
+      serviceSource.includes('alternativeProvider('),
+    );
+    assertTrue('and logging the switch', serviceSource.includes("logger.warn('ai.failover'"));
+
+    /*
+     * Provider resolution is the router's job now. One direct call remains, in
+     * the configuration check that runs before the work is known — routing
+     * there would ask for a model for a task not yet described.
+     */
+    const directCalls = serviceSource.split('await resolveProvider(').length - 1;
+    check('one direct resolution remains, in the configuration check', directCalls, 1);
+
+    assertTrue(
+      'and every model call routes',
+      serviceSource.split('await selectModel(').length - 1 >= 8,
+    );
+  }
+
+
+  /* --- handlers exist before a task can be planned ---------------------- */
+
+  {
+    /*
+     * A live run failed every step with "that capability is not available
+     * yet". The capability list and the handler list were identical — the
+     * handlers had simply never been registered in that process, because
+     * `/api/tasks` called `ensureTasksReady` and `/api/chat` did not.
+     *
+     * `/api/chat` is now the main way a task begins, so the path that starts
+     * the most work was the one without handlers.
+     */
+    const chatSource = await readFile('src/app/api/chat/route.ts', 'utf8');
+    const tasksSource = await readFile('src/app/api/tasks/route.ts', 'utf8');
+
+    assertTrue('the unified path registers handlers', chatSource.includes('await ensureTasksReady()'));
+    assertTrue('and so does the older one', tasksSource.includes('await ensureTasksReady()'));
+  }
+
+  {
+    /* Every capability the planner may choose has a handler behind it. */
+    registerAllHandlers();
+
+    const capabilitySource = await readFile('src/server/tasks/capabilities.ts', 'utf8');
+    const declared = [...capabilitySource.matchAll(/^ {2}'([a-z.]+)':/gm)].map((match) => match[1] as string);
+
+    assertTrue('capabilities are declared', declared.length >= 14);
+
+    for (const capability of declared) {
+      assertTrue(`${capability} has a handler`, hasHandler(capability));
+    }
+  }
+
+  {
+    /*
+     * A reason key with no message must not reach the screen. `next-intl`
+     * renders the key path on a miss, so `task.step.reason.stepFailed`
+     * appeared verbatim in the interface — a debugging aid leaking into a
+     * product, telling the researcher nothing and looking broken.
+     */
+    const panelSource = await readFile('src/components/agent/task-progress.tsx', 'utf8');
+
+    assertTrue('a missing message falls back', panelSource.includes('function reasonText'));
+    assertTrue(
+      'detecting the key path next-intl returns on a miss',
+      panelSource.includes("text.startsWith('task.step.reason.')"),
+    );
+
+    type Messages = { task: { step: { reason: Record<string, string> } } };
+
+    const ar = JSON.parse(await readFile('messages/ar.json', 'utf8')) as Messages;
+    const en = JSON.parse(await readFile('messages/en.json', 'utf8')) as Messages;
+
+    /* The key that was actually missing, plus the one it shares a cause with. */
+    for (const reason of ['stepFailed', 'stepThrew', 'noHandler', 'quota']) {
+      assertTrue(`${reason} has Arabic text`, (ar.task.step.reason[reason]?.length ?? 0) > 5);
+      assertTrue(`${reason} has English text`, (en.task.step.reason[reason]?.length ?? 0) > 5);
+    }
   }
 
   /* --------------------------------------------------------------- cleanup */

@@ -159,6 +159,13 @@ ${
    - text file, plain text, ملف نصي → "txt"
    - CSV, ملف CSV → "csv"
    - BibTeX, references file, ملف مراجع → "bib"
+
+   PDF CANNOT RENDER ARABIC. The PDF generator embeds standard fonts and none
+   contains Arabic glyphs, so an Arabic document exported as PDF opens to a
+   blank page. When the work is in Arabic and the researcher asked for PDF,
+   plan a "docx" step instead and say so in the summary — Word embeds fonts
+   from the reader's system and renders Arabic correctly. Giving them a working
+   Word file is closer to what they wanted than an empty PDF.
    - RIS, EndNote → "ris"
    - Nothing named → "md"
 

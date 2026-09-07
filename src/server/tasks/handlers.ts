@@ -1019,7 +1019,38 @@ export function registerAllHandlers(): void {
        */
       bytes = await generateDocx(content);
     } else if (kind === 'pdf') {
-      bytes = (await generatePdf(content)).bytes;
+      const pdf = await generatePdf(content);
+
+      /*
+       * Text the PDF could not render.
+       *
+       * `pdf-lib` embeds the standard fonts and none contains Arabic glyphs,
+       * so an Arabic passage is silently dropped — producing a file of about a
+       * kilobyte that opens to a blank page. The generator has always detected
+       * this and this caller threw the detection away, so an Arabic researcher
+       * asking for PDF received an empty document with no indication anything
+       * was wrong.
+       *
+       * Refused rather than delivered. A file that looks like work and
+       * contains none is worse than a failure: the failure is visible, and
+       * this was not until they opened it.
+       */
+      if (pdf.unsupportedText.length > 0) {
+        return failed([
+          {
+            code: 'document.unsupportedScript',
+            severity: 'error',
+            message:
+              context.locale === 'ar'
+                ? 'تعذّر إنتاج PDF: الخطوط المتاحة لا تدعم العربية. اطلب ملف Word — يعرض العربية كاملةً.'
+                : 'The PDF could not be produced: the available fonts do not support this script. Ask for a Word file instead.',
+            reference: title,
+            metadata: { droppedPassages: pdf.unsupportedText.length },
+          },
+        ]);
+      }
+
+      bytes = pdf.bytes;
     } else if (kind === 'pptx') {
       bytes = await generatePptx(
         title,

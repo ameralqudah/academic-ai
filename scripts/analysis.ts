@@ -37,6 +37,9 @@ import { checkQuality } from '@/server/quality/engine';
 import { decide, detectReference } from '@/server/agent/routing-rules';
 import { decideOutputLanguage } from '@/server/context/language';
 import { requirementsFor, shouldFailOver } from '@/server/ai/model-requirements';
+import { extractDocument } from '@/server/files/extract';
+import { chunkDocument, retrievePassages } from '@/server/files/retrieve';
+import { generateDocx } from '@/server/generators/docx';
 import {
   describeOmissions,
   estimateTokens,
@@ -5693,6 +5696,190 @@ console.log('\nquery words must appear together');
 
   check('an entirely wrong corpus is returned rather than emptied', result.kept.length, 1);
   assertTrue('but flagged as off-topic', looksOffTopic(wrong, 'hybrid learning'));
+}
+
+
+
+console.log('\ndocument extraction and retrieval');
+
+/*
+ * Uploads were tabular only — CSV, TSV, XLSX — because the product grew out of
+ * statistics. A researcher's folder is mostly papers, so "what does the study
+ * I uploaded say about sample size" was not a question this could reach: the
+ * file went in as rows or not at all.
+ */
+
+{
+  /* DOCX is a zip of XML, and the heading styles are what make it navigable. */
+  const docx = await generateDocx({
+    title: 'Hybrid Learning Study',
+    sections: [
+      {
+        heading: 'Methods',
+        paragraphs: [
+          'Participants were 214 undergraduates recruited from three universities.',
+          'Data were collected over one semester.',
+        ],
+      },
+      { heading: 'Results', paragraphs: ['Engagement scores rose in the hybrid condition.'] },
+    ],
+  });
+
+  const extracted = await extractDocument(docx, 'study.docx');
+
+  check('a Word document is readable', extracted.limitation, 'none');
+  assertTrue('its sections are kept', extracted.sections.length >= 2);
+  assertTrue('with headings', extracted.sections.some((section) => section.heading === 'Methods'));
+  assertTrue('and its text', extracted.wordCount > 15);
+
+  /*
+   * Structure is kept rather than flattened. A retrieval that returns "the
+   * Methods section" is far more useful than one that returns "page 4", and
+   * flattening throws away the thing that makes a paper navigable.
+   */
+  const methods = extracted.sections.find((section) => section.heading === 'Methods');
+  assertTrue('the right text under the right heading', methods?.paragraphs[0]?.includes('214') ?? false);
+}
+
+{
+  /*
+   * PDF, from compressed streams and hex-encoded strings. Reading the file
+   * without inflating found nothing and reported a scan — a misdiagnosis worse
+   * than failing, because it tells the researcher their paper has no text when
+   * it does.
+   */
+  const pdf = await generatePdf({
+    title: 'Hybrid Learning',
+    sections: [{ heading: 'Introduction', paragraphs: ['Participants numbered 214 across three universities.'] }],
+  });
+
+  const extracted = await extractDocument(pdf.bytes, 'paper.pdf');
+
+  check('a PDF is readable', extracted.limitation, 'none');
+  /*
+   * Fewer words than the source had: PDF records positions rather than
+   * sentences, and extraction recovers the text without its structure. Enough
+   * to answer a question about it, which is what this is for.
+   */
+  assertTrue('with its words', extracted.wordCount >= 8);
+  assertTrue(
+    'and the text itself',
+    extracted.sections[0]?.paragraphs.join(' ').includes('214') ?? false,
+  );
+}
+
+{
+  /*
+   * A file with no text layer is reported, not returned empty. A scan accepted
+   * silently leaves the researcher with a file the assistant claims to have
+   * and cannot quote.
+   */
+  const notADocument = await extractDocument(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]), 'scan.pdf');
+
+  check('a PDF with no text says so', notADocument.limitation, 'no-text-layer');
+
+  const unknown = await extractDocument(new Uint8Array([1, 2, 3]), 'thing.xyz');
+  check('and an unknown format says so', unknown.limitation, 'unsupported-format');
+}
+
+{
+  /* Markdown, including Arabic, where `#` marks a heading. */
+  const markdown = new TextEncoder().encode(
+    '# المنهجية\n\nشارك في الدراسة 214 طالبًا من ثلاث جامعات.\n\n# النتائج\n\nارتفعت درجات الاندماج.',
+  );
+
+  const extracted = await extractDocument(markdown, 'notes.md');
+
+  check('Arabic markdown is readable', extracted.limitation, 'none');
+  check('with its headings', extracted.sections.length, 2);
+  assertTrue('and its text', extracted.sections[0]?.paragraphs[0]?.includes('214') ?? false);
+}
+
+console.log('\npassage retrieval');
+
+{
+  /*
+   * A question needs three paragraphs out of forty pages. Sending the whole
+   * paper costs a fortune per call and buries the sentence; sending nothing
+   * means the question cannot be answered.
+   */
+  const document = {
+    sections: [
+      { heading: 'Methods', paragraphs: ['Participants were 214 undergraduates from three universities.'] },
+      { heading: 'Results', paragraphs: ['Engagement scores rose significantly.'] },
+      { heading: 'Discussion', paragraphs: ['The findings align with earlier work on blended delivery.'] },
+    ],
+    wordCount: 30,
+    limitation: 'none' as const,
+  };
+
+  const chunks = chunkDocument(document);
+
+  assertTrue('a document becomes passages', chunks.length >= 3);
+  /*
+   * The heading travels inside the text. A passage beginning "Participants
+   * were recruited" is far more useful when the model knows it sits under
+   * "Methods" — and putting it in the text means retrieval matches on it too.
+   */
+  assertTrue('each carrying its heading', chunks[0]?.text.startsWith('Methods') ?? false);
+
+  const passages = retrievePassages(chunks, 'participants universities', 1);
+
+  check('retrieval returns what was asked for', passages.length, 1);
+  assertTrue('the right passage', passages[0]?.text.includes('214') ?? false);
+}
+
+{
+  /* A short document is returned whole: retrieval over three chunks is a
+   * needless chance to return the wrong one. */
+  const small = chunkDocument({
+    sections: [{ heading: '', paragraphs: ['One short paragraph.'] }],
+    wordCount: 3,
+    limitation: 'none',
+  });
+
+  check('a short document is not filtered', retrievePassages(small, 'anything', 4).length, small.length);
+}
+
+{
+  /*
+   * Nothing matched: the opening is returned rather than nothing. A paper's
+   * first pages say what it is about, which answers more questions than
+   * silence does.
+   */
+  const chunks = chunkDocument({
+    sections: Array.from({ length: 8 }, (_, index) => ({
+      heading: `Section ${index}`,
+      paragraphs: [`Content about photosynthesis in plants, part ${index}.`],
+    })),
+    wordCount: 80,
+    limitation: 'none',
+  });
+
+  const passages = retrievePassages(chunks, 'quantum chromodynamics', 2);
+
+  assertTrue('an unmatched question still returns something', passages.length > 0);
+  assertTrue('from the beginning', (passages[0]?.ordinal ?? 99) < 3);
+}
+
+{
+  /* Passages come back in reading order, not by score. */
+  const chunks = chunkDocument({
+    sections: Array.from({ length: 6 }, (_, index) => ({
+      heading: `Part ${index}`,
+      paragraphs: [`Hybrid learning discussion number ${index}.`],
+    })),
+    wordCount: 60,
+    limitation: 'none',
+  });
+
+  const passages = retrievePassages(chunks, 'hybrid learning', 3);
+  const ordinals = passages.map((passage) => passage.ordinal);
+
+  assertTrue(
+    'passages are in reading order',
+    ordinals.every((value, index) => index === 0 || value > (ordinals[index - 1] ?? -1)),
+  );
 }
 
 

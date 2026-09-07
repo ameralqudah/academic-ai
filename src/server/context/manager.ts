@@ -60,7 +60,12 @@ export interface BuildContextInput extends SourceScope {
 export async function buildContext(input: BuildContextInput): Promise<ContextEnvelope> {
   const startedAt = Date.now();
 
-  const collected = await collectFragments(input);
+  /*
+   * The request travels to the sources, because document retrieval needs to
+   * know what to look for — a forty-page paper has to be narrowed before it
+   * can be included at all.
+   */
+  const collected = await collectFragments({ ...input, request: input.request });
   const all = [...collected, ...(input.additional ?? [])];
 
   const scored = all.map((entry) => ({

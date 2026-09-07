@@ -243,13 +243,28 @@ export function filterByRelevance(sources: Source[], query: string): RelevanceRe
     const present = normalisedTerms.filter((term) => haystack.includes(term));
 
     /*
+     * Whether the query's words appear together.
+     *
+     * "Hybrid learning" is a phrase, not two independent words. A paper titled
+     * "Hybrid Machine Learning for Spatial Databases" contains both and is
+     * about neither — the words are three apart and belong to different noun
+     * phrases. Counting presence admitted it; counting adjacency does not.
+     *
+     * Checked only for two-word queries, which is where the failure lives:
+     * a longer query rarely appears intact in a title, and demanding it would
+     * discard the relevant along with the rest.
+     */
+    const adjacent =
+      normalisedTerms.length !== 2 || containsPhrase(haystack, normalisedTerms);
+
+    /*
      * A modifier cannot carry a match by itself. "Hybrid machine learning for
      * spatial databases" contains both query words and is not about hybrid
      * learning — the subject word must be there on its own terms.
      */
     const substantive = present.filter((term) => !MODIFIERS.has(term));
 
-    if (present.length >= required && substantive.length > 0) return true;
+    if (present.length >= required && substantive.length > 0 && adjacent) return true;
 
     /*
      * A distinctive term still earns a place when the query has only one
@@ -292,6 +307,43 @@ function coverageRequired(termCount: number): number {
   if (termCount <= 4) return 2;
 
   return Math.ceil(termCount * 0.5);
+}
+
+/**
+ * Whether the query's words appear next to each other, in either order.
+ *
+ * Word order varies across languages and across phrasings — "learning
+ * environments that are hybrid" is the same subject as "hybrid learning" — so
+ * the test is proximity rather than sequence. Two words within three positions
+ * of one another are being used together; six apart, they are not.
+ */
+function containsPhrase(haystack: string, terms: string[]): boolean {
+  const words = haystack.split(/\s+/);
+
+  const positions = terms.map((term) =>
+    words.reduce<number[]>((found, word, index) => {
+      if (word.includes(term)) found.push(index);
+      return found;
+    }, []),
+  );
+
+  /* A term that appears nowhere cannot be adjacent to anything. */
+  if (positions.some((list) => list.length === 0)) return false;
+
+  const [first, second] = positions as [number[], number[]];
+
+  /*
+   * One position apart: genuinely adjacent, in either order.
+   *
+   * Three was too generous — "Hybrid Machine Learning" has exactly one word
+   * between the two, and it is the word that changes the subject. Allowing a
+   * gap admits the modifier attaching to something else entirely, which is the
+   * failure this check exists to prevent.
+   *
+   * Either order, because word order varies: "learning environments that are
+   * hybrid" names the same subject as "hybrid learning".
+   */
+  return first.some((a) => second.some((b) => Math.abs(a - b) === 1));
 }
 
 /**

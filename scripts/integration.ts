@@ -43,7 +43,7 @@ import { PDFDocument } from 'pdf-lib';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { namedFormat, resolveReference } from '@/server/agent/continuity';
-import { substituteFormat } from '@/server/services/task.service';
+import { getTask, substituteFormat } from '@/server/services/task.service';
 import { shouldFailOver } from '@/server/ai/model-requirements';
 import { generateDocx } from '@/server/generators/docx';
 import { generatePdf } from '@/server/generators/documents';
@@ -5004,6 +5004,106 @@ async function main() {
       'the planner knows PDF cannot render Arabic',
       plannerSource.includes('PDF CANNOT RENDER ARABIC'),
     );
+  }
+
+
+  /* --- a step that succeeds with something to say ----------------------- */
+
+  {
+    /*
+     * A step can complete and still have something to report: three sources
+     * found where ten were expected, a section written without evidence. The
+     * observation has carried warnings and gaps since Phase A, and the
+     * progress panel displayed neither — so partial work looked identical to
+     * complete work.
+     *
+     * That is the more dangerous half of the pair. A failure is visible and
+     * gets investigated; a quiet gap gets submitted.
+     */
+    const warningOwner = await newUser('warning-owner');
+
+    registerHandler('academic.search', async (context) =>
+      partial(
+        [
+          makeOutput(
+            { taskId: context.taskId, stepId: context.stepId, capability: 'academic.search', projectId: context.projectId },
+            'sources.v1',
+            { references: [], found: 3 },
+          ),
+        ],
+        ['sources newer than 2020'],
+        {
+          warnings: [
+            { code: 'search.thin', severity: 'warning', message: 'Only three sources were found' },
+          ],
+        },
+      ),
+    );
+
+    const task = await tasksRepo.create({
+      userId: warningOwner,
+      request: 'search with a thin result',
+      locale: 'en',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    await tasksRepo.addSteps([
+      {
+        taskId: task.id,
+        ordinal: 0,
+        capability: 'academic.search',
+        label: 'search',
+        status: 'PENDING',
+        dependsOn: [],
+        input: {},
+      },
+    ]);
+
+    await runTask(task.id);
+
+    /*
+     * Read through `getTask`, which is what the polling path returns — so this
+     * covers the transport as well as the storage. The stream sends the same
+     * rows.
+     */
+    const view = await getTask(task.id, warningOwner);
+    const step = view.steps[0];
+
+    check('the step completed', step?.status, 'COMPLETED');
+
+    const observation = (step?.output as { observation?: { warnings?: { message: string }[]; missingInformation?: string[] } } | null)
+      ?.observation;
+
+    check('its warning survived to the client', observation?.warnings?.length, 1);
+    assertTrue(
+      'with the message intact',
+      observation?.warnings?.[0]?.message.includes('three sources') ?? false,
+    );
+
+    /*
+     * A gap is not a warning: a warning says what happened, a gap says what
+     * would have made it better. A researcher told "sources newer than 2020"
+     * can supply them; one told nothing assumes the result is whole.
+     */
+    check('and the gap it named', observation?.missingInformation?.length, 1);
+
+    /* The panel renders both. */
+    const panelSource = await readFile('src/components/agent/task-progress.tsx', 'utf8');
+
+    assertTrue('the panel reads step warnings', panelSource.includes('function stepWarnings'));
+    assertTrue('and the gaps', panelSource.includes('function stepGaps'));
+    assertTrue(
+      'showing them on a completed step',
+      panelSource.includes("step.status === 'COMPLETED' &&"),
+    );
+    /*
+     * At most three, quietly. Most steps have nothing to say, and a panel that
+     * shouts on every line teaches the researcher to stop reading it.
+     */
+    assertTrue('at most three notes', panelSource.includes('.slice(0, 3)'));
   }
 
   /* --------------------------------------------------------------- cleanup */

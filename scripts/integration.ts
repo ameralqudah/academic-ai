@@ -43,8 +43,10 @@ import { PDFDocument } from 'pdf-lib';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { namedFormat, resolveReference } from '@/server/agent/continuity';
+import { substituteFormat } from '@/server/services/task.service';
 import { shouldFailOver } from '@/server/ai/model-requirements';
 import { generateDocx } from '@/server/generators/docx';
+import { generatePdf } from '@/server/generators/documents';
 import {
   failed as observationFailed,
   makeOutput,
@@ -2917,7 +2919,16 @@ async function main() {
    * one, because "an artifact exists" and "the file works" are different
    * claims and only the second matters to the researcher.
    */
-  for (const format of ['docx', 'pdf', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'bib', 'ris'] as const) {
+  /*
+   * PDF is absent from this list deliberately.
+   *
+   * The fixture writes Arabic, and `pdf-lib`'s standard fonts contain no
+   * Arabic glyphs — so a PDF here would open to a blank page. That is now
+   * refused rather than delivered, and the refusal is what the Arabic PDF
+   * test below asserts. Exercising the format itself needs Latin text, which
+   * the case after this loop provides.
+   */
+  for (const format of ['docx', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'bib', 'ris'] as const) {
     const { task, generate } = await generateAs(format);
 
     check(`${format}: the task completes`, (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
@@ -2961,13 +2972,29 @@ async function main() {
   }
 
   {
-    const { generate } = await generateAs('pdf');
-    const { bytes } = await readArtifact(generate?.artifactIds[0] as string, artifactOwner2);
+    /*
+     * PDF is exercised from Latin text, because the fixture above writes
+     * Arabic and `pdf-lib`'s standard fonts have no Arabic glyphs — an Arabic
+     * PDF is now refused rather than delivered blank, which is asserted
+     * separately.
+     *
+     * Generated directly rather than through a task, so the format itself is
+     * tested without the language question in the way.
+     */
+    const result = await generatePdf({
+      title: 'Hybrid Learning in Higher Education',
+      sections: [
+        { heading: 'Introduction', paragraphs: ['Hybrid learning combines modes of delivery.'] },
+        { heading: 'Findings', paragraphs: ['Engagement rose across the cohort.'] },
+      ],
+      references: ['Smith, J. (2024). Hybrid learning. Journal of Education.'],
+    });
 
-    check('the PDF signature is right', new TextDecoder().decode(bytes.slice(0, 5)), '%PDF-');
+    check('Latin text drops nothing', result.unsupportedText.length, 0);
+    check('the PDF signature is right', new TextDecoder().decode(result.bytes.slice(0, 5)), '%PDF-');
 
-    const document = await PDFDocument.load(bytes);
-    assertTrue('and it has pages', document.getPageCount() >= 2);
+    const document = await PDFDocument.load(result.bytes);
+    assertTrue('and it has pages', document.getPageCount() >= 1);
   }
 
   {
@@ -3765,10 +3792,22 @@ async function main() {
        */
       check('and it is the Word file', resolution.candidate.artifact?.kind, 'docx');
 
-      /* Converting it carries the content, rather than writing a new paper. */
+      /*
+       * Converting carries the content, rather than writing a new paper.
+       *
+       * The requested format is PDF and the work is Arabic, so Word is
+       * produced instead: `pdf-lib`'s standard fonts have no Arabic glyphs and
+       * the PDF would open blank. Substituting is a judgement — a working Word
+       * file is closer to what the researcher wanted than an accurate refusal
+       * — and it is made in one place, `substituteFormat`.
+       */
+      check('an Arabic PDF request becomes Word', substituteFormat('pdf', 'ar'), 'docx');
+      check('while an English one stays PDF', substituteFormat('pdf', 'en'), 'pdf');
+      check('and other formats are untouched', substituteFormat('pptx', 'ar'), 'pptx');
+
       const second = await runContinuityTask(
         'حوّله PDF',
-        [{ capability: 'document.generate', input: { format: 'pdf', title: 'Digital Twin' } }],
+        [{ capability: 'document.generate', input: { format: 'docx', title: 'Digital Twin' } }],
         { references: { kind: 'artifact', id: resolution.candidate.id, targetFormat: 'pdf' } },
       );
 
@@ -3781,7 +3820,7 @@ async function main() {
         continuityOwner,
       );
 
-      check('which is a PDF', artifact.kind, 'pdf');
+      check('which renders Arabic', artifact.kind, 'docx');
       /*
        * Larger than an empty document. The content came from the artifact the
        * request referred to — a conversion that produced a title page and
@@ -4897,6 +4936,74 @@ async function main() {
       assertTrue(`${reason} has Arabic text`, (ar.task.step.reason[reason]?.length ?? 0) > 5);
       assertTrue(`${reason} has English text`, (en.task.step.reason[reason]?.length ?? 0) > 5);
     }
+  }
+
+
+  /* --- an Arabic PDF is refused, not delivered empty -------------------- */
+
+  {
+    /*
+     * `pdf-lib` embeds the standard fonts and none contains Arabic glyphs, so
+     * an Arabic passage is dropped and the file opens to a blank page. The
+     * generator has always detected this; the task handler took `.bytes` and
+     * threw the detection away.
+     *
+     * So an Arabic researcher asking for PDF received about a kilobyte of
+     * empty document with no indication anything was wrong — a file that looks
+     * like work and contains none, which is worse than a failure because the
+     * failure is visible and this was not until they opened it.
+     */
+    const arabic = await generatePdf({
+      title: 'التعلم الهجين',
+      sections: [{ paragraphs: ['يشكّل التعلم الهجين نموذجًا تعليميًا متطورًا.'] }],
+    });
+
+    assertTrue('the generator reports dropped Arabic', arabic.unsupportedText.length > 0);
+
+    /* English is unaffected and still produced. */
+    const english = await generatePdf({
+      title: 'Hybrid Learning',
+      sections: [{ paragraphs: ['This renders correctly.'] }],
+    });
+
+    check('English drops nothing', english.unsupportedText.length, 0);
+    assertTrue('and produces a file', english.bytes.length > 900);
+
+    /*
+     * Mixed text is refused too. A document that loses one Arabic phrase from
+     * an English page is still a document with a hole in it, and the
+     * researcher would not find it until a reader pointed it out.
+     */
+    const mixed = await generatePdf({
+      title: 'Hybrid Learning',
+      sections: [{ paragraphs: ['English with التعلم inside.'] }],
+    });
+
+    assertTrue('partial loss is still loss', mixed.unsupportedText.length > 0);
+
+    /* The handler refuses rather than delivering. */
+    const handlerSource = await readFile('src/server/tasks/handlers.ts', 'utf8');
+
+    assertTrue(
+      'the task handler checks for dropped text',
+      handlerSource.includes('pdf.unsupportedText.length > 0'),
+    );
+    assertTrue(
+      'and fails rather than delivering an empty file',
+      handlerSource.includes("code: 'document.unsupportedScript'"),
+    );
+    assertTrue(
+      'naming Word as the answer',
+      handlerSource.includes('اطلب ملف Word'),
+    );
+
+    /* And the planner avoids the situation rather than hitting it. */
+    const plannerSource = await readFile('src/server/tasks/planner.ts', 'utf8');
+
+    assertTrue(
+      'the planner knows PDF cannot render Arabic',
+      plannerSource.includes('PDF CANNOT RENDER ARABIC'),
+    );
   }
 
   /* --------------------------------------------------------------- cleanup */

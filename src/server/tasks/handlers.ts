@@ -31,6 +31,7 @@ import { generateDocx } from '@/server/generators/docx';
 import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { readArtifact, storeArtifact, type ArtifactKind } from '@/server/services/artifact.service';
+import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { answerGeneralQuestion, generateSurveyItems } from '@/server/services/ai.service';
 import { runCbSem, runPls } from '@/server/services/pls.service';
@@ -1338,12 +1339,78 @@ export function registerAllHandlers(): void {
     if (!datasetId) return needsInput('Which file should I analyse?', 'datasetId');
 
     /*
-     * Deliberately minimal: the dataset profile is computed on upload, so this
-     * reads it rather than recomputing. A handler that reanalysed would be
-     * doing work the product already did.
+     * The profile is computed on upload, so this reads it rather than
+     * recomputing — a handler that reanalysed would repeat work the product
+     * already did.
+     *
+     * What it must do is say *what kind* of file this is. Uploads used to be
+     * tabular only, so `ready: true` was enough; now a researcher can upload a
+     * paper, and a downstream step told only "ready" would look for columns in
+     * a document and find none.
      */
+    const dataset = await datasetsRepo.findOwned(datasetId, context.userId);
+
+    if (!dataset) {
+      return failed([
+        {
+          code: 'file.notFound',
+          severity: 'error',
+          message: 'That file is not available — it may have been deleted.',
+          reference: datasetId,
+        },
+      ]);
+    }
+
+    const profile = dataset.profile as {
+      columns?: { name?: string; type?: string }[];
+      document?: { words?: number; sections?: number; chunks?: unknown[] };
+    } | null;
+
+    /*
+     * A document, which is read by retrieval rather than analysed by column.
+     * Reported as such so a statistics step is not planned against a paper.
+     */
+    if (profile?.document) {
+      return succeeded(
+        [
+          makeOutput(producer(context, 'file.analyse'), 'dataset.v1', {
+            datasetId,
+            ready: true,
+            fileKind: 'document',
+            name: dataset.originalName,
+            words: profile.document.words ?? 0,
+            sections: profile.document.sections ?? 0,
+          }),
+        ],
+        { modelCalls: 0 },
+      );
+    }
+
+    const columns = profile?.columns ?? [];
+
+    /*
+     * A table with no columns is a file that parsed into nothing — an empty
+     * upload, or one whose header row was not where the parser expected. The
+     * researcher can fix that; a step that reported it ready could not.
+     */
+    if (columns.length === 0) {
+      return needsInput(
+        context.locale === 'ar'
+          ? 'لم أجد أعمدة في هذا الملف. هل ترفعه بصيغة أخرى؟'
+          : 'I could not find any columns in this file. Could you upload it in another format?',
+        'datasetId',
+      );
+    }
+
     return succeeded([
-      makeOutput(producer(context, 'file.analyse'), 'dataset.v1', { datasetId, ready: true }),
+      makeOutput(producer(context, 'file.analyse'), 'dataset.v1', {
+        datasetId,
+        ready: true,
+        fileKind: 'table',
+        name: dataset.originalName,
+        rowCount: dataset.rowCount,
+        columns: columns.map((column) => column.name).filter(Boolean),
+      }),
     ]);
   });
 

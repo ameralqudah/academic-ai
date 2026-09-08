@@ -5106,6 +5106,107 @@ async function main() {
     assertTrue('at most three notes', panelSource.includes('.slice(0, 3)'));
   }
 
+
+  /* --- an uploaded file is a table or a document, and the step says which -- */
+
+  {
+    /*
+     * Uploads were tabular only, so `file.analyse` returned `ready: true` and
+     * nothing else — enough when every file had columns. Phase H made papers
+     * uploadable, and a downstream step told only "ready" would look for
+     * columns in a document and find none.
+     */
+    const fileOwner = await newUser('file-kind-owner');
+
+    registerAllHandlers();
+
+    const analyse = async (datasetId: string) => {
+      const task = await tasksRepo.create({
+        userId: fileOwner,
+        request: 'analyse the file',
+        locale: 'ar',
+        status: 'QUEUED',
+        context: {},
+        budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+        spent: { modelCalls: 0, retries: 0 },
+      });
+
+      await tasksRepo.addSteps([
+        {
+          taskId: task.id,
+          ordinal: 0,
+          capability: 'file.analyse',
+          label: 'analyse',
+          status: 'PENDING',
+          dependsOn: [],
+          input: { datasetId },
+        },
+      ]);
+
+      await runTask(task.id);
+
+      const step = (await tasksRepo.stepsOf(task.id))[0];
+      const data = (step?.output as { outputs?: { data?: Record<string, unknown> }[] } | null)
+        ?.outputs?.[0]?.data;
+
+      return { status: step?.status, data };
+    };
+
+    /* A paper. */
+    const docxBytes = await generateDocx({
+      title: 'Study',
+      sections: [
+        { heading: 'Methods', paragraphs: ['Participants were 214 undergraduates.'] },
+      ],
+    });
+
+    const document = await saveUpload({
+      userId: fileOwner,
+      file: { name: 'study.docx', bytes: docxBytes.buffer as ArrayBuffer },
+    });
+
+    const documentResult = await analyse(document.dataset.id);
+
+    check('a document analyses successfully', documentResult.status, 'COMPLETED');
+    check('and is reported as a document', documentResult.data?.fileKind, 'document');
+    assertTrue('with its length', (documentResult.data?.words as number) > 0);
+
+    /* A spreadsheet. */
+    const table = await saveUpload({
+      userId: fileOwner,
+      file: {
+        name: 'data.csv',
+        bytes: new TextEncoder().encode('age,score\n21,88\n22,91').buffer as ArrayBuffer,
+      },
+    });
+
+    const tableResult = await analyse(table.dataset.id);
+
+    check('a table analyses successfully', tableResult.status, 'COMPLETED');
+    check('and is reported as a table', tableResult.data?.fileKind, 'table');
+    assertTrue(
+      'with its columns named',
+      (tableResult.data?.columns as string[])?.includes('age') ?? false,
+    );
+
+    /*
+     * A file that is gone. Reported rather than passed downstream: a step that
+     * said "ready" about a deleted file would fail later, further from the
+     * cause.
+     */
+    const missing = await analyse('00000000-0000-0000-0000-000000000000');
+
+    check('a missing file fails at the step that needs it', missing.status, 'FAILED');
+
+    /* And the planner is told not to plan statistics against prose. */
+    const plannerSource = await readFile('src/server/tasks/planner.ts', 'utf8');
+
+    assertTrue(
+      'the planner distinguishes tables from documents',
+      plannerSource.includes('AN UPLOADED FILE IS EITHER A TABLE OR A DOCUMENT'),
+    );
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 

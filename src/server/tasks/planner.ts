@@ -160,6 +160,14 @@ ${
    - CSV, ملف CSV → "csv"
    - BibTeX, references file, ملف مراجع → "bib"
 
+   AN UPLOADED FILE IS EITHER A TABLE OR A DOCUMENT. A spreadsheet has columns
+   and rows, and statistics run on it. A paper has sections and prose, and
+   questions about it are answered by reading the relevant passages — which the
+   context layer supplies automatically. Do not plan a statistics step against
+   a document: there are no variables to test, and the step will fail after
+   spending a model call to discover that. The file.analyse step reports which
+   kind it is before anything downstream depends on it.
+
    PDF CANNOT RENDER ARABIC. The PDF generator embeds standard fonts and none
    contains Arabic glyphs, so an Arabic document exported as PDF opens to a
    blank page. When the work is in Arabic and the researcher asked for PDF,

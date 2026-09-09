@@ -85,11 +85,17 @@ export async function buildContext(input: BuildContextInput): Promise<ContextEnv
    */
   const order: Record<ContextFragment['authority'], number> = {
     'user-instruction': 0,
-    'project-data': 1,
-    'tool-result': 2,
-    'external-evidence': 3,
-    'user-content': 4,
-    'model-generated': 5,
+    /*
+     * The researcher's own files come before anything retrieved: when their
+     * uploaded paper and a search result disagree, the file they chose is what
+     * they meant.
+     */
+    'user-document': 1,
+    'project-data': 2,
+    'tool-result': 3,
+    'external-evidence': 4,
+    'user-content': 5,
+    'model-generated': 6,
   };
 
   kept.sort((a, b) => order[a.authority] - order[b.authority] || b.relevance - a.relevance);

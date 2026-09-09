@@ -71,6 +71,8 @@ export function scoreRelevance(
    */
   const floor: Record<ContextFragment['authority'], number> = {
     'user-instruction': 0.95,
+    /* A file the researcher chose to upload is about the thing they asked. */
+    'user-document': 0.75,
     'user-content': 0.4,
     'project-data': 0.35,
     'tool-result': 0.45,
@@ -121,7 +123,8 @@ export function scoreRelevance(
  */
 export function deduplicate(fragments: ContextFragment[]): ContextFragment[] {
   const rank: Record<ContextFragment['authority'], number> = {
-    'user-instruction': 6,
+    'user-instruction': 7,
+    'user-document': 6,
     'user-content': 5,
     'project-data': 4,
     'tool-result': 3,

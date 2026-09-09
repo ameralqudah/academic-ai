@@ -5883,6 +5883,129 @@ console.log('\npassage retrieval');
 }
 
 
+
+console.log('\nuploaded documents are attributed');
+
+/*
+ * Phase H made an uploaded paper's contents available, and they arrived as
+ * bare text — so the model could quote the researcher's own draft and write
+ * "studies have shown", indistinguishable from something it invented.
+ *
+ * Every other kind of evidence here carries provenance. An uploaded document
+ * arrived without it, which is the one place where being unable to tell
+ * matters most: attributing someone's own words to the literature is a
+ * fabricated citation arrived at honestly.
+ */
+{
+  const passage = fragment({
+    id: 'doc-1',
+    kind: 'file',
+    authority: 'user-document',
+    content: '[thesis-draft.docx — Methods]\nParticipants were 214 undergraduates.',
+    provenance: { source: 'document', id: 'ds-1' },
+  });
+
+  const envelope = {
+    purpose: 'answer' as const,
+    fragments: [passage],
+    budget: { maxTokens: 1000, usedTokens: 50 },
+    omitted: [],
+  };
+
+  const rendered = renderEnvelope(envelope, 'en');
+
+  assertTrue(
+    'uploaded files are grouped under their own heading',
+    rendered.includes("researcher's own uploaded files"),
+  );
+  assertTrue(
+    'told to attribute what is taken from them',
+    rendered.includes('attribute what you take to the file'),
+  );
+  /*
+   * Named as not-a-citation. A paper found through a search has a DOI; a file
+   * someone uploaded is a draft, a manuscript, their own notes — and citing it
+   * as literature would put a source in a bibliography that does not exist.
+   */
+  assertTrue(
+    'and marked as not published sources',
+    rendered.includes('not published sources'),
+  );
+
+  const arabic = renderEnvelope(envelope, 'ar');
+  assertTrue('with the same instruction in Arabic', arabic.includes('انسب ما تأخذه منها إلى الملف'));
+}
+
+{
+  /*
+   * A researcher's own file outranks a retrieved source. When their uploaded
+   * paper and a search result disagree, the file they chose to upload is what
+   * they meant.
+   */
+  const uploaded = fragment({
+    id: 'u',
+    kind: 'file',
+    authority: 'user-document',
+    content: 'unrelated text entirely',
+    provenance: { source: 'document', id: 'd' },
+  });
+
+  const retrieved = fragment({
+    id: 'r',
+    kind: 'research',
+    authority: 'external-evidence',
+    content: 'unrelated text entirely',
+    provenance: { source: 'search', id: 's' },
+  });
+
+  assertTrue(
+    'an uploaded file outranks a retrieved source',
+    scoreRelevance(uploaded, 'something else', { purpose: 'answer' }) >
+      scoreRelevance(retrieved, 'something else', { purpose: 'answer' }),
+  );
+
+  /* But never above the user's own instructions. */
+  const instruction = fragment({
+    id: 'i',
+    kind: 'instruction',
+    authority: 'user-instruction',
+    content: 'unrelated text entirely',
+    provenance: { source: 'user', id: 'i' },
+  });
+
+  assertTrue(
+    'and an instruction outranks the file',
+    scoreRelevance(instruction, 'something else', { purpose: 'answer' }) >
+      scoreRelevance(uploaded, 'something else', { purpose: 'answer' }),
+  );
+}
+
+{
+  /* Deduplication keeps the higher-authority copy: the file, not a paraphrase. */
+  const collision = [
+    fragment({
+      id: 'draft',
+      kind: 'conversation',
+      authority: 'model-generated',
+      content: 'Participants were 214 undergraduates.',
+      provenance: { source: 'chat', id: 'c' },
+    }),
+    fragment({
+      id: 'file',
+      kind: 'file',
+      authority: 'user-document',
+      content: 'Participants were 214 undergraduates.',
+      provenance: { source: 'document', id: 'd' },
+    }),
+  ];
+
+  const kept = deduplicate(collision);
+
+  check('one survives', kept.length, 1);
+  check('and it is the file, not the paraphrase', kept[0]?.authority, 'user-document');
+}
+
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

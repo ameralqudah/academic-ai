@@ -344,19 +344,32 @@ async function fileFragments(scope: SourceScope): Promise<ContextFragment[]> {
         id: `document-${dataset.id}`,
         kind: 'file',
         /*
-         * A tool read this file, so it is a measurement rather than a claim —
-         * but its content is the researcher's own material, which is why it
-         * outranks anything the model wrote.
+         * The researcher's own material, which is neither a tool measurement
+         * nor published evidence. Its own level, because writing "studies have
+         * shown" from an uploaded draft attributes their words to the
+         * literature — a fabricated citation arrived at honestly.
          */
-        authority: 'tool-result',
+        authority: 'user-document',
+        /*
+         * Each passage labelled with where it came from.
+         *
+         * The passages were included as bare text, so the model quoted the
+         * researcher's own paper and wrote "studies have shown" — indistinguishable
+         * from something it invented. Every other kind of evidence in this system
+         * carries provenance; an uploaded document arrived without it, which is
+         * the one place where being unable to tell matters most.
+         */
         content: [
-          `Document: ${dataset.originalName ?? dataset.id}`,
-          profile?.document?.words ? `Length: ${profile.document.words} words` : '',
+          `The researcher uploaded "${dataset.originalName ?? dataset.id}". Passages from it follow. Attribute anything you take from them to this file — it is their own material, not published literature, so it is not a citation.`,
           '',
-          ...passages.map((passage) => passage.text),
+          ...passages.map((passage) =>
+            passage.heading
+              ? `[${dataset.originalName ?? 'file'} — ${passage.heading}]\n${passage.text}`
+              : `[${dataset.originalName ?? 'file'}]\n${passage.text}`,
+          ),
         ]
           .filter(Boolean)
-          .join('\n'),
+          .join('\n\n'),
         provenance: { source: 'document', id: dataset.id },
         relevance: 0.9,
       }),

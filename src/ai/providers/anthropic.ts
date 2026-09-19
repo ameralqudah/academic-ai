@@ -164,7 +164,18 @@ export class AnthropicProvider implements AIProvider {
       ...base,
       max_tokens: Math.min(answerTokens + THINKING_HEADROOM[effort], MAX_OUTPUT_TOKENS),
       thinking: { type: 'adaptive' as const },
-      output_config: { effort },
+      output_config: {
+        effort,
+        /*
+         * A schema turns "please reply with JSON" into a constraint the API
+         * enforces. `request.json` on its own cannot do that here — Claude has
+         * no schema-less JSON mode — so it stays a matter for the prompt and
+         * the tolerant parser until a call site supplies a shape.
+         */
+        ...(request.jsonSchema
+          ? { format: { type: 'json_schema' as const, schema: request.jsonSchema } }
+          : {}),
+      },
     };
   }
 
@@ -191,6 +202,7 @@ export class AnthropicProvider implements AIProvider {
       content?: { type: string; text?: string }[];
       usage?: AnthropicUsage;
       stop_reason?: string;
+      stop_details?: { category?: string | null; explanation?: string };
     };
 
     const text = (data.content ?? [])
@@ -209,6 +221,12 @@ export class AnthropicProvider implements AIProvider {
       provider: this.name,
       model: this.model,
       stopReason: data.stop_reason,
+      ...(data.stop_reason === 'refusal'
+        ? {
+            refusalReason:
+              data.stop_details?.explanation ?? data.stop_details?.category ?? 'no reason given',
+          }
+        : {}),
     };
   }
 

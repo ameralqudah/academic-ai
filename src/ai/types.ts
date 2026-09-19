@@ -74,6 +74,20 @@ export interface AIRequest {
   /** When set, the provider is asked to return JSON only. */
   json?: boolean;
   /**
+   * The shape that JSON must take, as JSON Schema.
+   *
+   * `json: true` is a request; this is a guarantee. OpenAI and Google have a
+   * schema-less JSON mode, so `json` alone is enough for them, but Claude has
+   * no such mode — asking it for JSON without a schema is just a sentence in
+   * the prompt, which is why `parseJsonOutput` exists to dig an object out of
+   * whatever came back. Give a schema and the answer is constrained to it
+   * instead, and there is nothing left to dig through.
+   *
+   * Optional, and ignored where unsupported, so a call site can adopt it
+   * without every other one changing.
+   */
+  jsonSchema?: Record<string, unknown>;
+  /**
    * Ask the provider to cache the system prompt. Default true — the system block
    * holds the project context, which repeats across every call in a session.
    */
@@ -86,6 +100,16 @@ export interface AIResult {
   provider: ProviderName;
   model: string;
   stopReason?: string;
+  /**
+   * Why the model declined, when `stopReason` says it did.
+   *
+   * A refusal arrives as a successful response with no answer in it — HTTP
+   * 200, `stopReason: 'refusal'`, and usually no text at all. The stop reason
+   * already distinguishes that from a model with nothing to say; this carries
+   * the explanation that came with it, which otherwise reached the logs as an
+   * empty string and told nobody anything.
+   */
+  refusalReason?: string;
 }
 
 export interface AIChunk {

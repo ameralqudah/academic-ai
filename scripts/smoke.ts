@@ -245,6 +245,51 @@ check('its budget is the one the caller asked for', legacy.max_tokens, 600);
 const haiku = await bodySentBy('claude-haiku-4-5');
 check('Haiku 4.5 is on the old side of that line too', haiku.temperature, 0.7);
 
+const schema = { type: 'object', properties: { a: { type: 'string' } } };
+const shaped = await bodySentBy('claude-opus-5', { json: true, jsonSchema: schema });
+check('a schema becomes a constraint the API enforces', shaped.output_config, {
+  effort: 'high',
+  format: { type: 'json_schema', schema },
+});
+
+const unshaped = await bodySentBy('claude-opus-5', { json: true });
+check(
+  'json alone does not — Claude has no schema-less JSON mode',
+  'format' in (unshaped.output_config as Record<string, unknown>),
+  false,
+);
+
+/*
+ * A refusal is a 200 with no answer in it, and it has to stay
+ * distinguishable from a model that simply had nothing to say.
+ */
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({
+    ok: true,
+    json: async () => ({
+      content: [],
+      usage: {},
+      stop_reason: 'refusal',
+      stop_details: { category: 'cyber', explanation: 'declined' },
+    }),
+  })) as unknown as typeof globalThis.fetch;
+
+  try {
+    const refused = await new AnthropicProvider('k', 'claude-opus-5').complete({
+      task: 'chat',
+      locale: 'en',
+      system: 'system',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    check('a refusal is reported as one', refused.stopReason, 'refusal');
+    check('with the explanation that came with it', refused.refusalReason, 'declined');
+    check('and not as an answer', refused.text, '');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 console.log('\nword export');
 const document = new Document({
   sections: [

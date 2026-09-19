@@ -192,6 +192,39 @@ interface RawIntent {
   searchQueries?: unknown;
 }
 
+/**
+ * The same six fields, as a constraint rather than a request.
+ *
+ * Providers that support it are held to this shape, which removes a whole
+ * class of failure: the prose preamble, the fenced block, the trailing
+ * apology. `parseJsonOutput` and the `unknown` types above stay exactly as
+ * they are — this is honoured where it is understood and ignored everywhere
+ * else, so nothing downstream may assume it was applied.
+ *
+ * `additionalProperties: false` and a full `required` list are what make it
+ * strict; a schema without them constrains almost nothing.
+ */
+const INTENT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    intent: { type: 'string' },
+    confidence: { type: 'number' },
+    mentionedColumns: { type: 'array', items: { type: 'string' } },
+    restatement: { type: 'string' },
+    clarifyingQuestion: { type: 'string' },
+    searchQueries: { type: 'array', items: { type: 'string' } },
+  },
+  required: [
+    'intent',
+    'confidence',
+    'mentionedColumns',
+    'restatement',
+    'clarifyingQuestion',
+    'searchQueries',
+  ],
+  additionalProperties: false,
+};
+
 /* -------------------------------------------------------------------------- */
 /*                                 Test seam                                  */
 /* -------------------------------------------------------------------------- */
@@ -302,6 +335,13 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
      */
     maxTokens: 2048,
     json: true,
+    jsonSchema: INTENT_SCHEMA,
+    /*
+     * Classification, not research. It runs on every message and the answer is
+     * four short fields, so there is nothing here worth thinking hard about —
+     * and the reasoning would be paid for on every turn.
+     */
+    effort: 'low',
   });
 
   const parsed = parseJsonOutput<RawIntent>(result.text);

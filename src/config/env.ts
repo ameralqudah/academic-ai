@@ -25,7 +25,16 @@ const serverSchema = z.object({
   // AI — provider is swappable without touching application code.
   AI_PROVIDER: z.enum(['anthropic', 'openai', 'google']).default('anthropic'),
   ANTHROPIC_API_KEY: z.string().optional(),
-  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-5'),
+  /**
+   * Claude Opus 5. Two generations on from the `claude-sonnet-4-5` that used to
+   * be here, and the single largest quality change available to this product
+   * for the size of the diff.
+   *
+   * Anything from the 4.6 generation onwards takes adaptive thinking and
+   * rejects `temperature`; the Anthropic provider decides that from the model
+   * id, so setting this back to an older model keeps working.
+   */
+  ANTHROPIC_MODEL: z.string().default('claude-opus-5'),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4.1'),
   GOOGLE_AI_API_KEY: z.string().optional(),

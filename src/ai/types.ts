@@ -46,6 +46,8 @@ export interface ProjectContext {
   sections: { key: SectionKey; heading: string; excerpt: string; approved: boolean }[];
 }
 
+export type AIEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface AIRequest {
   task: AITask;
   locale: 'ar' | 'en';
@@ -53,7 +55,22 @@ export interface AIRequest {
   system: string;
   messages: AIChatMessage[];
   maxTokens?: number;
+  /**
+   * Ignored by models that reason adaptively, which reject it outright — see
+   * `AIEffort`. Still honoured by OpenAI, Google, and older Claude models.
+   */
   temperature?: number;
+  /**
+   * How hard the model should think, on providers that expose the choice.
+   *
+   * This is the knob that replaced `temperature` for the Claude 4.6 generation
+   * onwards: instead of sampling more loosely for creative work, the model
+   * reasons for longer before answering. Reasoning tokens are billed as output,
+   * so this is the cost/quality dial — `low` for extraction and classification,
+   * `high` (the default everywhere it applies) for research design and
+   * statistics, where being right matters more than being cheap.
+   */
+  effort?: AIEffort;
   /** When set, the provider is asked to return JSON only. */
   json?: boolean;
   /**

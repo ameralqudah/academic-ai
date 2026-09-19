@@ -182,11 +182,20 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
     }
 
     /*
-     * A round that returns nothing means the model has no more to say, or is
-     * refusing. Either way, continuing would spend calls on empty answers.
+     * A round that returns nothing means the model has no more to say, is
+     * refusing, or spent its whole budget reasoning. Either way, continuing
+     * would spend calls on empty answers.
+     *
+     * The stop reason decides which, and it has to: an empty round used to be
+     * read as a refusal outright, which was true while nothing reasoned before
+     * answering. A model that thinks now reports `max_tokens` after filling the
+     * budget with reasoning and writing nothing — the same empty string, a
+     * completely different problem, and one the caller can act on by asking for
+     * less at a time.
      */
     if (chunk.trim().length === 0) {
-      logger.info('generation.emptyRound', { round });
+      const ranOut = lastStop !== undefined && CUT_SHORT.has(lastStop);
+      logger.info('generation.emptyRound', { round, stopReason: lastStop ?? null });
 
       return {
         text,
@@ -194,7 +203,9 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
         rounds: round,
         tokensIn,
         tokensOut,
-        ...(text.length === 0 ? { incompleteReason: 'refused' as const } : {}),
+        ...(text.length === 0
+          ? { incompleteReason: ranOut ? ('length' as const) : ('refused' as const) }
+          : {}),
       };
     }
 

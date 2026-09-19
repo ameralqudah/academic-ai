@@ -62,6 +62,7 @@ import {
 } from '@/agents/registry';
 import { estimateTokens } from '@/ai/provider';
 import { AnthropicProvider } from '@/ai/providers/anthropic';
+import type { AIRequest } from '@/ai/types';
 import { inspectOutput, parseJsonOutput } from '@/ai/guardrails';
 import { sectionI18nKey } from '@/lib/sections';
 import { countWords, slugify, truncate } from '@/lib/text';
@@ -165,6 +166,84 @@ assertTrue(
   (uncached - cachedRead) / uncached > 0.5,
 );
 check('cost is reported in whole micro-dollars', Number.isInteger(cachedRead), true);
+
+check(
+  'an Opus request is priced at Opus rates, not whatever the last model cost',
+  new AnthropicProvider('k', 'claude-opus-5').estimateCostMicroUsd({
+    tokensIn: 1_000_000,
+    tokensOut: 0,
+  }),
+  5_000_000,
+);
+check(
+  'and a Sonnet 5 request at its own, cheaper rate',
+  new AnthropicProvider('k', 'claude-sonnet-5').estimateCostMicroUsd({
+    tokensIn: 1_000_000,
+    tokensOut: 0,
+  }),
+  2_000_000,
+);
+
+console.log('\nwhat actually gets sent to Anthropic');
+
+/*
+ * The request body, captured.
+ *
+ * Worth asserting because both halves fail quietly. Sending `temperature` to a
+ * model that reasons adaptively is a 400 at runtime and nothing at build time;
+ * omitting the thinking headroom returns an empty string rather than an error,
+ * because reasoning had eaten the caller's whole answer budget.
+ */
+async function bodySentBy(model: string, request: Partial<AIRequest> = {}) {
+  const realFetch = globalThis.fetch;
+  let body: Record<string, unknown> = {};
+
+  globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+    body = JSON.parse(init.body) as Record<string, unknown>;
+    return {
+      ok: true,
+      json: async () => ({ content: [{ type: 'text', text: 'ok' }], usage: {} }),
+    };
+  }) as unknown as typeof globalThis.fetch;
+
+  try {
+    await new AnthropicProvider('k', model).complete({
+      task: 'chat',
+      locale: 'en',
+      system: 'system',
+      messages: [{ role: 'user', content: 'hello' }],
+      temperature: 0.7,
+      maxTokens: 600,
+      ...request,
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  return body;
+}
+
+const opus = await bodySentBy('claude-opus-5');
+check('Opus 5 is not sent a temperature — it answers 400', 'temperature' in opus, false);
+check('it is asked to think adaptively', opus.thinking, { type: 'adaptive' });
+check('at high effort by default', opus.output_config, { effort: 'high' });
+check('and the answer budget survives the thinking', opus.max_tokens, 8_600);
+
+const cheap = await bodySentBy('claude-opus-5', { effort: 'low' });
+check('a low-effort call reserves less room to think', cheap.max_tokens, 2_600);
+check('and says so', cheap.output_config, { effort: 'low' });
+
+const huge = await bodySentBy('claude-opus-5', { maxTokens: 120_000, effort: 'max' });
+check('headroom never pushes the request past the output ceiling', huge.max_tokens, 128_000);
+
+const legacy = await bodySentBy('claude-sonnet-4-5');
+check('Sonnet 4.5 still gets its temperature', legacy.temperature, 0.7);
+check('and is not asked to think', 'thinking' in legacy, false);
+check('nor given an effort it does not understand', 'output_config' in legacy, false);
+check('its budget is the one the caller asked for', legacy.max_tokens, 600);
+
+const haiku = await bodySentBy('claude-haiku-4-5');
+check('Haiku 4.5 is on the old side of that line too', haiku.temperature, 0.7);
 
 console.log('\nword export');
 const document = new Document({

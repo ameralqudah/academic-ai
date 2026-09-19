@@ -23,6 +23,10 @@
   --color-ground: var(--ground);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  /* `bg-subtle` was used across the app but never defined, so those hover
+     states rendered nothing. */
+  --color-subtle: var(--subtle);
+  --color-bubble: var(--bubble);
   --color-ink: var(--ink);
   --color-ink-soft: var(--ink-soft);
   --color-muted: var(--muted);
@@ -53,22 +57,24 @@
   --font-body: 'IBM Plex Sans Arabic';
   --font-display: 'Amiri';
 
-  --ground: #f4f6f9;
-  --surface: #ffffff;
-  --surface-2: #eef2f7;
-  --ink: #0e1b2b;
-  --ink-soft: #33445a;
-  --muted: #5d6b7f;
-  --line: #dce3ec;
-  --line-strong: #c3cfde;
+  --ground: #f7f4ec;
+  --surface: #fffdf8;
+  --surface-2: #efeadd;
+  --subtle: #ebe5d5;
+  --bubble: #ece6d6;
+  --ink: #1d241f;
+  --ink-soft: #3c463f;
+  --muted: #6a726a;
+  --line: #e2dccb;
+  --line-strong: #cfc7b1;
 
-  --primary: #12417a;
-  --primary-hover: #0d3161;
-  --primary-soft: #e6eefa;
-  --on-primary: #ffffff;
+  --primary: #0f5c4a;
+  --primary-hover: #0b4a3b;
+  --primary-soft: #e2efe9;
+  --on-primary: #fffdf8;
 
-  --accent: #0e8c97;
-  --accent-soft: #e0f4f5;
+  --accent: #8f6b1f;
+  --accent-soft: #f4ecd7;
   --upgrade: #6b57c7;
   --upgrade-soft: #eee9fb;
 
@@ -76,32 +82,38 @@
   --warning: #9a6412;
   --danger: #b4342c;
 
+  --shadow-float: 0 1px 2px rgb(40 35 20 / 0.05), 0 8px 24px -12px rgb(40 35 20 / 0.18);
+
   color-scheme: light;
 }
 
 .dark {
-  --ground: #0a121c;
-  --surface: #111c29;
-  --surface-2: #16232f;
-  --ink: #e7eef7;
-  --ink-soft: #c2d0e0;
-  --muted: #93a4b8;
-  --line: #223244;
-  --line-strong: #31465c;
+  --ground: #141815;
+  --surface: #1b201c;
+  --surface-2: #232a25;
+  --subtle: #2a322c;
+  --bubble: #262d27;
+  --ink: #ece8dc;
+  --ink-soft: #cfcaba;
+  --muted: #969a8e;
+  --line: #2e362f;
+  --line-strong: #3d473f;
 
-  --primary: #5fa0e4;
-  --primary-hover: #7fb2ea;
-  --primary-soft: #16283d;
-  --on-primary: #07131f;
+  --primary: #5fbf9f;
+  --primary-hover: #79cdb0;
+  --primary-soft: #17302a;
+  --on-primary: #0a1a14;
 
-  --accent: #3fc0cb;
-  --accent-soft: #102b2f;
+  --accent: #d4ad5c;
+  --accent-soft: #2e2815;
   --upgrade: #9b8ae6;
   --upgrade-soft: #201c39;
 
   --success: #4cbf8e;
   --warning: #d9a548;
   --danger: #e4736a;
+
+  --shadow-float: 0 1px 2px rgb(0 0 0 / 0.3), 0 10px 28px -12px rgb(0 0 0 / 0.6);
 
   color-scheme: dark;
 }
@@ -165,6 +177,10 @@
     margin-inline: auto;
     padding-inline: 1.25rem;
     max-width: 76rem;
+  }
+
+  .shadow-float {
+    box-shadow: var(--shadow-float);
   }
 
   .surface-card {

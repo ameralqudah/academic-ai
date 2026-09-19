@@ -1191,9 +1191,22 @@ export function AgentChat({
 
   /* -------------------------------- render ------------------------------- */
 
+  const empty = turns.length === 0;
+
   return (
-    <div className="flex h-full flex-col gap-4">
-      <div className="flex items-center gap-2">
+    /*
+     * One centred reading column, the transcript scrolling above a composer
+     * that stays put. A new conversation has no transcript to scroll, so the
+     * whole stack is centred instead and the composer sits under the greeting —
+     * the first thing on the page is where you type.
+     */
+    <div className={cn('relative flex min-h-0 flex-1 flex-col', empty && 'justify-center pb-[8vh]')}>
+      <div
+        className={cn(
+          'mx-auto flex w-full max-w-3xl shrink-0 items-center gap-2 px-4 py-2.5',
+          empty && 'absolute inset-x-0 top-0',
+        )}
+      >
         <ProjectPicker
           projects={projects}
           value={projectId}
@@ -1204,11 +1217,14 @@ export function AgentChat({
         {projectId && <span className="text-xs text-muted">{t('projectContextOn')}</span>}
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        {turns.length === 0 ? (
-          <Welcome onPick={(text) => void send(text)} />
+      <div
+        ref={scrollRef}
+        className={cn('scrollbar-slim overflow-y-auto px-4', empty ? 'shrink-0' : 'min-h-0 flex-1')}
+      >
+        {empty ? (
+          <Welcome />
         ) : (
-          <div className="flex flex-col gap-6 pb-4">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 pt-2 pb-6">
             {turns.map((turn) => (
               <TurnView
                 key={turn.id}
@@ -1226,6 +1242,7 @@ export function AgentChat({
         )}
       </div>
 
+      <div className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-3 px-4 pb-3">
       {error && <Alert tone="danger">{error}</Alert>}
 
       {file && (
@@ -1382,6 +1399,13 @@ export function AgentChat({
         onModelChange={setModelId}
         showModelSelector={capabilities.showModelSelector}
       />
+
+      {empty ? (
+        <Examples onPick={(text) => void send(text)} />
+      ) : (
+        <p className="text-center text-[11px] text-muted">{t('disclaimer')}</p>
+      )}
+      </div>
     </div>
   );
 }
@@ -1480,7 +1504,12 @@ function TurnView({
 
     return (
       <div className="group flex flex-col items-end gap-1">
-        <div className="max-w-[85%] rounded-2xl bg-accent px-4 py-2.5 text-sm text-on-accent">
+        {/*
+          A quiet tint rather than a block of accent colour. `text-on-accent` was
+          never a defined token, so the old bubble fell back to inherited ink on
+          teal and was hard to read in light mode.
+        */}
+        <div className="max-w-[85%] rounded-[1.25rem] bg-bubble px-4 py-2 text-[15px] whitespace-pre-wrap text-ink">
           {turn.text}
         </div>
         <MessageActions
@@ -1554,7 +1583,7 @@ function TurnView({
         </div>
       )}
 
-      {turn.text && <Markdown content={turn.text} compact />}
+      {turn.text && <Markdown content={turn.text} compact reading />}
 
       {/*
         Only once the reply is complete. Offering "regenerate" mid-stream would
@@ -1930,34 +1959,40 @@ function ResearchReport({ payload }: { payload: unknown }) {
   );
 }
 
-function Welcome({ onPick }: { onPick: (text: string) => void }) {
+function Welcome() {
+  const t = useTranslations('agent');
+
+  return (
+    <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-2 pb-6 text-center">
+      <h2 className="font-display text-3xl leading-relaxed font-normal text-ink sm:text-4xl">
+        {t('welcome')}
+      </h2>
+      <p className="max-w-md text-sm text-muted">{t('welcomeSubtitle')}</p>
+    </div>
+  );
+}
+
+/** Starting points, under the composer so they read as suggestions for it. */
+function Examples({ onPick }: { onPick: (text: string) => void }) {
   const t = useTranslations('agent');
 
   const examples = ['exampleAnalyse', 'exampleReliability', 'exampleClean', 'examplePlan'] as const;
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-6 py-12 text-center">
-      <div className="flex flex-col gap-2">
-        <h2 className="text-lg font-semibold text-ink">{t('welcome')}</h2>
-        <p className="max-w-md text-sm text-muted">{t('welcomeSubtitle')}</p>
-      </div>
-
-      <div className="flex flex-wrap justify-center gap-2">
-        {examples.map((key) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => onPick(t(key))}
-            className={cn(
-              'rounded-full border border-line px-3.5 py-1.5 text-sm text-muted',
-              'hover:border-accent hover:text-ink',
-            )}
-          >
-            {t(key)}
-          </button>
-        ))}
-      </div>
+    <div className="flex flex-wrap justify-center gap-2 pt-1">
+      {examples.map((key) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onPick(t(key))}
+          className={cn(
+            'rounded-xl border border-line bg-surface px-3.5 py-1.5 text-sm text-ink-soft',
+            'hover:border-primary hover:text-primary',
+          )}
+        >
+          {t(key)}
+        </button>
+      ))}
     </div>
   );
 }
-

@@ -1076,6 +1076,7 @@
     "subtitle": "Write what you need in plain language, or upload your data and start analysing.",
     "welcome": "What would you like to work on?",
     "welcomeSubtitle": "Upload a data file and ask for an analysis, or ask anything about your research.",
+    "disclaimer": "The assistant can make mistakes. Check facts and references before relying on them.",
     "placeholder": "Write your request, or attach a file…",
     "attachFile": "Attach a file",
     "detachFile": "Remove file",
@@ -1323,6 +1324,14 @@
     "openAccess": "free to read"
   },
   "sidebar": {
+    "searchChats": "Search chats",
+    "noMatches": "No matching chats",
+    "group": {
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "week": "Previous 7 days",
+      "older": "Older"
+    },
     "newChat": "New chat",
     "recent": "Recent",
     "untitled": "Untitled conversation",

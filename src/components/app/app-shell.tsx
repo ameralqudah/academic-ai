@@ -1,12 +1,10 @@
 'use client';
 
-import { Menu, Sparkles, X } from 'lucide-react';
+import { Menu, X } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { useEffect, useState, type ReactNode } from 'react';
 
 import { Sidebar, type ConversationSummary } from '@/components/app/sidebar';
-import { LocaleSwitcher } from '@/components/locale-switcher';
-import { ThemeToggle } from '@/components/theme-toggle';
 import { Link, usePathname } from '@/i18n/navigation';
 
 /**
@@ -84,7 +82,7 @@ export function AppShell({
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-line bg-ground/90 px-4 backdrop-blur-md lg:hidden">
           <Link href="/chat" className="flex items-center gap-2 font-semibold text-ink">
-            <Sparkles className="size-4 text-accent" aria-hidden />
+            <span aria-hidden className="grid size-6 place-items-center rounded-lg bg-primary pb-0.5 font-display text-base leading-none font-bold text-on-primary">أ</span>
             Academic AI
           </Link>
           <button
@@ -98,7 +96,18 @@ export function AppShell({
           </button>
         </header>
 
-        <main className="flex min-h-0 flex-1 flex-col px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        {/*
+          The chat fills the viewport edge to edge and scrolls inside itself, so
+          the composer stays pinned; every other page keeps its padding and
+          scrolls with the document.
+        */}
+        <main
+          className={
+            isChat
+              ? 'flex h-[calc(100dvh-3.5rem)] min-h-0 flex-col lg:h-dvh'
+              : 'flex min-h-0 flex-1 flex-col px-4 py-6 sm:px-6 lg:px-8 lg:py-8'
+          }
+        >
           {children}
         </main>
 
@@ -111,12 +120,8 @@ export function AppShell({
           trying to type in. These are settings and a status readout; the
           composer is the reason the page exists, and it wins the space.
         */}
-        {!isChat && (
-          <div className="flex items-center gap-2 px-4 pb-4 sm:px-6 lg:px-8">
-            <ThemeToggle />
-            <LocaleSwitcher />
-            {aside}
-          </div>
+        {!isChat && aside && (
+          <div className="flex items-center gap-2 px-4 pb-4 sm:px-6 lg:px-8">{aside}</div>
         )}
       </div>
 

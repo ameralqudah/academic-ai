@@ -23,7 +23,7 @@ export default async function AppLayout({
    * component that displays them. The shell is a client component and has no
    * business reaching for data; the layout is a server component and does.
    */
-  const conversations = await listRecent(user.id, { mode: 'AGENT', limit: 20 });
+  const conversations = await listRecent(user.id, { mode: 'AGENT', limit: 40 });
 
   return (
     <AppShell
@@ -33,6 +33,8 @@ export default async function AppLayout({
       conversations={conversations.map((conversation) => ({
         id: conversation.id,
         title: conversation.title,
+        /* An ISO string: a Date does not cross the server/client boundary cleanly. */
+        at: (conversation.lastMessageAt ?? conversation.updatedAt).toISOString(),
       }))}
       aside={<UsageMeter locale={locale} summary={summary} />}
     >

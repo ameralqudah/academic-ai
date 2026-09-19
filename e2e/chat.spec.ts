@@ -148,7 +148,7 @@ test.describe('the sidebar', () => {
     await expect(page.getByRole('textbox')).toHaveValue(/Find studies about/);
   });
 
-  test('a conversation appears in Recent after it is started', async ({ page }) => {
+  test('a conversation appears under Today after it is started', async ({ page }) => {
     await registerAndLogin(page, 'sidebar-recent', 'en');
     await page.goto('/en/chat');
 
@@ -160,7 +160,8 @@ test.describe('the sidebar', () => {
 
     /* The sidebar list is rendered by the server layout, so it needs a reload. */
     await page.reload();
-    await expect(page.getByText('Recent')).toBeVisible();
+    /* Conversations are grouped by date now; a new one lands under Today. */
+    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   });
 });
 

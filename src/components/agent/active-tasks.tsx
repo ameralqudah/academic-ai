@@ -72,7 +72,7 @@ export function ActiveTasks({ currentConversationId }: { currentConversationId?:
   if (tasks.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-4 pt-3">
       {tasks.map((task) => (
         <button
           key={task.id}

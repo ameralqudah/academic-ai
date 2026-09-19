@@ -120,7 +120,12 @@ test.describe('the sidebar', () => {
      */
     await expect(page.getByRole('link', { name: 'Web search' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Deep research' })).toBeVisible();
-    await expect(page.getByText('Soon')).toHaveCount(0);
+    /*
+     * Exactly "Soon" — the badge — and not the loose substring match, which
+     * also finds this account's own name and address. Every user this spec
+     * registers is called "sidebar-soon".
+     */
+    await expect(page.getByText('Soon', { exact: true })).toHaveCount(0);
   });
 
   test('collapses and stays collapsed after a reload', async ({ page }) => {

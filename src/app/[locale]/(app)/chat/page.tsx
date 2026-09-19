@@ -139,6 +139,12 @@ export default async function ChatPage({
         props, and leaves the first conversation on screen. Remounting is the
         correct answer rather than syncing props into state — a chat is
         genuinely a different thing when it is a different conversation.
+
+        The seed is part of the key for the same reason. "Academic search" in
+        the sidebar navigates from /chat to /chat?prompt=…, which is the same
+        route: the server sent a new `initialDraft`, `useState` had already
+        read the old one, and the composer stayed empty. A starting phrase is
+        the start of a different chat, so it starts a different component.
       */}
       {/*
         Work still running elsewhere, surfaced on arrival.
@@ -151,7 +157,7 @@ export default async function ChatPage({
       <ActiveTasks currentConversationId={thread?.conversation.id ?? null} />
 
       <AgentChat
-        key={thread?.conversation.id ?? 'new'}
+        key={thread?.conversation.id ?? (prompt ? `new:${prompt}` : 'new')}
         locale={locale === 'en' ? 'en' : 'ar'}
         projects={projects.map((entry) => ({ id: entry.id, title: entry.title }))}
         initialProjectId={project ?? thread?.conversation.projectId ?? null}

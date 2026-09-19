@@ -107,20 +107,20 @@ test.describe('the sidebar', () => {
     await expect(page.getByRole('link', { name: 'Academic search' })).toBeVisible();
   });
 
-  test('shows unbuilt features as disabled rather than hiding them', async ({ page }) => {
+  test('web search and deep research are reachable, not marked "Soon"', async ({ page }) => {
     await registerAndLogin(page, 'sidebar-soon', 'en');
     await page.goto('/en/chat');
 
     /*
-     * Web search and deep research are visible and marked "Soon". Hiding them
-     * would leave a user unable to tell a missing feature from one they failed
-     * to find; making them clickable would promise something that does not
-     * exist. They are rendered as plain text, so they are not links.
+     * Both shipped. They seed the composer rather than opening a page of their
+     * own, because the agent already searches — so they are links to /chat
+     * carrying a prompt. This test used to assert the opposite, and a `soon`
+     * badge outliving the feature is exactly the failure the sidebar comment
+     * warns about; it is worth a test in the direction that can now go stale.
      */
-    await expect(page.getByText('Web search')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Web search' })).toHaveCount(0);
-    await expect(page.getByText('Deep research')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Deep research' })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'Web search' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Deep research' })).toBeVisible();
+    await expect(page.getByText('Soon')).toHaveCount(0);
   });
 
   test('collapses and stays collapsed after a reload', async ({ page }) => {
@@ -160,23 +160,35 @@ test.describe('the sidebar', () => {
 
     /* The sidebar list is rendered by the server layout, so it needs a reload. */
     await page.reload();
-    await expect(page.getByText('Recent')).toBeVisible();
+    /*
+     * The heading, by role. A bare getByText('Recent') also matched the test
+     * user's own name and email — substring matching is case-insensitive, and
+     * every account this spec creates is called "sidebar-recent".
+     */
+    await expect(page.getByRole('heading', { name: 'Recent' })).toBeVisible();
   });
 });
 
 test.describe('switching language', () => {
   test('moves between locales and keeps the page', async ({ page }) => {
     await registerAndLogin(page, 'chat-locale', 'en');
-    await page.goto('/en/chat');
+    /*
+     * The dashboard, not the chat page. The shell hides the theme/language row
+     * on /chat so it cannot sit on top of the composer, which is pinned to the
+     * bottom of the viewport — so /chat is the one signed-in page where there
+     * is no switcher to click. What this test is about is that switching keeps
+     * you where you were, and any page shows that.
+     */
+    await page.goto('/en/dashboard');
 
     await page.getByRole('button', { name: /العربية|Arabic/i }).click();
 
-    await expect(page).toHaveURL(/\/ar\/chat/);
+    await expect(page).toHaveURL(/\/ar\/dashboard/);
     await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
 
     /* And back, so the switch is not one-way. */
     await page.getByRole('button', { name: /English|الإنجليزية/i }).click();
-    await expect(page).toHaveURL(/\/en\/chat/);
+    await expect(page).toHaveURL(/\/en\/dashboard/);
     await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
   });
 });

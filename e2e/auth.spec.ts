@@ -15,7 +15,12 @@ test.describe('authentication', () => {
   test('the free plan limits are shown, not hidden', async ({ page }) => {
     await registerAndLogin(page, 'limits');
     await expect(page.getByText('AI requests left')).toBeVisible();
-    await expect(page.locator('aside').getByText('Usage this month')).toBeVisible();
+    /*
+     * The meter lives in the shell's footer row, not in `aside` — that element
+     * is the navigation sidebar. Scoping the assertion to it was looking for
+     * the panel somewhere it has not been since the composer won that space.
+     */
+    await expect(page.getByText('Usage this month')).toBeVisible();
   });
 
   test('logging out returns to the marketing site and protects the dashboard', async ({ page }) => {

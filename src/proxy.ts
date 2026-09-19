@@ -1,4 +1,5 @@
 import createMiddleware from 'next-intl/middleware';
+import { NextRequest } from 'next/server';
 
 import { routing } from '@/i18n/routing';
 
@@ -18,7 +19,26 @@ import { routing } from '@/i18n/routing';
  * their preference would be overruled on every navigation. A default decides
  * for people who have not chosen; it does not overrule people who have.
  */
-export default createMiddleware(routing);
+const resolveLocale = createMiddleware(routing);
+
+/**
+ * next-intl decides the locale in four steps: the path prefix, then the
+ * `NEXT_LOCALE` cookie, then the `accept-language` header, then the default.
+ * We want the first two and the last, but not the third — an `accept-language`
+ * header is what a browser was configured with, which is a guess about a
+ * person rather than a choice they made. A researcher browsing from Amman with
+ * an Arabic-configured browser was being sent to `/ar` and never saw the
+ * English default the two comments above describe.
+ *
+ * The header is dropped rather than `localeDetection` being switched off,
+ * because that flag turns off the cookie too, and the cookie is the whole
+ * mechanism by which the switcher makes a choice stick.
+ */
+export default function proxy(request: NextRequest) {
+  const headers = new Headers(request.headers);
+  headers.delete('accept-language');
+  return resolveLocale(new NextRequest(request, { headers }));
+}
 
 export const config = {
   matcher: [

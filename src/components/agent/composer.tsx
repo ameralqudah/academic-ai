@@ -175,12 +175,13 @@ export function Composer({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       className={cn(
-        'relative flex flex-col gap-2 rounded-xl border bg-surface p-2 transition-colors',
-        dragging ? 'border-accent bg-accent-soft/30' : 'border-line',
+        'shadow-float relative flex flex-col gap-1.5 rounded-3xl border bg-surface px-3 pt-3 pb-2.5 transition-colors',
+        'focus-within:border-primary',
+        dragging ? 'border-accent bg-accent-soft/30' : 'border-line-strong',
       )}
     >
       {dragging && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl bg-surface/90 text-sm text-accent">
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-3xl bg-surface/90 text-sm text-accent">
           <Upload className="size-4" aria-hidden />
           {t('dropToAttach')}
         </div>
@@ -207,7 +208,7 @@ export function Composer({
         placeholder={t('placeholder')}
         disabled={busy}
         className={cn(
-          'max-h-[200px] w-full resize-none bg-transparent px-2 py-2 text-sm text-ink',
+          'max-h-[200px] w-full resize-none bg-transparent px-2 py-1.5 text-[15px] text-ink',
           'outline-none placeholder:text-muted disabled:opacity-60',
         )}
       />
@@ -218,7 +219,7 @@ export function Composer({
           onClick={() => fileRef.current?.click()}
           disabled={uploading || busy}
           aria-label={t('attachFile')}
-          className="rounded-lg p-1.5 text-muted hover:bg-subtle hover:text-ink disabled:opacity-50"
+          className="grid size-9 place-items-center rounded-xl border border-line text-ink-soft hover:bg-subtle hover:text-ink disabled:opacity-50"
         >
           {uploading ? (
             <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -328,11 +329,22 @@ export function Composer({
             to lose the conversation.
           */}
           {busy ? (
-            <Button type="button" onClick={onStop} variant="outline" aria-label={t('stop')}>
+            <Button
+              type="button"
+              onClick={onStop}
+              variant="outline"
+              aria-label={t('stop')}
+              className="size-9 rounded-xl px-0"
+            >
               <Square className="size-3.5 fill-current" aria-hidden />
             </Button>
           ) : (
-            <Button type="submit" disabled={value.trim().length === 0} aria-label={t('send')}>
+            <Button
+              type="submit"
+              disabled={value.trim().length === 0}
+              aria-label={t('send')}
+              className="size-9 rounded-xl px-0"
+            >
               <ArrowUp className="size-4" aria-hidden />
             </Button>
           )}

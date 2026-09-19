@@ -125,11 +125,13 @@ export default async function ChatPage({
   const projects = await projectsRepo.listByUser(user.id, 50);
 
   return (
-    <div className="flex h-[calc(100vh-8rem)] flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-ink">{t('title')}</h1>
-        <p className="text-sm text-muted">{t('subtitle')}</p>
-      </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        The title is kept for screen readers and dropped from the screen. A chat
+        page that opens with a heading and a subtitle spends its best space
+        describing itself; the conversation is the page.
+      */}
+      <h1 className="sr-only">{t('title')}</h1>
       {/*
         Keyed by the conversation, which forces a fresh component when the user
         moves between threads.
@@ -151,7 +153,12 @@ export default async function ChatPage({
       <ActiveTasks currentConversationId={thread?.conversation.id ?? null} />
 
       <AgentChat
-        key={thread?.conversation.id ?? 'new'}
+        /*
+         * The prompt is part of the key for a new chat. A sidebar entry that
+         * seeds the composer only changes the query string; with a constant key
+         * the component kept its first (empty) draft and the click did nothing.
+         */
+        key={thread?.conversation.id ?? `new:${prompt ?? ''}`}
         locale={locale === 'en' ? 'en' : 'ar'}
         projects={projects.map((entry) => ({ id: entry.id, title: entry.title }))}
         initialProjectId={project ?? thread?.conversation.projectId ?? null}

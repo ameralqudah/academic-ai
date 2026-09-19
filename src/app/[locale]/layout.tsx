@@ -22,8 +22,8 @@ export const viewport: Viewport = {
   // cannot be magnified is a research tool some people cannot read.
   viewportFit: 'cover',
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#f4f6f9' },
-    { media: '(prefers-color-scheme: dark)', color: '#0a121c' },
+    { media: '(prefers-color-scheme: light)', color: '#f7f4ec' },
+    { media: '(prefers-color-scheme: dark)', color: '#141815' },
   ],
 };
 

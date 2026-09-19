@@ -28,9 +28,9 @@ import 'katex/dist/katex.min.css';
  * or code blocks look applies to both without anyone remembering to update the
  * second copy.
  */
-export default function MathMarkdown({ content, compact }: MarkdownProps) {
+export default function MathMarkdown({ content, compact, reading }: MarkdownProps) {
   return (
-    <div className={proseClass(compact)}>
+    <div className={proseClass(compact, reading)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[

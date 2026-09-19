@@ -10,12 +10,11 @@ import {
   GraduationCap,
   Library,
   LogOut,
-  MessageSquarePlus,
+  Plus,
   Pencil,
   Search,
   Settings,
   Shield,
-  Sparkles,
   Telescope,
   Trash2,
   Wallet,
@@ -23,8 +22,12 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { signOut } from 'next-auth/react';
+import { useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+
+import { LocaleSwitcher } from '@/components/locale-switcher';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 import { Link, usePathname, useRouter } from '@/i18n/navigation';
 import { cn } from '@/lib/cn';
@@ -98,18 +101,47 @@ const SECTIONS: NavSection[] = [
       { href: '/chat', key: 'deepResearch', icon: Telescope, prompt: 'deepResearchPrompt' },
     ],
   },
-  {
-    key: 'account',
-    items: [
-      { href: '/billing', key: 'billing', icon: Wallet },
-      { href: '/settings', key: 'settings', icon: Settings },
-    ],
-  },
+];
+
+/**
+ * Billing and settings sit in the account block at the foot of the sidebar, as
+ * icons beside the user's name. As a full section they took three rows of the
+ * scrolling area, which is space the conversation list needs.
+ */
+const ACCOUNT_LINKS: { href: string; key: string; icon: LucideIcon }[] = [
+  { href: '/billing', key: 'billing', icon: Wallet },
+  { href: '/settings', key: 'settings', icon: Settings },
 ];
 
 export interface ConversationSummary {
   id: string;
   title: string | null;
+  /** ISO time of the last activity. Optional so older callers keep working. */
+  at?: string;
+}
+
+type GroupKey = 'today' | 'yesterday' | 'week' | 'older';
+
+const GROUP_ORDER: GroupKey[] = ['today', 'yesterday', 'week', 'older'];
+
+/**
+ * Which heading a conversation belongs under.
+ *
+ * Measured in calendar days from local midnight rather than in 24-hour spans,
+ * because "yesterday" means the previous date to a person, not "between 24 and
+ * 48 hours ago".
+ */
+function groupOf(at: string | undefined, now: Date): GroupKey {
+  if (!at) return 'older';
+
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const time = new Date(at).getTime();
+  const day = 86_400_000;
+
+  if (time >= midnight) return 'today';
+  if (time >= midnight - day) return 'yesterday';
+  if (time >= midnight - 7 * day) return 'week';
+  return 'older';
 }
 
 export function Sidebar({
@@ -156,6 +188,32 @@ export function Sidebar({
     });
   }
 
+  const [query, setQuery] = useState('');
+
+  /*
+   * Filtered, then grouped. The list arrives newest first, so each group keeps
+   * that order without sorting again.
+   */
+  const groups = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const now = new Date();
+    const result: Record<GroupKey, ConversationSummary[]> = {
+      today: [],
+      yesterday: [],
+      week: [],
+      older: [],
+    };
+
+    for (const conversation of conversations) {
+      if (needle && !(conversation.title ?? '').toLowerCase().includes(needle)) continue;
+      result[groupOf(conversation.at, now)].push(conversation);
+    }
+
+    return result;
+  }, [conversations, query]);
+
+  const matches = GROUP_ORDER.reduce((sum, key) => sum + groups[key].length, 0);
+
   const isActive = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
 
   return (
@@ -172,7 +230,7 @@ export function Sidebar({
          * viewport keeps the header and the account block in place and lets
          * only the middle move.
          */
-        'flex h-dvh flex-col gap-4 overflow-hidden border-e border-line bg-surface',
+        'flex h-dvh flex-col gap-4 overflow-hidden border-e border-line bg-surface-2',
         'transition-[width] duration-200',
         collapsed ? 'w-16 px-2 py-4' : 'w-64 px-3 py-4',
       )}
@@ -185,7 +243,12 @@ export function Sidebar({
             onClick={onNavigate}
             className="flex items-center gap-2 px-1 text-sm font-semibold text-ink"
           >
-            <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
+            <span
+              aria-hidden
+              className="grid size-7 shrink-0 place-items-center rounded-[9px] bg-primary pb-1 font-display text-lg leading-none font-bold text-on-primary"
+            >
+              أ
+            </span>
             Academic AI
           </Link>
         )}
@@ -204,35 +267,19 @@ export function Sidebar({
         href="/chat"
         onClick={onNavigate}
         className={cn(
-          'flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm text-ink',
-          'hover:border-accent hover:text-accent',
+          'flex items-center gap-2.5 rounded-xl px-2 py-2 text-sm font-medium text-primary',
+          'hover:bg-primary-soft',
           collapsed && 'justify-center px-0',
         )}
         title={collapsed ? t('newChat') : undefined}
       >
-        <MessageSquarePlus className="size-4 shrink-0" aria-hidden />
+        <span className="grid size-6 shrink-0 place-items-center rounded-full bg-primary text-on-primary">
+          <Plus className="size-3.5" strokeWidth={2.4} aria-hidden />
+        </span>
         {!collapsed && t('newChat')}
       </Link>
 
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
-        {/*
-          Recent conversations — the part of this sidebar that only became
-          possible once conversations were persisted. Before that there was
-          nothing to list.
-        */}
-        {!collapsed && conversations.length > 0 && (
-          <section className="flex flex-col gap-1">
-            <h2 className="px-2 text-xs font-medium text-muted">{t('recent')}</h2>
-            {conversations.map((conversation) => (
-              <ConversationRow
-                key={conversation.id}
-                conversation={conversation}
-                onNavigate={onNavigate}
-              />
-            ))}
-          </section>
-        )}
-
         {SECTIONS.map((section) => (
           <section key={section.key} className="flex flex-col gap-1">
             {!collapsed && (
@@ -243,7 +290,9 @@ export function Sidebar({
                 key={`${section.key}-${item.key}`}
                 item={item}
                 collapsed={collapsed}
-                active={item.href !== '#' && isActive(item.href)}
+                /* An entry that seeds the composer is a shortcut into the chat, not a
+                   place: marking it active lit up all four whenever the chat was open. */
+                active={item.href !== '#' && !item.prompt && isActive(item.href)}
                 label={t(`item.${item.key}`)}
                 soonLabel={t('soon')}
                 onNavigate={onNavigate}
@@ -252,16 +301,44 @@ export function Sidebar({
           </section>
         ))}
 
-        {isAdmin && (
+
+        {/*
+          Conversations, under the navigation and grouped by when they were last
+          active. A flat list of forty titles is a wall; "today" and "yesterday"
+          are how people actually remember where a conversation was.
+        */}
+        {!collapsed && conversations.length > 0 && (
           <section className="flex flex-col gap-1">
-            <NavLink
-              item={{ href: '/admin', key: 'admin', icon: Shield }}
-              collapsed={collapsed}
-              active={isActive('/admin')}
-              label={tn('admin')}
-              soonLabel={t('soon')}
-              onNavigate={onNavigate}
-            />
+            {conversations.length > 5 && (
+              <label className="mb-1 flex items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-muted focus-within:border-primary">
+                <Search className="size-3.5 shrink-0" aria-hidden />
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder={t('searchChats')}
+                  aria-label={t('searchChats')}
+                  className="w-full min-w-0 bg-transparent text-sm text-ink outline-none placeholder:text-muted"
+                />
+              </label>
+            )}
+
+            {matches === 0 && <p className="px-2 py-1 text-xs text-muted">{t('noMatches')}</p>}
+
+            {GROUP_ORDER.map((key) =>
+              groups[key].length === 0 ? null : (
+                <div key={key} className="flex flex-col gap-0.5 pb-2">
+                  <h2 className="px-2 text-xs font-medium text-muted">{t(`group.${key}`)}</h2>
+                  {groups[key].map((conversation) => (
+                    <ConversationRow
+                      key={conversation.id}
+                      conversation={conversation}
+                      onNavigate={onNavigate}
+                    />
+                  ))}
+                </div>
+              ),
+            )}
           </section>
         )}
       </div>
@@ -269,11 +346,49 @@ export function Sidebar({
       {/* Account */}
       <div className="flex flex-col gap-2 border-t border-line pt-3">
         {!collapsed && (
-          <div className="px-2">
-            <p className="truncate text-sm text-ink">{userName}</p>
-            <p className="truncate text-xs text-muted">{userEmail}</p>
-          </div>
+          <>
+            <div className="flex items-center gap-2.5 px-1">
+              <span
+                aria-hidden
+                className="grid size-8 shrink-0 place-items-center rounded-full bg-accent-soft text-sm font-semibold text-accent"
+              >
+                {userName.trim().charAt(0).toUpperCase()}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm leading-tight text-ink">{userName}</p>
+                <p className="truncate text-xs text-muted">{userEmail}</p>
+              </div>
+            </div>
+            {/* Here rather than in a page footer, so they are reachable from the chat too. */}
+            <div className="flex items-center gap-2 px-1">
+              <ThemeToggle />
+              <LocaleSwitcher />
+            </div>
+          </>
         )}
+
+        <div className={cn('flex gap-1', collapsed ? 'flex-col items-center' : 'flex-wrap items-center')}>
+          {[
+            ...ACCOUNT_LINKS.map((link) => ({ ...link, label: t(`item.${link.key}`) })),
+            ...(isAdmin ? [{ href: '/admin', key: 'admin', icon: Shield, label: tn('admin') }] : []),
+          ].map(({ href, key, icon: Icon, label }) => (
+            <Link
+              key={key}
+              href={href}
+              onClick={onNavigate}
+              title={label}
+              aria-label={label}
+              aria-current={isActive(href) ? 'page' : undefined}
+              className={cn(
+                'flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-muted hover:bg-subtle hover:text-ink',
+                isActive(href) && 'bg-subtle text-ink',
+              )}
+            >
+              <Icon className="size-4 shrink-0" aria-hidden />
+              {!collapsed && <span className="truncate">{label}</span>}
+            </Link>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => void signOut({ callbackUrl: '/' })}
@@ -315,6 +430,8 @@ function ConversationRow({
 }) {
   const t = useTranslations('sidebar');
   const router = useRouter();
+  /* Which thread is open lives in the query string, not the path. */
+  const isOpen = useSearchParams().get('c') === conversation.id;
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [hidden, setHidden] = useState(false);
@@ -408,8 +525,9 @@ function ConversationRow({
         onClick={onNavigate}
         className={cn(
           'flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm',
-          'text-ink-soft hover:bg-subtle hover:text-ink',
+          isOpen ? 'bg-subtle text-ink' : 'text-ink-soft hover:bg-subtle hover:text-ink',
         )}
+        aria-current={isOpen ? 'page' : undefined}
       >
         <span className="truncate">{conversation.title ?? t('untitled')}</span>
       </Link>

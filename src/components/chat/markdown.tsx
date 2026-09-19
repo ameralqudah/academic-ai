@@ -56,26 +56,28 @@ export interface MarkdownProps {
   content: string;
   /** Slightly tighter spacing inside a chat bubble than in a document. */
   compact?: boolean;
+  /** Long-form reading size, for the assistant's replies in the chat. */
+  reading?: boolean;
 }
 
-export function Markdown({ content, compact }: MarkdownProps) {
+export function Markdown({ content, compact, reading }: MarkdownProps) {
   const hasMath = useMemo(() => containsMath(content), [content]);
 
   if (hasMath) {
     return (
-      <Suspense fallback={<PlainMarkdown content={content} compact={compact} />}>
-        <MathMarkdown content={content} compact={compact} />
+      <Suspense fallback={<PlainMarkdown content={content} compact={compact} reading={reading} />}>
+        <MathMarkdown content={content} compact={compact} reading={reading} />
       </Suspense>
     );
   }
 
-  return <PlainMarkdown content={content} compact={compact} />;
+  return <PlainMarkdown content={content} compact={compact} reading={reading} />;
 }
 
 /** Markdown and GFM only — no maths pipeline, no KaTeX in the bundle. */
-function PlainMarkdown({ content, compact }: MarkdownProps) {
+function PlainMarkdown({ content, compact, reading }: MarkdownProps) {
   return (
-    <div className={proseClass(compact)}>
+    <div className={proseClass(compact, reading)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
@@ -91,7 +93,7 @@ function PlainMarkdown({ content, compact }: MarkdownProps) {
 /*                            Shared presentation                             */
 /* -------------------------------------------------------------------------- */
 
-export function proseClass(compact?: boolean): string {
+export function proseClass(compact?: boolean, reading?: boolean): string {
   return cn(
     'max-w-none text-sm leading-relaxed text-ink',
     '[&_p]:my-2 [&_ul]:my-2 [&_ol]:my-2 [&_li]:my-1',
@@ -109,6 +111,13 @@ export function proseClass(compact?: boolean): string {
     '[&_hr]:my-4 [&_hr]:border-line',
     '[&_strong]:font-semibold [&_strong]:text-ink',
     compact && '[&_p]:my-1.5 [&_h1]:mt-3 [&_h2]:mt-3',
+    /*
+     * Last, so it wins over the base size. A reply is read, often at length;
+     * 14px Arabic with diacritics is work, and the chat is the one place the
+     * text is the whole point.
+     */
+    reading &&
+      'text-[15.5px] leading-[1.9] [&_p]:my-2.5 [&_li]:my-1.5 [&_h1]:text-xl [&_h2]:text-lg [&_h3]:text-base',
   );
 }
 

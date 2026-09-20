@@ -657,7 +657,17 @@
       "amount": "Amount",
       "reference": "Gateway reference",
       "sandboxWarning": "PayPal is running in SANDBOX. Every subscription and payment below is a simulation — no money reaches your business account. Switch PAYPAL_ENVIRONMENT to live and use Live credentials before taking real customers.",
-      "environmentMismatch": "PAYPAL_ENVIRONMENT is set to \"live\" but the credentials in use belong to the sandbox, so no real money is being charged. Copy the Client ID and Secret from the Live tab of PayPal Apps & Credentials."
+      "environmentMismatch": "PAYPAL_ENVIRONMENT is set to \"live\" but the credentials in use belong to the sandbox, so no real money is being charged. Copy the Client ID and Secret from the Live tab of PayPal Apps & Credentials.",
+      "webhook": {
+        "title": "PayPal notifications (webhook)",
+        "registered": "Registered with PayPal",
+        "notRegistered": "Not registered with PayPal",
+        "lastReceived": "Last event received: {type} — {when}",
+        "neverReceived": "No PayPal event has reached this server yet. The first activation does not need one, but renewals and cancellations do.",
+        "otherUrls": "Other URLs registered under the same app:",
+        "reregister": "Register again",
+        "reregisterFailed": "Could not register again. Check the logs."
+      }
     }
   },
   "errors": {

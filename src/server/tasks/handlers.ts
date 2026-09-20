@@ -160,6 +160,19 @@ function sectionsFrom(context: StepContext): { heading: string; text: string }[]
   return sections;
 }
 
+/**
+ * A question to the researcher, in the language they are working in.
+ *
+ * These were English literals, and an Arabic-speaking user in an Arabic
+ * interface was asked "What would you like me to answer?" in the middle of an
+ * otherwise Arabic conversation. They live here rather than in the message
+ * catalogue because a handler runs on the server, outside any request that
+ * carries translations — the locale on the task context is what it has.
+ */
+function say(context: { locale: 'ar' | 'en' }, en: string, ar: string): string {
+  return context.locale === 'ar' ? ar : en;
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                  Handlers                                  */
 /* -------------------------------------------------------------------------- */
@@ -171,7 +184,7 @@ export function registerAllHandlers(): void {
     const question = textInput(context, 'question', textInput(context, 'topic'));
 
     if (!question) {
-      return needsInput('What would you like me to answer?', 'question');
+      return needsInput(say(context, 'What would you like me to answer?', 'ما السؤال الذي تريد أن أجيب عنه؟'), 'question');
     }
 
     const answer = await answerGeneralQuestion({
@@ -194,7 +207,7 @@ export function registerAllHandlers(): void {
   registerHandler('web.search', async (context): Promise<Observation> => {
     const raw = textInput(context, 'query', textInput(context, 'topic'));
 
-    if (!raw) return needsInput('What should I search for?', 'query');
+    if (!raw) return needsInput(say(context, 'What should I search for?', 'عمّ تريد أن أبحث؟'), 'query');
 
     /* Stripped of the request's instructions; see `topicOf`. */
     const query = topicOf(raw);
@@ -241,7 +254,7 @@ export function registerAllHandlers(): void {
   registerHandler('academic.search', async (context): Promise<Observation> => {
     const query = textInput(context, 'query', textInput(context, 'topic'));
 
-    if (!query) return needsInput('What topic should I search for?', 'query');
+    if (!query) return needsInput(say(context, 'What topic should I search for?', 'ما الموضوع الذي تريد أن أبحث عنه؟'), 'query');
 
     const report = await searchAcademic({
       queries: [{ text: query, language: context.locale }],
@@ -355,7 +368,7 @@ export function registerAllHandlers(): void {
   registerHandler('deep.research', async (context): Promise<Observation> => {
     const question = textInput(context, 'question', textInput(context, 'topic'));
 
-    if (!question) return needsInput('What should I research?', 'question');
+    if (!question) return needsInput(say(context, 'What should I research?', 'ما الذي تريد أن أبحث فيه؟'), 'question');
 
     const report = await runDeepResearch({
       userId: context.userId,
@@ -583,7 +596,7 @@ export function registerAllHandlers(): void {
   registerHandler('statistics.pls', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
 
-    if (!datasetId) return needsInput('Which dataset should I analyse?', 'datasetId');
+    if (!datasetId) return needsInput(say(context, 'Which dataset should I analyse?', 'أيّ ملف بيانات تريد أن أحلّله؟'), 'datasetId');
 
     /*
      * The model comes from the step's input, or from a confirmed proposal.
@@ -1336,7 +1349,7 @@ export function registerAllHandlers(): void {
   registerHandler('file.analyse', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
 
-    if (!datasetId) return needsInput('Which file should I analyse?', 'datasetId');
+    if (!datasetId) return needsInput(say(context, 'Which file should I analyse?', 'أيّ ملف تريد أن أحلّله؟'), 'datasetId');
 
     /*
      * The profile is computed on upload, so this reads it rather than
@@ -1417,7 +1430,7 @@ export function registerAllHandlers(): void {
   registerHandler('statistics.run', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
 
-    if (!datasetId) return needsInput('Which dataset should I analyse?', 'datasetId');
+    if (!datasetId) return needsInput(say(context, 'Which dataset should I analyse?', 'أيّ ملف بيانات تريد أن أحلّله؟'), 'datasetId');
 
     /*
      * The specific test is chosen by the recommender, which needs the

@@ -657,7 +657,17 @@
       "amount": "المبلغ",
       "reference": "مرجع البوابة",
       "sandboxWarning": "PayPal يعمل في وضع الاختبار (SANDBOX). كل اشتراك ودفعة هنا محاكاة — لا يصل أي مبلغ إلى حسابك التجاري. بدّل PAYPAL_ENVIRONMENT إلى live واستخدم مفاتيح Live قبل استقبال عملاء حقيقيين.",
-      "environmentMismatch": "إعداد PAYPAL_ENVIRONMENT هو \"live\" لكن المفاتيح المستخدمة تنتمي إلى بيئة Sandbox، لذلك لا يتم تحصيل أي أموال حقيقية. انسخ Client ID و Secret من تبويب Live في صفحة PayPal Apps & Credentials."
+      "environmentMismatch": "إعداد PAYPAL_ENVIRONMENT هو \"live\" لكن المفاتيح المستخدمة تنتمي إلى بيئة Sandbox، لذلك لا يتم تحصيل أي أموال حقيقية. انسخ Client ID و Secret من تبويب Live في صفحة PayPal Apps & Credentials.",
+      "webhook": {
+        "title": "إشعارات PayPal (Webhook)",
+        "registered": "مسجّل لدى PayPal",
+        "notRegistered": "غير مسجّل لدى PayPal",
+        "lastReceived": "آخر إشعار وصل: {type} — {when}",
+        "neverReceived": "لم يصل أي إشعار من PayPal إلى هذا الخادم بعد. التفعيل الأول لا يحتاجه، لكن التجديد والإلغاء يعتمدان عليه.",
+        "otherUrls": "روابط أخرى مسجّلة تحت التطبيق نفسه:",
+        "reregister": "إعادة التسجيل",
+        "reregisterFailed": "تعذّرت إعادة التسجيل. راجع السجلات."
+      }
     }
   },
   "errors": {

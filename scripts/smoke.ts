@@ -3931,5 +3931,116 @@ assertTrue(
 check('Crossref works with nothing configured', new CrossrefProvider().isConfigured(), true);
 check('OpenAlex is used with or without a key', new OpenAlexProvider().isConfigured(), true);
 
+/* ------------------------------------------------------------------ */
+/* Model routing: plan tiers, and surviving a busy provider             */
+/* ------------------------------------------------------------------ */
+console.log('\nmodel routing by plan, and provider resilience');
+
+{
+  const { candidatesFor, candidateOverride } = await import(
+    '../src/server/ai/model-requirements'
+  );
+  const { resilient } = await import('../src/server/ai/resilient-provider');
+  const { AIProviderError } = await import('../src/ai/types');
+
+  check(
+    'a free account is routed away from the premium model',
+    candidatesFor('free', ['anthropic', 'google']).candidates,
+    ['google'],
+  );
+  check(
+    'unless the premium model is the only one there is',
+    candidatesFor('free', ['anthropic']).candidates,
+    ['anthropic'],
+  );
+  check(
+    'a paid account gets the premium model first',
+    candidatesFor('paid', ['anthropic', 'google']),
+    { candidates: ['anthropic', 'google'], premiumFirst: true },
+  );
+  check(
+    'but not when its key is unusable',
+    candidatesFor('paid', ['google']).premiumFirst,
+    false,
+  );
+  check(
+    'with no known user the router behaves as before',
+    candidatesFor(undefined, ['anthropic', 'google']),
+    { candidates: ['anthropic', 'google'], premiumFirst: false },
+  );
+
+  /*
+   * Narrowing the candidates is only half of it. The router resolves "no
+   * particular provider" when one candidate is left, and that returns the
+   * deployment default — the premium model — so every free account was routed
+   * back to the model the narrowing exists to avoid.
+   */
+  check(
+    'the single candidate overrides a default that is not it',
+    candidateOverride(candidatesFor('free', ['anthropic', 'google']).candidates, 'anthropic'),
+    'google',
+  );
+  check(
+    'and the default stands when it already is the candidate',
+    candidateOverride(['google'], 'google'),
+    null,
+  );
+  check(
+    'with nothing configured there is nothing to override',
+    candidateOverride([], 'anthropic'),
+    null,
+  );
+
+  type Fake = { calls: number };
+  const fake = (name: 'google' | 'anthropic', failures: number, status = 503) => {
+    const state: Fake = { calls: 0 };
+    const provider = {
+      name,
+      model: `${name}-test`,
+      isConfigured: () => true,
+      countTokens: () => 0,
+      estimateCostMicroUsd: () => 0,
+      async complete() {
+        state.calls += 1;
+        if (state.calls <= failures) throw new AIProviderError(name, 'high demand', status);
+        return { text: `from ${name}`, usage: { tokensIn: 0, tokensOut: 0 }, provider: name, model: `${name}-test` };
+      },
+      async *stream() {
+        state.calls += 1;
+        if (state.calls <= failures) throw new AIProviderError(name, 'high demand', status);
+        yield { delta: `from ${name}`, done: true };
+      },
+    };
+    return { provider: provider as never, state };
+  };
+
+  const request = { task: 'chat', locale: 'ar', system: '', messages: [] } as never;
+
+  const once = fake('google', 1);
+  const afterRetry = await resilient(once.provider, async () => null, { retryDelayMs: 1 }).complete(request);
+  check('a 503 is retried on the same provider', [afterRetry.text, once.state.calls], ['from google', 2]);
+
+  const down = fake('google', 5);
+  const spare = fake('anthropic', 0);
+  const moved = await resilient(down.provider, async () => spare.provider, { retryDelayMs: 1 }).complete(request);
+  check('and moves to the alternative when the retry fails too', [moved.provider, down.state.calls], ['anthropic', 2]);
+
+  const bad = fake('google', 5, 400);
+  let rejected = '';
+  try {
+    await resilient(bad.provider, async () => spare.provider, { retryDelayMs: 1 }).complete(request);
+  } catch (error) {
+    rejected = (error as Error).message;
+  }
+  check('a bad request is not retried — it would fail the same way', [rejected, bad.state.calls], ['high demand', 1]);
+
+  const flaky = fake('google', 1);
+  let streamed = '';
+  for await (const chunk of resilient(flaky.provider, async () => null, { retryDelayMs: 1 }).stream(request)) {
+    streamed += chunk.delta;
+  }
+  check('a stream that fails before its first chunk is restarted', streamed, 'from google');
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -116,19 +116,30 @@ export interface BillingOverview {
   payments: paymentsRepo.PaymentWithUser[];
   revenue: paymentsRepo.RevenueSummary;
   monthlyRecurringCents: number;
+  /** Present for PayPal only: whether its events can reach this deployment. */
+  webhook?: {
+    expectedUrl: string;
+    registered: boolean;
+    id?: string;
+    otherUrls: string[];
+    lastReceived: { at: string; type: string } | null;
+    detail?: string;
+  };
 }
 
 /** Everything the billing tab shows, in one round of queries. */
 export async function billingOverview(): Promise<BillingOverview> {
   const provider = billingProvider();
 
-  const [subscribers, payments, revenue, monthlyRecurringCents, gateway] = await Promise.all([
+  const [subscribers, payments, revenue, monthlyRecurringCents, gateway, webhook] = await Promise.all([
     adminRepo.listSubscribers(),
     paymentsRepo.listRecent(),
     paymentsRepo.revenueSummary(),
     paymentsRepo.activeRecurringCents(),
     // Resolved before anything is reported: see `resolvedEnvironment`.
     provider instanceof PayPalBillingProvider ? provider.resolvedEnvironment() : null,
+    // What PayPal has registered, against what this deployment expects.
+    provider instanceof PayPalBillingProvider ? provider.webhookStatus() : null,
   ]);
 
   return {
@@ -138,6 +149,7 @@ export async function billingOverview(): Promise<BillingOverview> {
       ? { environment: gateway.environment, environmentMismatch: gateway.mismatch }
       : {}),
     configured: provider.isConfigured(),
+    ...(webhook ? { webhook } : {}),
     subscribers,
     payments,
     revenue,

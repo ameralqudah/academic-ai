@@ -14,6 +14,8 @@ import { auth } from '@/server/auth';
 import { AppError } from './errors';
 import { clientKey, consume } from './rate-limit';
 import { hasAdminAccess } from '@/server/auth/owner';
+import { AIProviderError } from '@/ai/types';
+import { runForUser } from '@/server/ai/request-scope';
 
 export interface SessionUser {
   id: string;
@@ -121,12 +123,15 @@ export function withApi<TBody = undefined, TParams = Record<string, string>>(
 
       const params = routeArgs?.params ? await routeArgs.params : ({} as TParams);
 
-      const response = await handler({
-        request,
-        body,
-        params,
-        user: user as SessionUser,
-      });
+      /* Scoped to the user so the model router can route by their plan. */
+      const response = await runForUser(user?.id, () =>
+        handler({
+          request,
+          body,
+          params,
+          user: user as SessionUser,
+        }),
+      );
 
       logger.debug('api.ok', {
         path: new URL(request.url).pathname,
@@ -152,6 +157,48 @@ function toAppError(error: unknown, request: Request): AppError {
   if (error instanceof ZodError) {
     return AppError.validation(
       error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+    );
+  }
+
+  /*
+   * A provider failure that escaped the service layer.
+   *
+   * `runCompletion` translates these, but not every model call goes through it
+   * — the intent classifier calls the provider directly — and a busy model
+   * reached the user as "something went wrong on our side", which tells them
+   * nothing they can act on. It is not our side, and it usually clears in a
+   * minute; say that.
+   */
+  if (error instanceof AIProviderError) {
+    logger.error('api.aiProviderFailed', {
+      path: new URL(request.url).pathname,
+      provider: error.provider,
+      status: error.status,
+      detail: error.message.slice(0, 300),
+    });
+
+    if (error.status === 429 || /quota|rate.?limit/i.test(error.message)) {
+      return new AppError(
+        'AI_UNAVAILABLE',
+        'The AI provider quota has been used up. It resets on its own — try again later.',
+        'انتهت حصّة مزوّد الذكاء الاصطناعي. تتجدّد تلقائيًا — أعد المحاولة لاحقًا.',
+      );
+    }
+
+    /*
+     * "Busy" only when that is what happened. A rejected key or a wrong model
+     * name is a configuration fault that waiting will not fix, and telling the
+     * user to try again in a moment would send them round in circles.
+     */
+    const transient =
+      error.status === undefined || error.status >= 500 || /overloaded|unavailable|timeout/i.test(error.message);
+
+    if (!transient) return AppError.aiUnavailable();
+
+    return new AppError(
+      'AI_UNAVAILABLE',
+      'The AI model is busy right now. Try again in a moment, or pick another model.',
+      'نموذج الذكاء الاصطناعي مشغول الآن. أعد المحاولة بعد قليل، أو اختر نموذجًا آخر.',
     );
   }
 

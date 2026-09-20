@@ -26,9 +26,20 @@ import { logger } from '@/lib/logger';
 import type { AIProvider } from '@/ai/provider';
 import { resolveProvider } from '@/ai/registry';
 import type { ProviderName } from '@/ai/types';
-import { requirementsFor, shouldFailOver, type ModelRequirements } from './model-requirements';
+import { isUsableApiKey } from '@/ai/key';
+import type { PlanTier } from '@/agents/modes';
+import {
+  PREMIUM,
+  candidateOverride,
+  candidatesFor,
+  requirementsFor,
+  shouldFailOver,
+  type ModelRequirements,
+} from './model-requirements';
+import { currentUserId } from './request-scope';
+import { resilient } from './resilient-provider';
 
-export { requirementsFor, shouldFailOver, type ModelRequirements };
+export { candidateOverride, candidatesFor, requirementsFor, shouldFailOver, type ModelRequirements };
 
 export interface ModelSelection {
   provider: AIProvider;
@@ -45,6 +56,65 @@ export interface ModelSelection {
 }
 
 /**
+ * Providers whose key could actually be sent.
+ *
+ * "Has a value" was the test, and a placeholder passes it: a key field holding
+ * descriptive text counted as a configured provider, so the router reported
+ * two candidates, chose between them, and the chosen one then failed its own
+ * `isConfigured()` and was silently swapped out. `isUsableApiKey` is the same
+ * check the providers apply to themselves, so the router and the provider now
+ * agree on what "configured" means.
+ */
+function usableProviders(): ProviderName[] {
+  const env = getEnv();
+
+  return ([
+    ['anthropic', env.ANTHROPIC_API_KEY],
+    ['openai', env.OPENAI_API_KEY],
+    ['google', env.GOOGLE_AI_API_KEY],
+  ] as const)
+    .filter(([, key]) => isUsableApiKey(key))
+    .map(([name]) => name);
+}
+
+/**
+ * The plan of whoever this work is for, when that is known.
+ *
+ * Cached briefly: the router runs several times per message (classify, plan,
+ * answer) and the plan does not change between those calls. Thirty seconds is
+ * short enough that an upgrade is felt on the next message.
+ */
+const TIER_TTL_MS = 30_000;
+const tierCache = new Map<string, { tier: PlanTier; at: number }>();
+
+async function currentTier(): Promise<PlanTier | undefined> {
+  const userId = currentUserId();
+  if (!userId) return undefined;
+
+  const cached = tierCache.get(userId);
+  if (cached && Date.now() - cached.at < TIER_TTL_MS) return cached.tier;
+
+  try {
+    /* Imported here: the service reaches the database, and the router is
+       loaded by modules that must stay importable without one. */
+    const { tierFor } = await import('@/server/services/model-access.service');
+    const tier = await tierFor(userId);
+    tierCache.set(userId, { tier, at: Date.now() });
+    if (tierCache.size > 500) tierCache.delete(tierCache.keys().next().value as string);
+    return tier;
+  } catch (error) {
+    /* Routing must not fail because a plan lookup did. */
+    logger.warn('model.tierLookupFailed', { error: String(error).slice(0, 200) });
+    return undefined;
+  }
+}
+
+/** Wraps a selection so a busy model is retried, then substituted. */
+function guarded(provider: AIProvider, allowed?: ProviderName[]): AIProvider {
+  return resilient(provider, () => alternativeProvider(provider.name, allowed));
+}
+
+/**
  * Picks a model for a step.
  *
  * Today this resolves to the configured provider in nearly every case, because
@@ -57,8 +127,6 @@ export async function selectModel(
   requirements: ModelRequirements,
   options: { preferred?: { provider: ProviderName; model: string } | null } = {},
 ): Promise<ModelSelection> {
-  const env = getEnv();
-
   /*
    * A user's explicit choice wins. They were shown a model and told they could
    * use it; answering with a different one would leave them unable to say
@@ -68,7 +136,7 @@ export async function selectModel(
     const provider = await resolveProvider(options.preferred);
 
     return {
-      provider,
+      provider: guarded(provider),
       reason: `user selected ${options.preferred.provider}`,
       driver: 'only-option',
     };
@@ -79,34 +147,42 @@ export async function selectModel(
    * candidate: routing to it would produce a decision that fails at the call,
    * which is worse than not having routed at all.
    */
-  const configured = ([
-    ['anthropic', env.ANTHROPIC_API_KEY],
-    ['openai', env.OPENAI_API_KEY],
-    ['google', env.GOOGLE_AI_API_KEY],
-  ] as const)
-    .filter(([, key]) => typeof key === 'string' && key.trim().length > 0)
-    .map(([name]) => name);
+  const tier = await currentTier();
+  const { candidates: configured, premiumFirst } = candidatesFor(tier, usableProviders());
 
-  /*
-   * One provider, which is the usual case. The requirements are still computed
-   * and logged — they are what makes the next provider useful the day it is
-   * added, and a router that stopped computing them would have to be rebuilt.
-   */
   if (configured.length <= 1) {
-    const provider = await resolveProvider(null);
+    /*
+     * One candidate no longer means one configured provider: the plan filter
+     * above narrows a free account to the economical model, and `resolveProvider`
+     * asked for nothing in particular answers with the deployment's default —
+     * which is the premium one. That combination routed every free account
+     * straight back to the model this filtering exists to keep them off.
+     *
+     * So the default is only accepted when it is the candidate. When the two
+     * disagree the candidate is named explicitly. Resolving the default first
+     * rather than always naming the candidate keeps the admin's model override
+     * for the ordinary one-provider deployment, where the two always agree.
+     */
+    const byDefault = await resolveProvider(null);
+    const override = candidateOverride(configured, byDefault.name);
+
+    const provider = override
+      ? await resolveProvider({ provider: override, model: modelFor(override) })
+      : byDefault;
 
     logger.info('model.selected', {
       capability: requirements.capability,
       provider: provider.name,
       model: provider.model,
       driver: 'only-option',
+      tier: tier ?? 'unknown',
       needsReasoning: requirements.needsReasoning,
       contextTokens: requirements.contextTokens,
     });
 
     return {
-      provider,
-      reason: 'the only configured provider',
+      provider: guarded(provider, configured),
+      reason: 'the only provider this plan is routed to',
       driver: 'only-option',
     };
   }
@@ -116,7 +192,8 @@ export async function selectModel(
    * benchmark: it says which provider to try first for a kind of work, and the
    * registry's own fallback handles a provider that turns out to be down.
    */
-  const order = preferenceOrder(requirements, configured);
+  const ranked = preferenceOrder(requirements, configured);
+  const order = premiumFirst ? sortBy(ranked, [PREMIUM, ...ranked.filter((n) => n !== PREMIUM)]) : ranked;
   const chosen = order[0] ?? configured[0];
 
   const provider = await resolveProvider(
@@ -137,12 +214,13 @@ export async function selectModel(
     model: provider.model,
     driver,
     candidates: configured.length,
+    tier: tier ?? 'unknown',
     needsReasoning: requirements.needsReasoning,
     contextTokens: requirements.contextTokens,
     expectedOutputTokens: requirements.expectedOutputTokens,
   });
 
-  return { provider, reason: `${driver} for ${requirements.capability}`, driver };
+  return { provider: guarded(provider, configured), reason: `${driver} for ${requirements.capability}`, driver };
 }
 
 /**
@@ -199,19 +277,12 @@ function modelFor(provider: ProviderName): string {
  * call passes through, rather than each caller doing it — the choice of which
  * provider belongs here, and the sequencing belongs there.
  */
-export async function alternativeProvider(exclude: string): Promise<AIProvider | null> {
-  const env = getEnv();
-
-  const alternatives = ([
-    ['anthropic', env.ANTHROPIC_API_KEY],
-    ['openai', env.OPENAI_API_KEY],
-    ['google', env.GOOGLE_AI_API_KEY],
-  ] as const)
-    .filter(
-      ([name, key]) =>
-        name !== exclude && typeof key === 'string' && key.trim().length > 0,
-    )
-    .map(([name]) => name);
+export async function alternativeProvider(
+  exclude: string,
+  /** Restricts the substitute to what the caller's plan allows. */
+  allowed?: ProviderName[],
+): Promise<AIProvider | null> {
+  const alternatives = (allowed ?? usableProviders()).filter((name) => name !== exclude);
 
   const chosen = alternatives[0];
   if (!chosen) return null;
@@ -239,15 +310,7 @@ export async function withFailover<T>(
   } catch (error) {
     if (!shouldFailOver(error)) throw error;
 
-    const env = getEnv();
-
-    const alternatives = ([
-      ['anthropic', env.ANTHROPIC_API_KEY],
-      ['openai', env.OPENAI_API_KEY],
-      ['google', env.GOOGLE_AI_API_KEY],
-    ] as const)
-      .filter(([name, key]) => name !== selection.provider.name && typeof key === 'string' && key.trim().length > 0)
-      .map(([name]) => name);
+    const alternatives = usableProviders().filter((name) => name !== selection.provider.name);
 
     const alternative = alternatives[0];
 

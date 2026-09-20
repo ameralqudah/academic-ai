@@ -1,6 +1,7 @@
 import { CircleDollarSign, CreditCard, RefreshCcw, Users } from 'lucide-react';
 import { getFormatter, getTranslations } from 'next-intl/server';
 
+import { WebhookReregister } from '@/components/admin/webhook-reregister';
 import { StatTile } from '@/components/app/stat-tile';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -43,6 +44,59 @@ export default async function AdminBillingPage({
         <p className="text-xs text-muted">
           {t('billing.providerLine', { provider: data.provider })}
         </p>
+      )}
+
+      {/*
+        Whether PayPal's events can reach this deployment. Checkout and the
+        first activation work without them, so a missing webhook shows no
+        symptom until a renewal or a cancellation is never recorded — which is
+        why it is stated here rather than left to be discovered.
+      */}
+      {data.webhook && (
+        <Card>
+          <CardHeader title={t('billing.webhook.title')} />
+          <div className="flex flex-col gap-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={data.webhook.registered ? 'success' : 'danger'}>
+                {data.webhook.registered
+                  ? t('billing.webhook.registered')
+                  : t('billing.webhook.notRegistered')}
+              </Badge>
+              <code dir="ltr" className="text-xs break-all text-muted">
+                {data.webhook.expectedUrl}
+              </code>
+            </div>
+
+            <p className="text-ink-soft">
+              {data.webhook.lastReceived
+                ? t('billing.webhook.lastReceived', {
+                    type: data.webhook.lastReceived.type,
+                    when: format.dateTime(new Date(data.webhook.lastReceived.at), {
+                      dateStyle: 'medium',
+                      timeStyle: 'short',
+                    }),
+                  })
+                : t('billing.webhook.neverReceived')}
+            </p>
+
+            {data.webhook.otherUrls.length > 0 && (
+              <p className="text-xs text-muted">
+                {t('billing.webhook.otherUrls')}{' '}
+                <span dir="ltr" className="break-all">
+                  {data.webhook.otherUrls.join(' , ')}
+                </span>
+              </p>
+            )}
+
+            {data.webhook.detail && (
+              <p dir="ltr" className="text-xs text-danger">
+                {data.webhook.detail}
+              </p>
+            )}
+
+            <WebhookReregister />
+          </div>
+        </Card>
       )}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

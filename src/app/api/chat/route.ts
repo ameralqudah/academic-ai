@@ -175,6 +175,7 @@ export const POST = withApi<Body>(
     const decision = await routeRequest({
       message: body.message,
       locale: requestLanguage,
+      userLanguage,
       hasDataset: Boolean(dataset),
       profile: (dataset?.profile as never) ?? null,
       /*

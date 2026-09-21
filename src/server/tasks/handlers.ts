@@ -29,6 +29,7 @@ import {
   generatePptx,
 } from '@/server/generators/documents';
 import { generateDocx } from '@/server/generators/docx';
+import { sectionsFromMarkdown } from '@/server/generators/markdown-sections';
 import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { readArtifact, storeArtifact, type ArtifactKind } from '@/server/services/artifact.service';
@@ -958,7 +959,7 @@ export function registerAllHandlers(): void {
       'docx', 'pdf', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'bib', 'ris',
     ];
     const kind = (known.includes(requested as ArtifactKind) ? requested : 'md') as ArtifactKind;
-    const title = textInput(context, 'title', textInput(context, 'topic', 'Document'));
+    const namedTitle = textInput(context, 'title', textInput(context, 'topic', ''));
     const style = (textInput(context, 'citationStyle', 'apa') as StyleId) ?? 'apa';
 
     const references = referencesFrom(context);
@@ -980,7 +981,9 @@ export function registerAllHandlers(): void {
      * Content carried in from an artifact the request referred to, when this
      * task produced none of its own.
      */
-    const carried: { heading: string; paragraphs: string[] }[] = [];
+    const carried: { heading: string; level?: number; paragraphs: string[] }[] = [];
+    /* The paper's own title, when the carried text opens with one. */
+    let carriedTitle: string | null = null;
     const carriedReferences: Reference[] = [];
 
     /*
@@ -1034,6 +1037,50 @@ export function registerAllHandlers(): void {
         }
       }
     }
+
+    /*
+     * The same, for work that was written into the chat and never exported.
+     *
+     * The reference names one output — the paper, not the review it was built
+     * on — so that one is carried, under its own heading. The sources come from
+     * the whole task: the paper cites them by number whichever step found them.
+     */
+    if (referenced?.kind === 'prose' && referenced.taskId && sectionsFrom(context).length === 0) {
+      const steps = await tasksRepo.stepsOf(referenced.taskId).catch(() => []);
+
+      for (const step of steps) {
+        const outputs = (step.output as { outputs?: OutputReference[] } | null)?.outputs ?? [];
+
+        for (const output of outputs) {
+          if (output.id === referenced.id) {
+            const data = output.data as { text?: string; heading?: string } | null;
+
+            if (data?.text) {
+              /* Divided at its own headings, or Word shows "## Abstract" as a line of text. */
+              const divided = sectionsFromMarkdown(data.text, data.heading ?? '');
+              carried.push(...divided.sections.map((section) => ({
+                heading: section.heading ?? '',
+                level: section.level,
+                paragraphs: section.paragraphs ?? [],
+              })));
+              if (divided.title) carriedTitle = divided.title;
+            }
+          }
+
+          if (output.type.startsWith('sources') && carriedReferences.length === 0) {
+            const bundle = output.data as { references?: Reference[] } | null;
+            if (Array.isArray(bundle?.references)) carriedReferences.push(...bundle.references);
+          }
+        }
+      }
+    }
+
+    /*
+     * The title asked for, else the one the carried paper opens with. "Give it
+     * to me as Word" names no title, and a paper about hospitals should not be
+     * saved as Document.docx.
+     */
+    const title = namedTitle || carriedTitle || 'Document';
 
     const sections = [
       ...carried,

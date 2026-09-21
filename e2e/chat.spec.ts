@@ -333,6 +333,70 @@ test.describe('a direct answer, as it is written', () => {
     await expect(page.getByText(request.slice(0, 40), { exact: true })).toHaveCount(0);
   });
 
+  test('an Arabic result reads right to left in the English interface, under what was understood', async ({
+    page,
+  }) => {
+    await registerAndLogin(page, 'task-direction', 'en');
+    await page.goto('/en/chat');
+
+    await page.route('**/api/tasks/arabic-answer/stream', (route) => route.fulfill({ status: 404 }));
+    await page.route('**/api/tasks/arabic-answer', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            task: {
+              id: 'arabic-answer',
+              status: 'COMPLETED',
+              request: 'اعطيني اياه ملف وورد',
+              pendingQuestion: null,
+              pauseReasonKey: null,
+              errorReasonKey: null,
+              context: {},
+            },
+            steps: [
+              {
+                id: 's0',
+                ordinal: 0,
+                capability: 'general.answer',
+                label: 'Answering',
+                status: 'COMPLETED',
+                attempts: 1,
+                errorReasonKey: null,
+                dynamic: false,
+                durationMs: 900,
+                artifactIds: [],
+                output: { legacy: { text: 'الملف بصيغة Word جاهز للتنزيل.' } },
+              },
+            ],
+          },
+        }),
+      }),
+    );
+
+    await answerWith(page, [
+      { type: 'task', task: { id: 'arabic-answer', status: 'QUEUED' }, restatement: 'تريد البحث ملف وورد.' },
+    ]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('اعطيني اياه ملف وورد');
+    await composer.press('Enter');
+
+    const answer = page.getByText('الملف بصيغة Word جاهز للتنزيل.');
+    await expect(answer).toBeVisible({ timeout: 20_000 });
+
+    /* The sentence with "Word" in the middle of it is the one that came out scrambled. */
+    expect(await answer.evaluate((node) => getComputedStyle(node).direction)).toBe('rtl');
+    expect(await page.locator('html').getAttribute('dir')).toBe('ltr');
+
+    /* What was understood comes first, then the panel, then the work. */
+    const understood = await page.getByText('تريد البحث ملف وورد.').boundingBox();
+    const panel = await page.getByText('Completed').boundingBox();
+    expect(understood!.y).toBeLessThan(panel!.y);
+    expect(panel!.y).toBeLessThan((await answer.boundingBox())!.y);
+  });
+
   test('an abandoned question can be dismissed from the top of the chat', async ({ page }) => {
     await registerAndLogin(page, 'dismiss-task', 'en');
 

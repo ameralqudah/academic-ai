@@ -214,7 +214,8 @@ ${
     json: true,
   });
 
-  const parsed = parsePlan(result.text);
+  const referredKind = (input.context.references as { kind?: string } | undefined)?.kind;
+  const parsed = parsePlan(result.text, referredKind === 'artifact' || referredKind === 'prose');
 
   if (!parsed) {
     /*
@@ -225,6 +226,32 @@ ${
      * their request could not be planned.
      */
     logger.warn('task.plan.unparsable', { request: input.request.slice(0, 100) });
+
+    /*
+     * Unless the request is for a file of work that was already identified.
+     *
+     * Then there is nothing to understand: the subject was resolved before
+     * planning and the format was named. Answering conversationally here told a
+     * researcher that Word files cannot be produced, in a product that produces
+     * them, about a paper it had just written.
+     */
+    const referred = input.context.references as { targetFormat?: string } | undefined;
+
+    if (referred?.targetFormat) {
+      return {
+        steps: [
+          {
+            key: 'file',
+            capability: 'document.generate',
+            label: input.locale === 'ar' ? 'تجهيز الملف' : 'Preparing the file',
+            dependsOn: [],
+            input: { format: referred.targetFormat },
+          },
+        ],
+        missingInformation: [],
+        summary: '',
+      };
+    }
 
     return {
       steps: [
@@ -334,7 +361,7 @@ Rules:
  * dependency on a step that does not exist would deadlock, and a plan with an
  * unknown capability fails at the moment the user is watching it run.
  */
-function parsePlan(reply: string): Plan | null {
+function parsePlan(reply: string, refersToExistingWork = false): Plan | null {
   const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/);
   const candidate = (fenced?.[1] ?? reply).trim();
 
@@ -412,7 +439,7 @@ function parsePlan(reply: string): Plan | null {
    * Declared as data so a new capability states what it consumes rather than
    * the repair logic growing a branch per capability.
    */
-  repairPrerequisites(steps);
+  repairPrerequisites(steps, refersToExistingWork ? ['document.generate'] : []);
 
   const cycle = findCycle(steps);
 

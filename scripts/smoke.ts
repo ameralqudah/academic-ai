@@ -4371,5 +4371,84 @@ console.log('\nwhat a model costs');
   check('in Arabic too', noDataRule('ar').includes('جمع البيانات لم يتم بعد'), true);
 }
 
+/* ------------------------------------------------------------------ */
+/* "Give it to me as a Word file"                                       */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nA file of what was just written');
+
+  const { asksForAFileOfIt, detectReference: refersTo } = await import('../src/server/agent/routing-rules');
+  const { writtenWork } = await import('../src/server/agent/written-work');
+  const { sectionsFromMarkdown } = await import('../src/server/generators/markdown-sections');
+
+  /* The sentence from production, and the ways the same thing gets said. */
+  for (const message of [
+    'اعطيني اياه ملف وورد',
+    'بدي اياه PDF',
+    'نزّله وورد',
+    'اعطني إياه بصيغة وورد',
+    'give it to me as a Word file',
+    'export this as PDF',
+  ]) {
+    check(`"${message}" asks for a file of it`, asksForAFileOfIt(message), true);
+  }
+
+  /* New work that happens to name a format, and talk about formats. */
+  for (const message of [
+    'Write chapter one as a Word file',
+    'اكتب بحث عن القيادة ملف وورد',
+    'what is a PDF',
+    'اعطيني عناوين بحوث',
+  ]) {
+    check(`"${message}" does not`, asksForAFileOfIt(message), false);
+  }
+
+  check('it is a reference only when there is something to refer to', refersTo('اعطيني اياه ملف وورد', false), null);
+  check('and the older patterns keep their reading', refersTo('shorten the third chapter', true), 'prose');
+
+  const at = new Date('2026-09-21T14:00:00Z');
+  const step = (capability: string, type: string, text: string, status = 'COMPLETED') => ({
+    status,
+    capability,
+    createdAt: at,
+    finishedAt: at,
+    output: { outputs: [{ id: `${capability}-out`, type, data: { text } }] },
+  });
+
+  check(
+    'the paper is "it", not the review it was built on',
+    writtenWork([
+      step('literature.review', 'literature.v1', 'review'),
+      step('document.write', 'prose.v1', 'paper'),
+      step('quality.check', 'quality-report.v1', ''),
+    ])?.output.id,
+    'document.write-out',
+  );
+  check(
+    'a review alone is still something written',
+    writtenWork([step('literature.review', 'literature.v1', 'review')])?.output.id,
+    'literature.review-out',
+  );
+  check('an unfinished step is not', writtenWork([step('document.write', 'prose.v1', 'half', 'RUNNING')]), null);
+
+  const divided = sectionsFromMarkdown('# The Paper\n\n## Abstract\n\nOne line\nwrapped.\n\n### Aim\n\n- first\n- second\n\n## Method\n\n**Bold** stays.');
+
+  check('the opening heading is the title', divided.title, 'The Paper');
+  check('each heading after it is a section', divided.sections.map((section) => section.heading), ['Abstract', 'Aim', 'Method']);
+  check('nested one level down', divided.sections.map((section) => section.level), [1, 2, 1]);
+  check('wrapped lines are one paragraph', divided.sections[0]?.paragraphs, ['One line wrapped.']);
+  check('list items stand alone', divided.sections[1]?.paragraphs, ['• first', '• second']);
+  check('emphasis is left for the generator', divided.sections[2]?.paragraphs, ['**Bold** stays.']);
+  check('no pound sign survives', JSON.stringify(divided).includes('#'), false);
+
+  const copyOnly = [{ key: 'file', capability: 'document.generate', label: '', dependsOn: [] as string[], input: { format: 'docx' } }];
+  repairPrerequisites(copyOnly, ['document.generate']);
+  check('a copy of existing work is not given a second paper to write first', copyOnly.length, 1);
+
+  const fresh = [{ key: 'file', capability: 'document.generate', label: '', dependsOn: [] as string[], input: { topic: 'x' } }];
+  repairPrerequisites(fresh);
+  check('while a file with nothing behind it still is', fresh.length, 2);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

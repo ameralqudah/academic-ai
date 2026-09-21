@@ -23,6 +23,7 @@ import * as artifactsRepo from '@/server/repositories/artifacts.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import type { OutputReference } from '@/server/tasks/contracts';
+import { writtenWork } from '@/server/agent/written-work';
 
 /** What kind of earlier thing a message points at. */
 export type ReferenceKind = 'artifact' | 'prose' | 'dataset' | 'task';
@@ -151,7 +152,23 @@ export async function resolveReference(input: ResolveInput): Promise<Resolution>
  * different papers would otherwise contaminate each other.
  */
 async function gather(input: ResolveInput, since: Date): Promise<Candidate[]> {
-  if (input.kind === 'artifact') return artifactCandidates(input, since);
+  if (input.kind === 'artifact') {
+    /*
+     * A file, or what would go in one.
+     *
+     * "Give it to me as Word", said of a paper that was written into the chat
+     * and never exported, found no file and asked what was meant. What was
+     * meant was on screen. Work that already became a file is left to the
+     * file, so the same paper is not offered twice as a choice.
+     */
+    const files = await artifactCandidates(input, since);
+    const fromTasks = new Set(files.map((file) => file.taskId).filter(Boolean));
+    const written = (await writtenCandidates(input, since)).filter(
+      (candidate) => !fromTasks.has(candidate.taskId),
+    );
+
+    return [...files, ...written].sort((a, b) => b.at.getTime() - a.at.getTime());
+  }
   if (input.kind === 'dataset') return datasetCandidates(input, since);
   if (input.kind === 'prose') return proseCandidates(input, since);
 
@@ -193,6 +210,43 @@ async function artifactCandidates(input: ResolveInput, since: Date): Promise<Can
       artifact,
       taskId: (artifact.metadata as { taskId?: string } | null)?.taskId,
     }));
+}
+
+/**
+ * One candidate per task: what that task would be known by.
+ *
+ * Unlike `proseCandidates`, which offers every passage so that "shorten the
+ * third chapter" can find the third chapter. A request for a file means the
+ * work as a whole.
+ */
+async function writtenCandidates(input: ResolveInput, since: Date): Promise<Candidate[]> {
+  const tasks = (await tasksRepo.listForUser(input.userId, 10)).filter(
+    (task) =>
+      task.createdAt >= since &&
+      task.status === 'COMPLETED' &&
+      (!input.conversationId || task.conversationId === input.conversationId),
+  );
+
+  const candidates: Candidate[] = [];
+
+  for (const task of tasks) {
+    const written = writtenWork(await tasksRepo.stepsOf(task.id));
+    if (!written) continue;
+
+    const data = written.output.data as { text?: string; heading?: string } | null;
+
+    candidates.push({
+      kind: 'prose',
+      id: written.output.id,
+      label: data?.heading || `${(data?.text ?? '').slice(0, 60)}…`,
+      at: written.at,
+      reason: `the written work of task ${task.id}`,
+      output: written.output as OutputReference,
+      taskId: task.id,
+    });
+  }
+
+  return candidates;
 }
 
 /**

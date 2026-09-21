@@ -154,6 +154,55 @@ export function decide(input: {
   };
 }
 
+/*
+ * A file format, named. Kept here as well as in the continuity module because
+ * this file is pure and that one reaches the database; the list is short and
+ * a format's name does not change.
+ */
+const NAMES_FORMAT = new RegExp(
+  String.raw`\b(?:word|docx|pdf|powerpoint|pptx|excel|xlsx)\b|وورد|ورد|بي\s*دي\s*اف|بوربوينت|إكسل|اكسل`,
+  'iu',
+);
+
+/* Asking to be handed something: a verb of giving, or a pronoun standing for the thing. */
+const ASKS_TO_BE_HANDED = new RegExp(
+  [
+    String.raw`\b(?:give|send|export|download|save|get|want|need|make)\b`,
+    String.raw`\b(?:it|this|that)\b`,
+    `${WORD_START}(?:[أا]عط(?:ي)?ني|عطيني|هات|بدي|[أا]ريد|ابعت|ابعث|[أا]رسل|نز[ّ]?ل|صد[ّ]?ر|حم[ّ]?ل|طل[ّ]?ع|احفظ|جهز|جهّز)`,
+    `${WORD_START}(?:[إا]ياه|[إا]ياها|ياه|ياها)${WORD_END}`,
+  ].join('|'),
+  'iu',
+);
+
+/* Words that bring a subject of their own, which makes the request a new piece of work. */
+const BRINGS_A_SUBJECT = new RegExp(
+  String.raw`\b(?:write|draft|compose|about|regarding|chapter|section|on the topic)\b|${WORD_START}(?:[أا]كتب|اكتبي|عن|حول|بخصوص|فصل|الفصل|قسم)${WORD_END}`,
+  'iu',
+);
+
+/**
+ * Whether a message asks only for a file of what already exists.
+ *
+ * "اعطيني اياه ملف وورد", sent straight after a finished paper, reached the
+ * planner as a request with no subject. The planner could make nothing of it,
+ * the fallback answered conversationally, and the answer was that the product
+ * cannot export Word files — which it can, and had the paper to export.
+ *
+ * Three things together, because each alone is too loose: a format is named,
+ * something is asked to be handed over, and the message brings no subject of
+ * its own. "Write chapter one as a Word file" names a format and is new work.
+ * Short, because a pronoun carries a request only when little else does.
+ */
+export function asksForAFileOfIt(message: string): boolean {
+  const words = message.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 10) return false;
+
+  return (
+    NAMES_FORMAT.test(message) && ASKS_TO_BE_HANDED.test(message) && !BRINGS_A_SUBJECT.test(message)
+  );
+}
+
 /**
  * Whether the message points at something earlier, and at what kind of thing.
  *
@@ -175,6 +224,13 @@ export function detectReference(
   for (const kind of ['artifact', 'prose', 'dataset', 'task'] as const) {
     if (REFERS_BACK[kind].some((pattern) => pattern.test(message))) return kind;
   }
+
+  /*
+   * After the demonstratives, so "convert the previous file" keeps its own
+   * reading. An artifact, because a file is what is asked for; resolving it
+   * falls back to what was written when no file exists yet.
+   */
+  if (asksForAFileOfIt(message)) return 'artifact';
 
   return null;
 }

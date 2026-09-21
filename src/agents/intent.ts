@@ -49,6 +49,15 @@ const CONFIDENCE_FLOOR = 0.6;
 export interface IntentInput {
   message: string;
   locale: 'ar' | 'en';
+  /**
+   * The language to speak to the researcher in, when it differs from `locale`.
+   *
+   * `locale` is the language of the work — someone writing in Arabic who asks
+   * for a paper in English has an English `locale`, and was told what they had
+   * asked for in English too. The restatement is addressed to them, not to the
+   * paper's readers.
+   */
+  userLanguage?: 'ar' | 'en';
   /** Column names and types only — never rows. */
   profile?: DatasetProfile | null;
   /** Recent turns, so "now compare them by gender" resolves. */
@@ -177,7 +186,7 @@ Rules that matter:
 
 ${input.profile ? describeProfile(input.profile) : 'The user has not provided a dataset in this conversation.'}
 
-The user writes in ${input.locale === 'ar' ? 'Arabic' : 'English'}. Write restatement and clarifyingQuestion in that language.`;
+The user writes in ${(input.userLanguage ?? input.locale) === 'ar' ? 'Arabic' : 'English'}. Write restatement and clarifyingQuestion in that language.`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -434,7 +443,7 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
         confidence,
         mentionedColumns,
         restatement,
-        clarifyingQuestion: clarifyingQuestion ?? defaultQuestion(input.locale),
+        clarifyingQuestion: clarifyingQuestion ?? defaultQuestion(input.userLanguage ?? input.locale),
         searchQueries: [],
         usage: result.usage,
       };
@@ -540,7 +549,7 @@ function unclear(input: IntentInput, usage: AIResult['usage'], reason: string): 
     confidence: 0,
     mentionedColumns: [],
     restatement: reason,
-    clarifyingQuestion: defaultQuestion(input.locale),
+    clarifyingQuestion: defaultQuestion(input.userLanguage ?? input.locale),
     searchQueries: [],
     usage,
   };

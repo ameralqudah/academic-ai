@@ -144,6 +144,8 @@ const FORMAT_WORDS = [
 export interface RouteInput {
   message: string;
   locale: 'ar' | 'en';
+  /** Passed through to the classifier; see `IntentInput.userLanguage`. */
+  userLanguage?: 'ar' | 'en';
   /** Whether a file is attached or already in the conversation. */
   hasDataset?: boolean;
   profile?: DatasetProfile | null;
@@ -164,6 +166,7 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
   const intent = await classifyIntent({
     message: input.message,
     locale: input.locale,
+    userLanguage: input.userLanguage,
     profile: input.profile ?? null,
     history: input.history,
   });

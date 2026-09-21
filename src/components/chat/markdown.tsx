@@ -155,6 +155,30 @@ export function markdownComponents(): Components {
     },
 
     /*
+     * Each block finds its own direction.
+     *
+     * The page's direction follows the interface language, and the text follows
+     * whatever the researcher wrote in. An Arabic answer in the English
+     * interface was laid out left to right: a sentence containing "Word" had
+     * its halves swapped around the Latin word, and read as nonsense. `auto`
+     * takes the direction from the block's first strong character, which is
+     * what a bilingual reader expects of a paragraph.
+     *
+     * Per block rather than once on the container, because a paper in English
+     * with an Arabic quotation in it has paragraphs of both kinds.
+     */
+    p: ({ children }) => <p dir="auto">{children}</p>,
+    /* The list too, so its bullets sit on the side its text starts from. */
+    ul: ({ children }) => <ul dir="auto">{children}</ul>,
+    ol: ({ children }) => <ol dir="auto">{children}</ol>,
+    li: ({ children }) => <li dir="auto">{children}</li>,
+    blockquote: ({ children }) => <blockquote dir="auto">{children}</blockquote>,
+    h1: ({ children }) => <h1 dir="auto">{children}</h1>,
+    h2: ({ children }) => <h2 dir="auto">{children}</h2>,
+    h3: ({ children }) => <h3 dir="auto">{children}</h3>,
+    h4: ({ children }) => <h4 dir="auto">{children}</h4>,
+
+    /*
      * Tables scroll rather than overflow. A five-column comparison on a phone
      * has to go somewhere, and a horizontally scrolling table is far better
      * than one that pushes the whole page sideways — which is exactly what the

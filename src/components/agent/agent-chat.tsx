@@ -1622,6 +1622,7 @@ function TurnView({
       }
     : undefined;
   const t = useTranslations('agent');
+  const taskTurn = turn.results?.some((result) => result.kind === 'task') ?? false;
 
   if (turn.role === 'user') {
     /* Editing takes over the bubble, so the thread around it stays readable. */
@@ -1690,6 +1691,17 @@ function TurnView({
         </div>
       )}
 
+      {/*
+        What a task turn says is what was understood, and it belongs before the
+        work: "You want the paper as a Word file", then the panel, then the
+        file. Under the result it read as a second, smaller answer.
+      */}
+      {taskTurn && turn.text && (
+        <p dir="auto" className="text-sm text-muted">
+          {turn.text}
+        </p>
+      )}
+
       {turn.results?.map((result, index) => (
         <ResultView key={index} kind={result.kind} payload={result.payload} runId={result.runId} />
       ))}
@@ -1727,13 +1739,13 @@ function TurnView({
         </span>
       )}
 
-      {turn.text && <Markdown content={turn.text} compact reading />}
+      {turn.text && !taskTurn && <Markdown content={turn.text} compact reading />}
 
       {/*
         Only once the reply is complete. Offering "regenerate" mid-stream would
         invite a click that races the answer still arriving.
       */}
-      {turn.text && !turn.streaming && !turn.stages?.some((stage) => stage.status === 'running') && (
+      {turn.text && !taskTurn && !turn.streaming && !turn.stages?.some((stage) => stage.status === 'running') && (
         <MessageActions
           role="assistant"
           content={turn.text}

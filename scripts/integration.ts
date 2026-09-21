@@ -43,6 +43,7 @@ import { PDFDocument } from 'pdf-lib';
 import { generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { namedFormat, resolveReference } from '@/server/agent/continuity';
+import { detectReference } from '@/server/agent/routing-rules';
 import { getTask, substituteFormat } from '@/server/services/task.service';
 import { shouldFailOver } from '@/server/ai/model-requirements';
 import { generateDocx } from '@/server/generators/docx';
@@ -4015,6 +4016,135 @@ async function main() {
       'the planner is told the work already exists',
       plannerSource.includes('THIS REQUEST REFERS TO EXISTING WORK'),
     );
+  }
+
+  /* --- a paper written into the chat, then asked for as a file ---------- */
+
+  {
+    /*
+     * The production case. A task searched, reviewed and wrote a paper, and no
+     * step exported it. "اعطيني اياه ملف وورد" then found no file to convert,
+     * the planner could make nothing of a request with no subject, and the
+     * researcher was told Word files cannot be produced.
+     */
+    const writer = await newUser('continuity-written');
+    const stamp = (taskId: string, stepId: string, capability: string) => ({
+      taskId,
+      stepId,
+      capability,
+      projectId: null,
+    });
+
+    const paper = await tasksRepo.create({
+      userId: writer,
+      request: 'Write a complete paper on hospital supply chains',
+      locale: 'en',
+      status: 'COMPLETED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const [search, review, write] = await tasksRepo.addSteps(
+      ['academic.search', 'literature.review', 'document.write'].map((capability, ordinal) => ({
+        taskId: paper.id,
+        ordinal,
+        capability,
+        label: capability,
+        status: 'PENDING',
+        dependsOn: [],
+        input: {},
+      })),
+    );
+
+    await tasksRepo.completeStep(search!.id, {
+      outputs: [
+        makeOutput(stamp(paper.id, search!.id, 'academic.search'), 'sources.v1', {
+          references: [
+            { id: '1', kind: 'journal-article', title: 'Hospital Logistics', authors: ['Haddad, R.'], year: 2022, doi: '10.1111/h5678', provenance: 'retrieved' },
+          ],
+        }),
+      ],
+    });
+    await tasksRepo.completeStep(review!.id, {
+      outputs: [
+        makeOutput(stamp(paper.id, review!.id, 'literature.review'), 'literature.v1', {
+          text: 'The review that came before the paper.',
+        }),
+      ],
+    });
+    await tasksRepo.completeStep(write!.id, {
+      outputs: [
+        makeOutput(stamp(paper.id, write!.id, 'document.write'), 'prose.v1', {
+          text: '# Supply Chains and Service Quality\n\n## Abstract\n\nShelves decide what a ward can do [1].\n\n## Method\n\nA **planned** survey of 300 staff.',
+        }),
+      ],
+    });
+
+    const message = 'اعطيني اياه ملف وورد';
+
+    check('the request is recognised as pointing at earlier work', detectReference(message, true), 'artifact');
+
+    const resolution = await resolveReference({ userId: writer, kind: 'artifact', message, locale: 'ar' });
+
+    check('with no file, what was written is found', resolution.status, 'resolved');
+
+    if (resolution.status === 'resolved') {
+      check('as prose', resolution.candidate.kind, 'prose');
+      check('from that task', resolution.candidate.taskId, paper.id);
+      assertTrue(
+        'and it is the paper, not the review it was built on',
+        ((resolution.candidate.output?.data as { text?: string }).text ?? '').includes('## Abstract'),
+      );
+
+      /* What the chat route starts, and what the planner's fallback plans for it. */
+      const exportTask = await tasksRepo.create({
+        userId: writer,
+        request: message,
+        locale: 'ar',
+        status: 'QUEUED',
+        context: {
+          references: {
+            kind: resolution.candidate.kind,
+            id: resolution.candidate.id,
+            taskId: resolution.candidate.taskId,
+            targetFormat: 'docx',
+          },
+        },
+        budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+        spent: { modelCalls: 0, retries: 0 },
+      });
+
+      await tasksRepo.addSteps([
+        {
+          taskId: exportTask.id,
+          ordinal: 0,
+          capability: 'document.generate',
+          label: 'document.generate',
+          status: 'PENDING',
+          dependsOn: [],
+          input: { format: 'docx' },
+        },
+      ]);
+
+      await runTask(exportTask.id);
+
+      const [generated] = await tasksRepo.stepsOf(exportTask.id);
+      check('the file step completes', generated?.status, 'COMPLETED');
+      check('with one file', generated?.artifactIds.length, 1);
+
+      const stored = await readArtifact(generated?.artifactIds[0] as string, writer);
+      check('a Word file', stored.artifact.kind, 'docx');
+      assertTrue('named after the paper, not "Document"', stored.artifact.filename.startsWith('Supply Chains'));
+
+      const zip = await JSZip.loadAsync(stored.bytes);
+      const body = (await zip.file('word/document.xml')?.async('string')) ?? '';
+
+      assertTrue('the paper is in it', body.includes('Shelves decide what a ward can do'));
+      assertTrue('its headings are headings, not pound signs', body.includes('Abstract') && !body.includes('## '));
+      assertTrue('the review before it is not repeated', !body.includes('The review that came before'));
+      assertTrue('and the sources it cites came along', body.includes('Haddad'));
+    }
   }
 
 

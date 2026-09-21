@@ -42,7 +42,18 @@ export const PREREQUISITES: Record<string, string[]> = {
  * no producer exists at all is a step inserted, because inserting one the
  * researcher did not ask for costs them time and a model call.
  */
-export function repairPrerequisites(steps: PlannedStepShape[]): void {
+export function repairPrerequisites(
+  steps: PlannedStepShape[],
+  /**
+   * Capabilities whose input already exists outside this plan.
+   *
+   * A file of work the request referred to needs nothing written: the paper is
+   * there. Inserting a writing step — which is what "a file needs content"
+   * otherwise means — gave the researcher a second, different paper when they
+   * asked for a copy of the first.
+   */
+  alreadySupplied: string[] = [],
+): void {
   const byCapability = new Map<string, string>();
   for (const step of steps) byCapability.set(step.capability, step.key);
 
@@ -50,7 +61,7 @@ export function repairPrerequisites(steps: PlannedStepShape[]): void {
 
   for (const step of steps) {
     const needs = PREREQUISITES[step.capability];
-    if (!needs) continue;
+    if (!needs || alreadySupplied.includes(step.capability)) continue;
 
     /* Already satisfied by something it depends on, directly or otherwise. */
     const satisfied = step.dependsOn.some((key) => {

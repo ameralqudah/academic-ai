@@ -4145,6 +4145,72 @@ async function main() {
       assertTrue('the review before it is not repeated', !body.includes('The review that came before'));
       assertTrue('and the sources it cites came along', body.includes('Haddad'));
     }
+
+    /*
+     * What happened next in production. The researcher had asked for the file
+     * once already, before any of this worked, and been told it was impossible.
+     * That refusal was then the most recent thing written in the conversation —
+     * so "it" resolved to the refusal, and the Word file contained the sentence
+     * saying Word files cannot be made.
+     */
+    const refusal = await tasksRepo.create({
+      userId: writer,
+      request: message,
+      locale: 'ar',
+      status: 'COMPLETED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+
+    const [reply] = await tasksRepo.addSteps([
+      {
+        taskId: refusal.id,
+        ordinal: 0,
+        capability: 'general.answer',
+        label: 'Answering',
+        status: 'PENDING',
+        dependsOn: [],
+        input: {},
+      },
+    ]);
+
+    await tasksRepo.completeStep(reply!.id, {
+      outputs: [
+        makeOutput(stamp(refusal.id, reply!.id, 'general.answer'), 'prose.v1', {
+          text: 'لا يمكنني تصدير الملفات بصيغة Word.',
+        }),
+      ],
+    });
+
+    const again = await resolveReference({ userId: writer, kind: 'artifact', message, locale: 'ar' });
+
+    check('a reply written since does not become "it"', again.status, 'resolved');
+
+    if (again.status === 'resolved') {
+      check('the paper still is', again.candidate.taskId, paper.id);
+    }
+
+    /* A conversation with nothing but a reply in it still has that reply to give. */
+    const talker = await newUser('continuity-reply-only');
+    const chat = await tasksRepo.create({
+      userId: talker,
+      request: 'Explain validity',
+      locale: 'en',
+      status: 'COMPLETED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+    const [only] = await tasksRepo.addSteps([
+      { taskId: chat.id, ordinal: 0, capability: 'general.answer', label: 'Answering', status: 'PENDING', dependsOn: [], input: {} },
+    ]);
+    await tasksRepo.completeStep(only!.id, {
+      outputs: [makeOutput(stamp(chat.id, only!.id, 'general.answer'), 'prose.v1', { text: 'Validity is whether a measure measures what it claims to.' })],
+    });
+
+    const replyOnly = await resolveReference({ userId: talker, kind: 'artifact', message: 'give it to me as a Word file', locale: 'en' });
+    check('with no research at all, the reply is what there is', replyOnly.status === 'resolved' && replyOnly.candidate.taskId, chat.id);
   }
 
 

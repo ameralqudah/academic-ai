@@ -4441,6 +4441,18 @@ console.log('\nwhat a model costs');
   check('emphasis is left for the generator', divided.sections[2]?.paragraphs, ['**Bold** stays.']);
   check('no pound sign survives', JSON.stringify(divided).includes('#'), false);
 
+  const { meantByIt } = await import('../src/server/agent/written-work');
+  const paperThenRefusal = [
+    { id: 'refusal', capability: 'general.answer' },
+    { id: 'paper', capability: 'document.write' },
+  ];
+  check('after a paper, a passing reply is not what "it" means', meantByIt(paperThenRefusal).map((c) => c.id), ['paper']);
+  check('a reply is, when it is all there is', meantByIt([paperThenRefusal[0]!]).map((c) => c.id), ['refusal']);
+
+  const { probeKey } = await import('../src/server/storage/keys-probe');
+  check('two storage probes never share a key', probeKey(1, 0.1) === probeKey(1, 0.2), false);
+  check('and a probe key stays under health/', probeKey(1, 0.5).startsWith('health/probe-'), true);
+
   const copyOnly = [{ key: 'file', capability: 'document.generate', label: '', dependsOn: [] as string[], input: { format: 'docx' } }];
   repairPrerequisites(copyOnly, ['document.generate']);
   check('a copy of existing work is not given a second paper to write first', copyOnly.length, 1);

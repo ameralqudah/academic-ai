@@ -41,6 +41,32 @@ function proseIn(step: StepLike): OutputLike | null {
   return null;
 }
 
+/*
+ * Steps that produce research, as against a reply. `general.answer` writes the
+ * product of a task too — but the product of a task that was only a question is
+ * a conversational answer, and nobody who says "give it to me as Word" after a
+ * paper and a follow-up question means the answer to the question.
+ */
+const RESEARCH = new Set(['document.write', 'deep.research', 'literature.review']);
+
+/** Whether what a task wrote is research rather than a reply in passing. */
+export function isResearch(capability: string): boolean {
+  return RESEARCH.has(capability);
+}
+
+/**
+ * Of several tasks' written work, the ones "it" can mean.
+ *
+ * Research when there is any; replies only when there is nothing else. In
+ * production the most recent writing in the conversation was the assistant
+ * saying it could not export Word files, and the file that came back was a Word
+ * copy of that sentence.
+ */
+export function meantByIt<T extends { capability: string }>(candidates: T[]): T[] {
+  const research = candidates.filter((candidate) => isResearch(candidate.capability));
+  return research.length > 0 ? research : candidates;
+}
+
 /**
  * The output a task would be known by, and when it was made — or null.
  *

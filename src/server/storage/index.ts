@@ -19,6 +19,7 @@ import { logger } from '@/lib/logger';
 import { LocalStorageProvider } from './local';
 import { StorageError, type StorageProvider } from './provider';
 import { S3StorageProvider } from './s3';
+import { probeKey } from './keys-probe';
 
 let cached: StorageProvider | null = null;
 
@@ -104,7 +105,7 @@ export interface StorageProbe {
  * Cached for a minute so that opening the admin page is not a write per visit.
  * Never throws — it reports.
  */
-const PROBE_KEY = 'health/probe.txt';
+/* The key itself is made in `keys-probe`, which says why it is never the same twice. */
 
 /*
  * A store that does not answer must not hold the page that reports on it. An
@@ -148,13 +149,21 @@ export async function probeStorage(options: { fresh?: boolean } = {}): Promise<S
   try {
     const store = storageProvider();
     const stamp = `ok ${checkedAt}`;
+    const key = probeKey();
 
     stage = 'write';
-    await within(store.put(PROBE_KEY, new TextEncoder().encode(stamp), 'text/plain'));
+    await within(store.put(key, new TextEncoder().encode(stamp), 'text/plain'));
 
     stage = 'read';
-    const back = new TextDecoder().decode((await within(store.get(PROBE_KEY))).bytes);
+    const back = new TextDecoder().decode((await within(store.get(key))).bytes);
     if (back !== stamp) throw new StorageError('storage.error.probeMismatch');
+
+    /*
+     * Tidied away, since every probe now leaves an object behind. Not part of
+     * the verdict: a store that writes and reads is working, and one that will
+     * not delete a probe file is no reason to tell the admin it is down.
+     */
+    await within(store.delete(key)).catch(() => undefined);
 
     result = { provider, ok: true, checkedAt };
   } catch (error) {

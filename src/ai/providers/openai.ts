@@ -7,9 +7,11 @@ import {
   type TokenUsage,
 } from '../types';
 import { isUsableApiKey } from '@/ai/key';
+import { costMicroUsd, priceFor } from '@/ai/prices';
 
 const ENDPOINT = 'https://api.openai.com/v1/chat/completions';
-const PRICE_PER_MTOK = { input: 2.5, output: 10 };
+/** Used only for a model the price table does not know; see `@/ai/prices`. */
+const FALLBACK_PRICE = { input: 2.5, output: 10 };
 
 export class OpenAIProvider implements AIProvider {
   readonly name = 'openai' as const;
@@ -30,10 +32,7 @@ export class OpenAIProvider implements AIProvider {
   }
 
   estimateCostMicroUsd(usage: TokenUsage): number {
-    const dollars =
-      (usage.tokensIn / 1_000_000) * PRICE_PER_MTOK.input +
-      (usage.tokensOut / 1_000_000) * PRICE_PER_MTOK.output;
-    return Math.round(dollars * 1_000_000);
+    return costMicroUsd(priceFor(this.model, FALLBACK_PRICE), usage);
   }
 
   private payload(request: AIRequest, stream: boolean) {

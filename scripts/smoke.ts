@@ -4085,5 +4085,36 @@ console.log('\ndocument previews for the side panel');
   });
 }
 
+console.log('\nwhat a model costs');
+
+{
+  const { priceFor, costMicroUsd } = await import('../src/ai/prices');
+  const fallback = { input: 99, output: 99 };
+
+  check(
+    'the model that actually serves requests has its own price',
+    priceFor('gemini-3.6-flash', fallback, new Date('2026-09-21')),
+    { from: '2000-01-01', input: 0.75, output: 3.75 },
+  );
+  check(
+    'and the promotional price ends when the provider says it does',
+    priceFor('gemini-3.6-flash', fallback, new Date('2027-01-01')).output,
+    7.5,
+  );
+  check(
+    'a dated snapshot finds its family',
+    priceFor('claude-haiku-4-5-20251001', fallback).input,
+    1,
+  );
+  check('Sonnet 5 is not priced as Sonnet 4.5', priceFor('claude-sonnet-5', fallback).output, 10);
+  check('and Sonnet 4.5 keeps its own', priceFor('claude-sonnet-4-5', fallback).output, 15);
+  check('an unknown model falls back rather than costing nothing', priceFor('mystery-1', fallback), fallback);
+  check(
+    'a request is costed in millionths of a dollar',
+    costMicroUsd({ input: 0.75, output: 3.75 }, { tokensIn: 1_000_000, tokensOut: 1_000_000 }),
+    4_500_000,
+  );
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

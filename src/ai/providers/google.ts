@@ -7,13 +7,17 @@ import {
   type TokenUsage,
 } from '../types';
 import { isUsableApiKey } from '@/ai/key';
+import { costMicroUsd, priceFor } from '@/ai/prices';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-const PRICE_PER_MTOK = { input: 1.25, output: 5 };
+/** Used only for a model the price table does not know; see `@/ai/prices`. */
+const FALLBACK_PRICE = { input: 1.25, output: 5 };
 
 interface GeminiUsage {
   promptTokenCount?: number;
   candidatesTokenCount?: number;
+  /** The model's reasoning. Not shown to the user, and billed as output all the same. */
+  thoughtsTokenCount?: number;
 }
 
 interface GeminiResponse {
@@ -40,10 +44,7 @@ export class GoogleProvider implements AIProvider {
   }
 
   estimateCostMicroUsd(usage: TokenUsage): number {
-    const dollars =
-      (usage.tokensIn / 1_000_000) * PRICE_PER_MTOK.input +
-      (usage.tokensOut / 1_000_000) * PRICE_PER_MTOK.output;
-    return Math.round(dollars * 1_000_000);
+    return costMicroUsd(priceFor(this.model, FALLBACK_PRICE), usage);
   }
 
   private payload(request: AIRequest) {
@@ -86,7 +87,9 @@ export class GoogleProvider implements AIProvider {
       text,
       usage: {
         tokensIn: data.usageMetadata?.promptTokenCount ?? 0,
-        tokensOut: data.usageMetadata?.candidatesTokenCount ?? 0,
+        tokensOut:
+          (data.usageMetadata?.candidatesTokenCount ?? 0) +
+          (data.usageMetadata?.thoughtsTokenCount ?? 0),
       },
       provider: this.name,
       model: this.model,
@@ -122,7 +125,11 @@ export class GoogleProvider implements AIProvider {
 
       if (event.usageMetadata) {
         usage.tokensIn = event.usageMetadata.promptTokenCount ?? usage.tokensIn;
-        usage.tokensOut = event.usageMetadata.candidatesTokenCount ?? usage.tokensOut;
+        usage.tokensOut =
+          event.usageMetadata.candidatesTokenCount === undefined
+            ? usage.tokensOut
+            : event.usageMetadata.candidatesTokenCount +
+              (event.usageMetadata.thoughtsTokenCount ?? 0);
       }
     }
 

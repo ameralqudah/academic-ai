@@ -25,7 +25,8 @@ export async function registerAndLogin(
     .fill(PASSWORD);
   await page.getByRole('button', { name: locale === 'ar' ? 'إنشاء الحساب' : 'Create account' }).click();
 
-  await page.waitForURL(`**/${locale}/dashboard`, { timeout: 30_000 });
+  /* Signing in opens the chat — the front door — not the dashboard. */
+  await page.waitForURL(`**/${locale}/chat`, { timeout: 30_000 });
   return email;
 }
 

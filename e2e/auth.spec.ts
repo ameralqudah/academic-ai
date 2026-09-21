@@ -3,8 +3,16 @@ import { expect, test } from '@playwright/test';
 import { PASSWORD, registerAndLogin, uniqueEmail } from './helpers';
 
 test.describe('authentication', () => {
-  test('a new researcher can register and lands on the dashboard', async ({ page }) => {
+  test('a new researcher can register, lands in the chat, and finds the dashboard', async ({
+    page,
+  }) => {
     await registerAndLogin(page, 'signup');
+    await expect(page.getByRole('textbox').first()).toBeVisible();
+
+    /* The dashboard stopped being the front door; it must not stop being reachable. */
+    await page.getByRole('button', { name: 'Account menu' }).click();
+    await page.getByRole('menuitem', { name: 'Dashboard' }).click();
+    await expect(page).toHaveURL(/\/en\/dashboard$/);
 
     await expect(page.getByRole('heading', { level: 1 })).toContainText('Welcome back');
     await expect(page.getByRole('link', { name: 'New Research Project' })).toBeVisible();
@@ -14,6 +22,7 @@ test.describe('authentication', () => {
 
   test('the free plan limits are shown, not hidden', async ({ page }) => {
     await registerAndLogin(page, 'limits');
+    await page.goto('/en/dashboard');
     await expect(page.getByText('AI requests left')).toBeVisible();
     /*
      * Not inside the sidebar: the meter moved to the foot of the page when the
@@ -42,7 +51,7 @@ test.describe('authentication', () => {
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
     await page.getByLabel('Confirm password').fill(PASSWORD);
     await page.getByRole('button', { name: 'Create account' }).click();
-    await page.waitForURL('**/en/dashboard');
+    await page.waitForURL('**/en/chat');
     /* Sign out lives in the account menu at the foot of the sidebar. */
     await page.getByRole('button', { name: 'Account menu' }).click();
     await page.getByRole('menuitem', { name: 'Log out' }).click();

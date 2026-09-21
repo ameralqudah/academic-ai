@@ -34,9 +34,11 @@ test.describe('admin access control', () => {
     await page.getByLabel('Email', { exact: true }).fill(ADMIN_EMAIL!);
     await page.getByLabel('Password', { exact: true }).fill(ADMIN_PASSWORD);
     await page.getByRole('button', { name: 'Log in' }).click();
-    await page.waitForURL('**/en/dashboard');
+    await page.waitForURL('**/en/chat');
 
-    await page.getByRole('link', { name: 'Admin' }).click();
+    /* Admin sits with the other account links, in the account menu. */
+    await page.getByRole('button', { name: 'Account menu' }).click();
+    await page.getByRole('menuitem', { name: 'Admin' }).click();
     await expect(page).toHaveURL(/\/en\/admin$/);
 
     await expect(page.getByText('Total users')).toBeVisible();

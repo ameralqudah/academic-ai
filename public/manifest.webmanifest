@@ -10,7 +10,7 @@
   "background_color": "#f7f4ec",
   "theme_color": "#0f5c4a",
   "dir": "auto",
-  "lang": "ar",
+  "lang": "en",
   "categories": ["education", "productivity"],
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

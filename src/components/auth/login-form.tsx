@@ -9,6 +9,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Field, TextInput } from '@/components/ui/field';
 import { Link, useRouter } from '@/i18n/navigation';
+import { SIGNED_IN_HOME } from '@/config/home';
 
 export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
   const t = useTranslations('auth');
@@ -36,9 +37,9 @@ export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
     }
 
     // `refresh()` first so the server components re-render with the new session
-    // cookie; `push()` then lands on an already-authenticated dashboard.
+    // cookie; `push()` then lands on an already-authenticated page.
     router.refresh();
-    router.push('/dashboard');
+    router.push(SIGNED_IN_HOME);
   }
 
   return (
@@ -99,7 +100,7 @@ export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
             type="button"
             variant="outline"
             className="w-full"
-            onClick={() => signIn('google', { callbackUrl: `/${locale}/dashboard` })}
+            onClick={() => signIn('google', { callbackUrl: `/${locale}${SIGNED_IN_HOME}` })}
           >
             {t('google')}
           </Button>

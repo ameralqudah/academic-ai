@@ -10,6 +10,7 @@ import {
   ChevronsUpDown,
   FolderKanban,
   GraduationCap,
+  LayoutDashboard,
   Library,
   LogOut,
   MoreHorizontal,
@@ -104,8 +105,13 @@ const MORE: NavItem[] = [
   { href: '/chat', key: 'deepResearch', icon: Telescope, prompt: 'deepResearchPrompt' },
 ];
 
-/** Billing and settings live in the account menu at the foot of the sidebar. */
+/**
+ * The dashboard, billing and settings live in the account menu at the foot of
+ * the sidebar. The dashboard is here because signing in now opens the chat, and
+ * a page nothing links to is a page that has been deleted by neglect.
+ */
 const ACCOUNT_LINKS: { href: string; key: string; icon: LucideIcon }[] = [
+  { href: '/dashboard', key: 'dashboard', icon: LayoutDashboard },
   { href: '/billing', key: 'billing', icon: Wallet },
   { href: '/settings', key: 'settings', icon: Settings },
 ];

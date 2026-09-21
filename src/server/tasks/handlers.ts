@@ -1145,6 +1145,12 @@ export function registerAllHandlers(): void {
          * containing text it never held is a false failure.
          */
         ...(prose ? { expectedContent: prose } : {}),
+        /*
+         * The document as Markdown, so the chat can show it in a side panel
+         * instead of only offering a download. Built from the same `content`
+         * the file was, so what is read and what is downloaded cannot differ.
+         */
+        ...(prose ? { previewMarkdown: new TextDecoder().decode(generateMarkdown(content)) } : {}),
       });
     } catch (error) {
       /*

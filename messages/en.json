@@ -1586,5 +1586,20 @@
     },
     "failedBeforePlanning": "The task could not be planned",
     "retry": "Retry"
+  },
+  "artifactPanel": {
+    "label": "Document preview",
+    "loading": "Loading…",
+    "failed": "The document could not be opened. Try again.",
+    "version": "Version",
+    "versionN": "Version {n}",
+    "close": "Close",
+    "download": "Download the file",
+    "open": "View",
+    "checked": "Passed the quality check",
+    "checkFailed": "Did not pass the quality check",
+    "checkWarned": "The quality check raised notes",
+    "truncated": "This is a preview of the beginning only. Download the file to read it in full.",
+    "noPreview": "No preview is available for this file. You can download and open it."
   }
 }

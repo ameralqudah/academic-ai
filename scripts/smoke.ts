@@ -4042,5 +4042,42 @@ console.log('\nmodel routing by plan, and provider resilience');
   check('a stream that fails before its first chunk is restarted', streamed, 'from google');
 }
 
+/* ------------------------------------------------------------------ */
+/* Document previews kept beside the file                               */
+/* ------------------------------------------------------------------ */
+console.log('\ndocument previews for the side panel');
+
+{
+  const { PREVIEW_LIMIT, isPreviewable, toStoredPreview, withoutPreview } = await import(
+    '../src/server/services/artifact-preview'
+  );
+
+  check('a short document is kept whole', toStoredPreview('# عنوان\n\nفقرة.'), {
+    preview: '# عنوان\n\nفقرة.',
+    previewTruncated: false,
+  });
+  check('nothing to show is not stored as an empty preview', toStoredPreview('   \n '), null);
+
+  const paragraph = `${'كلمة '.repeat(400).trim()}\n\n`;
+  const long = paragraph.repeat(Math.ceil((PREVIEW_LIMIT * 1.5) / paragraph.length));
+  const cut = toStoredPreview(long);
+
+  assertTrue('a long document is cut to the limit', (cut?.preview.length ?? 0) <= PREVIEW_LIMIT);
+  check('and says that it was', cut?.previewTruncated, true);
+  assertTrue('at a paragraph boundary, not mid-word', cut?.preview.endsWith('كلمة') ?? false);
+
+  check('a Word document can be previewed', isPreviewable('docx'), true);
+  check('a spreadsheet cannot — it has no prose', isPreviewable('xlsx'), false);
+
+  const listed = withoutPreview({
+    id: 'a',
+    metadata: { citationStyle: 'apa', preview: 'long text', previewTruncated: false },
+  });
+  check('a list does not carry every document’s text', listed.metadata, {
+    citationStyle: 'apa',
+    hasPreview: true,
+  });
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

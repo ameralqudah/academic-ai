@@ -167,3 +167,23 @@ export function candidateOverride(
   const only = candidates[0];
   return only && only !== byDefault ? only : null;
 }
+
+/**
+ * Which model stands in for one that is overloaded, when no other provider can.
+ *
+ * Pure, and given the configured fallback rather than reading it, so the rule
+ * can be tested without an environment.
+ */
+export function siblingModel(
+  provider: string,
+  failedModel: string | undefined,
+  fallback: string,
+): string | null {
+  if (provider !== 'google') return null;
+
+  const model = fallback.trim();
+  /* The fallback itself failing has nowhere further to go. */
+  if (!model || model === failedModel) return null;
+
+  return model;
+}

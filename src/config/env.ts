@@ -31,6 +31,13 @@ const serverSchema = z.object({
   GOOGLE_AI_API_KEY: z.string().optional(),
   GOOGLE_MODEL: z.string().default('gemini-2.5-pro'),
   /**
+   * A second Google model, tried when the first reports it is overloaded.
+   *
+   * Models have separate capacity, so a 503 from one is often not a 503 from
+   * its sibling — and this needs no second key. Empty disables it.
+   */
+  GOOGLE_FALLBACK_MODEL: z.string().default('gemini-3.5-flash'),
+  /**
    * Web search, through Serper. Optional: without it the provider reports
    * itself unconfigured and the mode stays unavailable, rather than the app
    * failing to start over a feature nobody has enabled.

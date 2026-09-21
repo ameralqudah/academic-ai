@@ -4029,7 +4029,22 @@ console.log('\nmodel routing by plan, and provider resilience');
   const down = fake('google', 5);
   const spare = fake('anthropic', 0);
   const moved = await resilient(down.provider, async () => spare.provider, { retryDelayMs: 1 }).complete(request);
-  check('and moves to the alternative when the retry fails too', [moved.provider, down.state.calls], ['anthropic', 2]);
+  check(
+    'and moves to the alternative at once, rather than waiting on a model that said it is overloaded',
+    [moved.provider, down.state.calls],
+    ['anthropic', 1],
+  );
+
+  const bothDown = fake('google', 1);
+  const spareDown = fake('anthropic', 5);
+  const lastResort = await resilient(bothDown.provider, async () => spareDown.provider, { retryDelayMs: 1 }).complete(request);
+  check('when the alternative fails too, the first is tried once more', lastResort.text, 'from google');
+
+  const { siblingModel } = await import('../src/server/ai/model-requirements');
+  check('an overloaded Gemini falls to its sibling', siblingModel('google', 'gemini-3.6-flash', 'gemini-3.5-flash'), 'gemini-3.5-flash');
+  check('but the sibling does not fall to itself', siblingModel('google', 'gemini-3.5-flash', 'gemini-3.5-flash'), null);
+  check('an empty setting turns it off', siblingModel('google', 'gemini-3.6-flash', ' '), null);
+  check('and other providers have none configured', siblingModel('anthropic', 'claude-sonnet-5', 'gemini-3.5-flash'), null);
 
   const bad = fake('google', 5, 400);
   let rejected = '';
@@ -4083,6 +4098,70 @@ console.log('\ndocument previews for the side panel');
     citationStyle: 'apa',
     hasPreview: true,
   });
+}
+
+console.log('\nspeed of the first word');
+
+{
+  const { isSmallTalk } = await import('../src/agents/small-talk');
+
+  for (const message of ['مساء خير نبدا', 'السلام عليكم', 'صباح الخير يا دكتور', 'شكراً جزيلاً', 'Hello there', 'تمام']) {
+    check(`a greeting is answered without being classified: ${message}`, isSmallTalk(message), true);
+  }
+
+  for (const message of [
+    'اعطيني عناوين مقترحه عن موارد بشريه',
+    'مساء الخير، حلل هذا الملف',
+    'مرحبا بدي خطة بحث',
+    'hello, analyze my data',
+    'ما هو معامل كرونباخ ألفا؟',
+    'وين الأردن؟',
+    'hi what is a p-value',
+    'صباح الخير اريد مراجعة ادبيات',
+    'سلامة الغذاء في الاردن',
+  ]) {
+    check(`but work is never mistaken for one: ${message}`, isSmallTalk(message), false);
+  }
+
+  const { GoogleProvider } = await import('../src/ai/providers/google');
+  const realFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  let refuse = false;
+
+  globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as { generationConfig?: { thinkingConfig?: unknown } };
+    bodies.push(body);
+    if (refuse && body.generationConfig?.thinkingConfig) {
+      return new Response('{"error":{"message":"Unknown name thinkingLevel"}}', { status: 400 });
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const base = { task: 'chat', locale: 'ar', system: '', messages: [{ role: 'user', content: 'hi' }] } as never;
+    const thinkingOf = (index: number) =>
+      (bodies[index] as { generationConfig: { thinkingConfig?: unknown } }).generationConfig.thinkingConfig;
+
+    await new GoogleProvider('k'.repeat(40), 'gemini-3.6-flash').complete({ ...(base as object), reasoning: false } as never);
+    check('a step that needs no reasoning asks Gemini 3 for the least', thinkingOf(0), { thinkingLevel: 'minimal' });
+
+    await new GoogleProvider('k'.repeat(40), 'gemini-3.6-flash').complete({ ...(base as object), reasoning: true } as never);
+    check('a step that does need it is left alone', thinkingOf(1), undefined);
+
+    await new GoogleProvider('k'.repeat(40), 'gemini-2.5-pro').complete({ ...(base as object), reasoning: false } as never);
+    check('and so is a model that cannot turn it down', thinkingOf(2), undefined);
+
+    refuse = true;
+    bodies.length = 0;
+    const provider = new GoogleProvider('k'.repeat(40), 'gemini-3.9-test');
+    const answered = await provider.complete({ ...(base as object), reasoning: false } as never);
+    check('a model that refuses the setting is answered without it', [answered.text, bodies.length, thinkingOf(1)], ['ok', 2, undefined]);
+
+    await provider.complete({ ...(base as object), reasoning: false } as never);
+    check('and is not offered it a second time', bodies.length, 3);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 console.log('\nwhat a model costs');

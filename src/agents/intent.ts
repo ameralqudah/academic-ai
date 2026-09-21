@@ -41,6 +41,7 @@ import { logger } from '@/lib/logger';
 
 import { classifyByKeyword } from './keywords';
 import { classifiableIntents, isKnownIntent, type IntentKey } from './registry';
+import { isSmallTalk } from './small-talk';
 
 /** Below this the agent asks instead of acting. */
 const CONFIDENCE_FLOOR = 0.6;
@@ -267,6 +268,30 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
       restatement: input.message.slice(0, 200),
       clarifyingQuestion: null,
       searchQueries: searchQueries.filter((query) => query.text.length > 2),
+      usage: { tokensIn: 0, tokensOut: 0 },
+    };
+  }
+
+  /*
+   * A greeting is answered, not classified.
+   *
+   * Every message paid for a model call to decide what kind of message it was,
+   * and "مساء الخير" waited four seconds for a verdict that it was a greeting
+   * before a second call could begin to answer it. This is not the keyword
+   * router coming back: it recognises only the opening of a conversation — a
+   * short message that starts with a greeting or a thank-you and asks for no
+   * work — and anything it is not sure of goes to the model as before.
+   */
+  if (!input.profile && isSmallTalk(input.message)) {
+    logger.info('agent.intent.smallTalk', { length: input.message.length });
+
+    return {
+      intent: 'general.question',
+      confidence: 1,
+      mentionedColumns: [],
+      restatement: input.message.slice(0, 200),
+      clarifyingQuestion: null,
+      searchQueries: [],
       usage: { tokensIn: 0, tokensOut: 0 },
     };
   }

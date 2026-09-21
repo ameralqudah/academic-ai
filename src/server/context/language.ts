@@ -73,6 +73,31 @@ export function arabicShare(text: string): number {
   return arabic / letters.length;
 }
 /**
+ * The language to speak to the person in, as opposed to write their work in.
+ *
+ * "اقترح عناوين باللغة الإنجليزية" asks for English titles. It does not ask to
+ * be addressed in English — and a task that took it that way questioned an
+ * Arabic speaker in English in the middle of an Arabic conversation. The
+ * language of the work follows what was asked for; the language of the
+ * conversation follows the script the person writes in, and the interface only
+ * when the script does not say.
+ */
+export function decideConversationLanguage(input: {
+  request: string;
+  interfaceLocale?: OutputLanguage;
+}): OutputLanguage {
+  const letters = (input.request ?? '').replace(/[^\p{L}]/gu, '').length;
+
+  if (letters >= 3) {
+    const share = arabicShare(input.request);
+    if (share >= 0.5) return 'ar';
+    if (share < 0.2) return 'en';
+  }
+
+  return input.interfaceLocale ?? 'en';
+}
+
+/**
  * The language the output should be written in.
  *
  * Order matters and is the whole design: an explicit request beats the script

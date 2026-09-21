@@ -84,6 +84,8 @@ export interface AIChunk {
   delta: string;
   done: boolean;
   usage?: TokenUsage;
+  /** Which model actually wrote this, when it was not the one first asked. */
+  model?: string;
 }
 
 export class AIProviderError extends Error {

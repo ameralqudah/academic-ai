@@ -200,6 +200,79 @@ test.describe('the sidebar', () => {
   });
 });
 
+test.describe('a direct answer, as it is written', () => {
+  /*
+   * The stream is supplied by the test, because there is no model behind a test
+   * run. What is being checked is the reader: that it assembles the pieces,
+   * shows why it is waiting, swaps a refusal for the task that replaced it, and
+   * reports a failure that arrives after the first byte.
+   */
+  const frames = (events: object[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+
+  const answerWith = async (page: import('@playwright/test').Page, events: object[]) => {
+    await page.route('**/api/chat', async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        body: frames(events),
+      });
+    });
+  };
+
+  test('the pieces become one answer', async ({ page }) => {
+    await registerAndLogin(page, 'stream-text', 'en');
+    await page.goto('/en/chat');
+
+    await answerWith(page, [
+      { type: 'notice', kind: 'failover' },
+      { type: 'delta', text: 'Pearson measures ' },
+      { type: 'delta', text: 'linear association.' },
+      { type: 'done' },
+    ]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('Pearson or Spearman?');
+    await composer.press('Enter');
+
+    await expect(page.getByText('Pearson measures linear association.')).toBeVisible({ timeout: 15_000 });
+    /* Finished: the busy line is gone and the answer can be copied. */
+    await expect(page.getByText('The model is busy')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Copy' }).last()).toBeVisible();
+  });
+
+  test('a refusal is replaced by the task that took over', async ({ page }) => {
+    await registerAndLogin(page, 'stream-task', 'en');
+    await page.goto('/en/chat');
+
+    await answerWith(page, [
+      { type: 'delta', text: 'I cannot produce a file here.' },
+      { type: 'task', task: { id: 'task-that-does-not-exist', status: 'QUEUED' }, restatement: 'Writing your chapter.' },
+    ]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('Write chapter one as a Word file');
+    await composer.press('Enter');
+
+    await expect(page.getByText('Writing your chapter.')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('I cannot produce a file here.')).toHaveCount(0);
+  });
+
+  test('a failure after the first byte is still reported', async ({ page }) => {
+    await registerAndLogin(page, 'stream-error', 'en');
+    await page.goto('/en/chat');
+
+    await answerWith(page, [
+      { type: 'error', code: 'AI_UNAVAILABLE', message: 'The AI provider quota has been used up.', messageAr: 'انتهت الحصة' },
+    ]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('Anything');
+    await composer.press('Enter');
+
+    await expect(page.getByText('The AI provider quota has been used up.')).toBeVisible({ timeout: 15_000 });
+  });
+});
+
 test.describe('switching language', () => {
   test('moves between locales and keeps the page', async ({ page }) => {
     await registerAndLogin(page, 'chat-locale', 'en');

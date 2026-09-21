@@ -4129,6 +4129,82 @@ console.log('\na step finds its instruction under whatever name the planner used
   check('and blank is nothing', instructionFrom({ question: '   ' }, ['question']), '');
 }
 
+console.log('\nan answer that arrives as it is written');
+
+{
+  const { streamResponse, encodeStreamEvent } = await import('../src/server/http/stream');
+  const { notify } = await import('../src/server/ai/notices');
+  const { AppError } = await import('../src/server/http/errors');
+
+  check('one event is one frame', encodeStreamEvent({ type: 'delta', text: 'مرحبا' }), 'data: {"type":"delta","text":"مرحبا"}\n\n');
+
+  const read = async (response: Response) =>
+    (await response.text())
+      .split('\n\n')
+      .filter(Boolean)
+      .map((frame) => JSON.parse(frame.replace(/^data: /, '')) as { type: string; [key: string]: unknown });
+
+  const good = await read(
+    streamResponse(async (send) => {
+      /* What the provider layer does, four calls down, when a model is overloaded. */
+      notify({ kind: 'failover' });
+      send({ type: 'delta', text: 'a' });
+      send({ type: 'delta', text: 'b' });
+      send({ type: 'done' });
+    }),
+  );
+  check('the pieces arrive in order, after the notice that a model was busy', good.map((event) => event.type), ['notice', 'delta', 'delta', 'done']);
+
+  notify({ kind: 'retry' });
+  check('a notice with nobody listening goes nowhere and breaks nothing', true, true);
+
+  const failed = await read(
+    streamResponse(async (send) => {
+      send({ type: 'delta', text: 'partial' });
+      throw new AppError('AI_UNAVAILABLE', 'quota used', 'انتهت الحصة');
+    }),
+  );
+  check('a failure after the first byte is an event, in both languages', failed[1], {
+    type: 'error',
+    code: 'AI_UNAVAILABLE',
+    message: 'quota used',
+    messageAr: 'انتهت الحصة',
+  });
+
+  const crashed = await read(streamResponse(async () => { throw new Error('secret internals'); }));
+  assertTrue('and an unexpected error does not leak its text', !JSON.stringify(crashed).includes('secret internals'));
+}
+
+console.log('\nthe language of the work is not the language of the conversation');
+
+{
+  const { decideConversationLanguage, decideOutputLanguage } = await import('../src/server/context/language');
+  const request = 'بدي تقترح عناوين عن موارد بشريه باللغه النجليزيه';
+
+  check('the titles are wanted in English', decideOutputLanguage({ request: 'اقتراح عناوين بحوث باللغة الإنجليزية', interfaceLocale: 'ar' }).language, 'en');
+  check('but the person is still spoken to in Arabic', decideConversationLanguage({ request, interfaceLocale: 'ar' }), 'ar');
+  check('English in an Arabic interface is answered in English', decideConversationLanguage({ request: 'Suggest titles about HR', interfaceLocale: 'ar' }), 'en');
+  check('and a message with no letters defers to the interface', decideConversationLanguage({ request: '123', interfaceLocale: 'ar' }), 'ar');
+}
+
+console.log('\nwhat a search found reaches the step that answers');
+
+{
+  const { sourcesAsMaterial } = await import('../src/server/tasks/found-sources');
+
+  const material = sourcesAsMaterial([
+    { title: 'AI in talent acquisition', year: 2025, container: 'HRM Review' },
+    { title: '  ' },
+    { title: 'Hybrid work and wellbeing', year: null },
+  ]);
+
+  assertTrue('titles, years and venues are listed', material.includes('- AI in talent acquisition (2025) — HRM Review'));
+  assertTrue('a source with no title is left out', material.split('\n').filter((line) => line.startsWith('- ')).length === 2);
+  assertTrue('with the instruction not to pass them off or over-cite them', /Do not present them as your own/.test(material));
+  check('and nothing found means nothing added', sourcesAsMaterial([]), '');
+  check('never more than the limit', sourcesAsMaterial(Array.from({ length: 30 }, (_, index) => ({ title: `Paper ${index}` }))).split('\n').filter((line) => line.startsWith('- ')).length, 12);
+}
+
 console.log('\nspeed of the first word');
 
 {

@@ -25,7 +25,7 @@ import { getEnv } from '@/config/env';
 import { logger } from '@/lib/logger';
 import type { AIProvider } from '@/ai/provider';
 import { resolveProvider } from '@/ai/registry';
-import type { ProviderName } from '@/ai/types';
+import type { AIRequest, ProviderName } from '@/ai/types';
 import { isUsableApiKey } from '@/ai/key';
 import type { PlanTier } from '@/agents/modes';
 import {
@@ -34,6 +34,7 @@ import {
   candidatesFor,
   requirementsFor,
   shouldFailOver,
+  siblingModel,
   type ModelRequirements,
 } from './model-requirements';
 import { currentUserId } from './request-scope';
@@ -109,9 +110,39 @@ async function currentTier(): Promise<PlanTier | undefined> {
   }
 }
 
-/** Wraps a selection so a busy model is retried, then substituted. */
-function guarded(provider: AIProvider, allowed?: ProviderName[]): AIProvider {
-  return resilient(provider, () => alternativeProvider(provider.name, allowed));
+/**
+ * Passes the step's need for reasoning on to the provider.
+ *
+ * The router has always known which steps need a model to deliberate, and the
+ * provider was never told — so a greeting was reasoned about for four seconds
+ * before a word of it appeared. A caller that sets `reasoning` itself keeps its
+ * choice.
+ */
+function tuned(provider: AIProvider, needsReasoning: boolean): AIProvider {
+  const tune = (request: AIRequest): AIRequest =>
+    request.reasoning === undefined ? { ...request, reasoning: needsReasoning } : request;
+
+  return {
+    name: provider.name,
+    model: provider.model,
+    isConfigured: () => provider.isConfigured(),
+    complete: (request) => provider.complete(tune(request)),
+    stream: (request) => provider.stream(tune(request)),
+    countTokens: (text) => provider.countTokens(text),
+    estimateCostMicroUsd: (usage) => provider.estimateCostMicroUsd(usage),
+  };
+}
+
+/** Wraps a selection so a busy model is substituted, or failing that retried. */
+function guarded(
+  provider: AIProvider,
+  needsReasoning: boolean,
+  allowed?: ProviderName[],
+): AIProvider {
+  return resilient(tuned(provider, needsReasoning), async () => {
+    const alternative = await alternativeProvider(provider.name, allowed, provider.model);
+    return alternative ? tuned(alternative, needsReasoning) : null;
+  });
 }
 
 /**
@@ -136,7 +167,7 @@ export async function selectModel(
     const provider = await resolveProvider(options.preferred);
 
     return {
-      provider: guarded(provider),
+      provider: guarded(provider, requirements.needsReasoning),
       reason: `user selected ${options.preferred.provider}`,
       driver: 'only-option',
     };
@@ -181,7 +212,7 @@ export async function selectModel(
     });
 
     return {
-      provider: guarded(provider, configured),
+      provider: guarded(provider, requirements.needsReasoning, configured),
       reason: 'the only provider this plan is routed to',
       driver: 'only-option',
     };
@@ -220,7 +251,7 @@ export async function selectModel(
     expectedOutputTokens: requirements.expectedOutputTokens,
   });
 
-  return { provider: guarded(provider, configured), reason: `${driver} for ${requirements.capability}`, driver };
+  return { provider: guarded(provider, requirements.needsReasoning, configured), reason: `${driver} for ${requirements.capability}`, driver };
 }
 
 /**
@@ -281,13 +312,21 @@ export async function alternativeProvider(
   exclude: string,
   /** Restricts the substitute to what the caller's plan allows. */
   allowed?: ProviderName[],
+  /** The model that failed, so its sibling can stand in when no other provider can. */
+  failedModel?: string,
 ): Promise<AIProvider | null> {
   const alternatives = (allowed ?? usableProviders()).filter((name) => name !== exclude);
 
   const chosen = alternatives[0];
-  if (!chosen) return null;
+  if (chosen) return resolveProvider({ provider: chosen, model: modelFor(chosen) });
 
-  return resolveProvider({ provider: chosen, model: modelFor(chosen) });
+  /*
+   * No other provider — the usual case, with one key configured. A second model
+   * from the same provider is still a different pool of capacity, and "this
+   * model is experiencing high demand" is about the model, not the account.
+   */
+  const sibling = siblingModel(exclude, failedModel, getEnv().GOOGLE_FALLBACK_MODEL);
+  return sibling ? resolveProvider({ provider: exclude as ProviderName, model: sibling }) : null;
 }
 
 /**

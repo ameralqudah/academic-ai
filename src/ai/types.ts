@@ -61,6 +61,15 @@ export interface AIRequest {
    * holds the project context, which repeats across every call in a session.
    */
   cacheSystem?: boolean;
+  /**
+   * Whether the step benefits from the model reasoning before it answers.
+   *
+   * `false` asks the provider for its least deliberation. A greeting or a
+   * one-word classification does not need a model to think for four seconds
+   * first, and the reader sees nothing at all while it does. Unset leaves the
+   * provider's default alone.
+   */
+  reasoning?: boolean;
 }
 
 export interface AIResult {

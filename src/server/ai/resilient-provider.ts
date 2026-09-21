@@ -16,10 +16,16 @@ import { shouldFailOver } from './model-requirements';
  *
  * Two steps, in this order:
  *
- *  1. **Retry the same provider once, after a short pause.** "High demand" and
- *     rate spikes clear in seconds, and with a single configured provider this
- *     is the only recovery there is.
- *  2. **Move to the alternative**, when one is usable.
+ *  1. **Move to the alternative**, when one is usable — another provider, or a
+ *     second model from the same one.
+ *  2. **Retry the first once, after a short pause.** With nothing to move to,
+ *     this is the only recovery there is; with something to move to, it is the
+ *     last resort.
+ *
+ * The order was the other way round, and a live failure showed why it should
+ * not be: a model under "high demand" took eight seconds to say so, was asked
+ * again, took eight more, and only then was anything else considered. Waiting
+ * on the model that has just reported it is overloaded is the slow path.
  *
  * Only provider-side failures qualify (`shouldFailOver`). A malformed request
  * or a refusal would fail identically on a second attempt, and retrying it
@@ -42,6 +48,23 @@ export function resilient(
     } catch (first) {
       if (!shouldFailOver(first)) throw first;
 
+      const fallback = await alternative();
+
+      if (fallback) {
+        logger.warn('ai.failover', {
+          from: `${primary.name}:${primary.model}`,
+          to: `${fallback.name}:${fallback.model}`,
+          reason: String(first).slice(0, 200),
+        });
+
+        try {
+          return await fallback.complete(request);
+        } catch (second) {
+          if (!shouldFailOver(second)) throw second;
+          /* Both are struggling. One more try at the first, below. */
+        }
+      }
+
       logger.warn('ai.retry', {
         provider: primary.name,
         model: primary.model,
@@ -49,23 +72,7 @@ export function resilient(
       });
 
       await sleep(delay);
-
-      try {
-        return await primary.complete(request);
-      } catch (second) {
-        if (!shouldFailOver(second)) throw second;
-
-        const fallback = await alternative();
-        if (!fallback) throw second;
-
-        logger.warn('ai.failover', {
-          from: primary.name,
-          to: fallback.name,
-          reason: String(second).slice(0, 200),
-        });
-
-        return fallback.complete(request);
-      }
+      return primary.complete(request);
     }
   }
 
@@ -77,18 +84,19 @@ export function resilient(
   async function* stream(request: AIRequest): AsyncGenerator<AIChunk> {
     const attempts: (() => Promise<AIProvider | null>)[] = [
       async () => primary,
+      alternative,
       async () => {
         await sleep(delay);
         return primary;
       },
-      alternative,
     ];
 
     let lastError: unknown;
 
     for (const next of attempts) {
       const provider = await next();
-      if (!provider) break;
+      /* No alternative configured: skip that step, the delayed retry still follows. */
+      if (!provider) continue;
 
       let started = false;
 

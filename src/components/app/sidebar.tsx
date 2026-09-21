@@ -12,6 +12,7 @@ import {
   GraduationCap,
   Library,
   LogOut,
+  MoreHorizontal,
   Plus,
   Pencil,
   Pin,
@@ -554,10 +555,11 @@ function AccountMenu({
 /**
  * One conversation in the sidebar, with a way to delete it.
  *
- * There was a `MoreHorizontal` icon here that appeared on hover and did
- * nothing. It looked like an actions menu, which is worse than no affordance at
- * all: a user reported being unable to delete old chats, and the reason was an
- * icon promising a menu that had never been built. The deletion itself — the
+ * There was once a `MoreHorizontal` icon here that appeared on hover and did
+ * nothing (the one in `RowMenu` below opens a real menu). It looked like an
+ * actions menu, which is worse than no affordance at all: a user reported being
+ * unable to delete old chats, and the reason was an icon promising a menu that
+ * had never been built. The deletion itself — the
  * service, the route, the soft delete — had existed since conversations were
  * first persisted.
  *
@@ -682,7 +684,7 @@ function ConversationRow({
         href={{ pathname: '/chat', query: { c: conversation.id } }}
         onClick={onNavigate}
         className={cn(
-          'flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm',
+          'flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1.5 ps-2 pe-8 text-sm',
           isOpen ? 'bg-subtle text-ink' : 'text-ink-soft hover:bg-subtle hover:text-ink',
         )}
         aria-current={isOpen ? 'page' : undefined}
@@ -716,38 +718,149 @@ function ConversationRow({
           </button>
         </span>
       ) : (
-        <span className="absolute end-1 flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <button
-            type="button"
-            onClick={() => void togglePin()}
-            aria-label={conversation.pinned ? t('unpinConversation') : t('pinConversation')}
-            className="rounded p-1 text-muted hover:bg-subtle hover:text-ink"
-          >
-            {conversation.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
-          </button>
-          <button
-            type="button"
-            onClick={() => setRenaming(true)}
-            aria-label={t('renameConversation')}
-            className="rounded p-1 text-muted hover:bg-subtle hover:text-ink"
-          >
-            <Pencil className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirming(true)}
-            aria-label={t('deleteConversation')}
-          /*
-           * Hidden until hover or focus, so the list stays readable — but
-           * reachable by keyboard, which `focus-visible` is for.
-           */
-            className="rounded p-1 text-muted hover:bg-subtle hover:text-danger"
-          >
-            <Trash2 className="size-3.5" />
-          </button>
-        </span>
+        <RowMenu
+          pinned={Boolean(conversation.pinned)}
+          onPin={() => void togglePin()}
+          onRename={() => setRenaming(true)}
+          onDelete={() => setConfirming(true)}
+        />
       )}
     </div>
+  );
+}
+
+/**
+ * The actions for one conversation, behind a single "more" button.
+ *
+ * They were three icons that appeared on hover, and a phone has no hover: on a
+ * touch screen a conversation could not be pinned, renamed or deleted at all.
+ * One button that is always there on touch, and appears on hover or focus with
+ * a mouse, reaches the same three actions everywhere — with their names written
+ * out, which three 14-pixel icons never managed.
+ *
+ * The menu is positioned against the viewport rather than the row. The list
+ * scrolls inside the sidebar, and anything positioned inside a scrolling box is
+ * clipped by it: the menu for the last conversation would open into nothing.
+ */
+function RowMenu({
+  pinned,
+  onPin,
+  onRename,
+  onDelete,
+}: {
+  pinned: boolean;
+  onPin: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const t = useTranslations('sidebar');
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState<{ top: number; left: number } | null>(null);
+
+  const MENU_WIDTH = 176;
+  const MENU_HEIGHT = 124;
+
+  function toggle() {
+    if (place) {
+      setPlace(null);
+      return;
+    }
+
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const rtl = document.documentElement.dir === 'rtl';
+    const left = rtl ? rect.left : rect.right - MENU_WIDTH;
+    /* Upwards when there is no room below — the last rows of a long list. */
+    const below = rect.bottom + 4 + MENU_HEIGHT <= window.innerHeight;
+
+    setPlace({
+      top: below ? rect.bottom + 4 : rect.top - 4 - MENU_HEIGHT,
+      left: Math.max(8, Math.min(left, window.innerWidth - MENU_WIDTH - 8)),
+    });
+  }
+
+  useEffect(() => {
+    if (!place) return;
+
+    const close = () => setPlace(null);
+
+    function onPointerDown(event: MouseEvent) {
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target) || buttonRef.current?.contains(target)) return;
+      close();
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') close();
+    }
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    /* Fixed to the viewport, so it would be left behind by a scrolling list. */
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [place]);
+
+  const items = [
+    { key: 'pin', label: pinned ? t('unpinConversation') : t('pinConversation'), icon: pinned ? PinOff : Pin, run: onPin },
+    { key: 'rename', label: t('renameConversation'), icon: Pencil, run: onRename },
+    { key: 'delete', label: t('deleteConversation'), icon: Trash2, run: onDelete, danger: true },
+  ];
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={place !== null}
+        aria-label={t('conversationOptions')}
+        className={cn(
+          'absolute end-1 rounded-md p-1 text-muted transition-opacity hover:bg-surface hover:text-ink',
+          /* Always there without a mouse; otherwise on hover, focus, or while open. */
+          'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100',
+          place && 'opacity-100',
+        )}
+      >
+        <MoreHorizontal className="size-4" aria-hidden />
+      </button>
+
+      {place && (
+        <div
+          ref={menuRef}
+          role="menu"
+          style={{ top: place.top, left: place.left, width: MENU_WIDTH }}
+          className="fixed z-50 flex flex-col rounded-xl border border-line bg-surface p-1 shadow-lg"
+        >
+          {items.map(({ key, label, icon: Icon, run, danger }) => (
+            <button
+              key={key}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setPlace(null);
+                run();
+              }}
+              className={cn(
+                'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-start text-sm hover:bg-subtle',
+                danger ? 'text-danger' : 'text-ink-soft hover:text-ink',
+              )}
+            >
+              <Icon className="size-4 shrink-0" aria-hidden />
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

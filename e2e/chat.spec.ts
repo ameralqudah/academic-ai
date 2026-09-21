@@ -180,7 +180,9 @@ test.describe('the sidebar', () => {
     const sidebar = page.locator('aside');
     const row = sidebar.getByRole('link', { name: /confidence interval/i });
     await row.hover();
-    await sidebar.getByRole('button', { name: 'Pin', exact: true }).click();
+    /* The actions sit behind one button, so that they exist on a touch screen too. */
+    await sidebar.getByRole('button', { name: 'Conversation options' }).click();
+    await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
 
     /* Moved, not copied: it is under Pinned and no longer under Today. */
     await expect(sidebar.getByRole('heading', { name: 'Pinned' })).toBeVisible();
@@ -191,7 +193,8 @@ test.describe('the sidebar', () => {
     await expect(sidebar.getByRole('heading', { name: 'Pinned' })).toBeVisible();
 
     await sidebar.getByRole('link', { name: /confidence interval/i }).hover();
-    await sidebar.getByRole('button', { name: 'Unpin', exact: true }).click();
+    await sidebar.getByRole('button', { name: 'Conversation options' }).click();
+    await page.getByRole('menuitem', { name: 'Unpin', exact: true }).click();
     await expect(sidebar.getByRole('heading', { name: 'Pinned' })).toHaveCount(0);
     await expect(sidebar.getByRole('heading', { name: 'Today' })).toBeVisible();
   });

@@ -1382,6 +1382,7 @@
     "confirmDelete": "Confirm delete",
     "cancelDelete": "Cancel",
     "renameConversation": "Rename",
+    "conversationOptions": "Conversation options",
     "pinConversation": "Pin",
     "unpinConversation": "Unpin",
     "more": "More",

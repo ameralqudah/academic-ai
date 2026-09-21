@@ -26,6 +26,19 @@ test.describe('locale negotiation', () => {
       // The call to action appears in the hero and again at the foot of the page.
       await expect(page.getByRole('link', { name: 'ابدأ البحث' }).first()).toBeVisible();
     });
+
+    test('gets Arabic back on the bare domain once they have chosen it', async ({ page }) => {
+      /*
+       * The other half of the rule: ignoring the browser's guess must not mean
+       * ignoring the person. Opening an Arabic page is a choice, the cookie
+       * records it, and the unprefixed path honours it from then on.
+       */
+      await page.goto('/ar');
+      await expect(page).toHaveURL(/\/ar$/);
+
+      await page.goto('/');
+      await expect(page).toHaveURL(/\/ar$/);
+    });
   });
 
   test('an English-speaking visitor lands on the English site', async ({ page }) => {

@@ -4112,6 +4112,23 @@ console.log('\na recommendation is only acted on when it can be');
   check('and a recommendation naming nothing is dropped', isActionable({ capability: ' ', input: { topic: 'x' } }), false);
 }
 
+console.log('\na step finds its instruction under whatever name the planner used');
+
+{
+  const { instructionFrom } = await import('../src/server/tasks/step-instruction');
+
+  check('the name the handler expects', instructionFrom({ question: 'Why?' }, ['question']), 'Why?');
+  check(
+    'the name the planner actually used, which stopped a live task',
+    instructionFrom({ prompt: 'صياغة عناوين بحوث أكاديمية' }, ['question', 'topic']),
+    'صياغة عناوين بحوث أكاديمية',
+  );
+  check('the expected name wins over a synonym', instructionFrom({ prompt: 'b', question: 'a' }, ['question']), 'a');
+  check('a lone text under an unforeseen name is still the instruction', instructionFrom({ brief: 'do this', limit: 5 }), 'do this');
+  check('but two unknown texts are not guessed between', instructionFrom({ a: 'one', b: 'two' }), '');
+  check('and blank is nothing', instructionFrom({ question: '   ' }, ['question']), '');
+}
+
 console.log('\nspeed of the first word');
 
 {

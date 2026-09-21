@@ -109,6 +109,12 @@ Given a request, decide which steps are needed and how they depend on each other
 Capabilities:
 ${capabilities}
 
+Input fields. Use these names, so the step can find what you gave it:
+   - general.answer: {"question": "<the full instruction, self-contained>"}
+   - academic.search, web.search: {"query": "<search terms>"}
+   - deep.research: {"question": "<what to find out>"}
+   - literature.review, document.write: {"topic": "<the subject>"}
+
 Rules:
 
 1. Plan only what the request asks for. A question needs one step; a thesis needs many. Do not pad a simple request to look thorough, and do not compress a complex one to look efficient.

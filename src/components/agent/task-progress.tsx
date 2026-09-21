@@ -3,6 +3,7 @@
 import {
   AlertTriangle,
   Check,
+  Copy,
   ChevronRight,
   CircleDashed,
   Download,
@@ -16,6 +17,8 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState } from 'react';
 
 import { useArtifactPanel } from '@/components/agent/artifact-panel';
+import { deliverableText, findingKey } from '@/components/agent/task-result';
+import { Markdown } from '@/components/chat/markdown';
 import { cn } from '@/lib/cn';
 
 /**
@@ -65,12 +68,39 @@ export interface TaskView {
   context: Record<string, unknown>;
 }
 
+/**
+ * The panel, and under it what the task wrote.
+ *
+ * Two components so the text sits in the thread like any other answer rather
+ * than inside the panel's border: the panel is the record of how the work was
+ * done, and the text is the work.
+ */
 export function TaskProgress({
   taskId,
   onFinished,
 }: {
   taskId: string;
   onFinished?: (task: TaskView, steps: TaskStepView[]) => void;
+}) {
+  const [written, setWritten] = useState<string | null>(null);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <TaskPanel taskId={taskId} onFinished={onFinished} onWritten={setWritten} />
+      {written && <WrittenResult text={written} />}
+    </div>
+  );
+}
+
+function TaskPanel({
+  taskId,
+  onFinished,
+  onWritten,
+}: {
+  taskId: string;
+  onFinished?: (task: TaskView, steps: TaskStepView[]) => void;
+  /** Told what the finished task wrote — read from the steps, so a reload finds it again. */
+  onWritten: (text: string | null) => void;
 }) {
   const t = useTranslations('task');
 
@@ -256,6 +286,12 @@ export function TaskProgress({
       setSending(false);
     }
   }
+
+  const written = task?.status === 'COMPLETED' ? deliverableText(steps) : null;
+
+  useEffect(() => {
+    onWritten(written);
+  }, [written, onWritten]);
 
   async function cancel() {
     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
@@ -479,12 +515,30 @@ function taskFailureDetail(task: TaskView): string | null {
  * That is the more dangerous half of the pair: a failure is visible and gets
  * investigated, while a quiet gap gets submitted.
  */
-function stepWarnings(step: TaskStepView): string[] {
-  const observation = (step.output as { observation?: { warnings?: { message?: string }[] } } | null)
-    ?.observation;
+function stepWarnings(
+  step: TaskStepView,
+  t: ReturnType<typeof useTranslations>,
+): string[] {
+  const observation = (
+    step.output as {
+      observation?: {
+        warnings?: { message?: string; metadata?: { count?: number } }[];
+      };
+    } | null
+  )?.observation;
 
   return (observation?.warnings ?? [])
-    .map((warning) => warning.message ?? '')
+    .map((warning) => {
+      const message = warning.message ?? "";
+      const key = findingKey(message);
+      if (!key) return message;
+
+      /* A code is for the replanner. The researcher gets the sentence, or nothing. */
+      const path = `finding.${key}`;
+      return t.has(path)
+        ? t(path, { count: warning.metadata?.count ?? 1 })
+        : "";
+    })
     .filter((message) => message.length > 0)
     .slice(0, 3);
 }
@@ -600,7 +654,7 @@ function StepRow({ step }: { step: TaskStepView }) {
           researcher to stop reading it.
         */}
         {step.status === 'COMPLETED' &&
-          [...stepWarnings(step), ...stepGaps(step)].map((note, index) => (
+          [...stepWarnings(step, t), ...stepGaps(step)].map((note, index) => (
             <span key={index} className="text-[11px] text-muted">
               {note}
             </span>
@@ -749,4 +803,44 @@ function fileInfo(output: Record<string, unknown> | null | undefined): {
     kind: pick('kind'),
     validationStatus: pick('validationStatus'),
   };
+}
+
+/**
+ * The text a task produced, set in the thread like any other answer.
+ *
+ * Outside the panel's border on purpose: the panel is the record of how the
+ * work was done, and this is the work. Inside the box it read as a log entry.
+ */
+function WrittenResult({ text }: { text: string }) {
+  const t = useTranslations("task");
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* A blocked clipboard leaves the text selectable, which is enough. */
+    }
+  }
+
+  return (
+    <section aria-label={t("result")} className="flex flex-col gap-2">
+      <Markdown content={text} compact reading />
+
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className="flex items-center gap-1.5 self-start rounded-lg px-2 py-1 text-xs text-muted hover:bg-subtle hover:text-ink"
+      >
+        {copied ? (
+          <Check className="size-3.5" aria-hidden />
+        ) : (
+          <Copy className="size-3.5" aria-hidden />
+        )}
+        {copied ? t("copied") : t("copy")}
+      </button>
+    </section>
+  );
 }

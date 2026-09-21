@@ -261,6 +261,115 @@ test.describe('a direct answer, as it is written', () => {
     await expect(page.getByText('I cannot produce a file here.')).toHaveCount(0);
   });
 
+  test('a finished task shows what it wrote, not the request handed back', async ({ page }) => {
+    await registerAndLogin(page, 'task-result', 'en');
+    await page.goto('/en/chat');
+
+    const request = 'Act as an academic researcher and write a complete paper on hospital supply chains';
+    const step = (ordinal: number, capability: string, label: string, legacy: object, warnings: object[] = []) => ({
+      id: `s${ordinal}`,
+      ordinal,
+      capability,
+      label,
+      status: 'COMPLETED',
+      attempts: 1,
+      errorReasonKey: null,
+      dynamic: false,
+      durationMs: 1200,
+      artifactIds: [],
+      output: { legacy, observation: { warnings } },
+    });
+
+    /*
+     * Refused outright, which is what makes EventSource give up and the panel
+     * fall back to the poll mocked below. An aborted connection is retried.
+     */
+    await page.route('**/api/tasks/finished-paper/stream', (route) => route.fulfill({ status: 404 }));
+    await page.route('**/api/tasks/finished-paper', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            task: {
+              id: 'finished-paper',
+              status: 'COMPLETED',
+              request,
+              pendingQuestion: null,
+              pauseReasonKey: null,
+              errorReasonKey: null,
+              context: {},
+            },
+            steps: [
+              step(0, 'document.write', 'Write the paper', { text: '## Abstract\n\nSupply chains decide what is on the shelf.' }),
+              step(1, 'quality.check', 'Quality check', { warnings: 1 }, [
+                { code: 'format.emptySection', message: 'format.emptySection', metadata: { count: 1 } },
+              ]),
+            ],
+          },
+        }),
+      }),
+    );
+
+    await answerWith(page, [
+      { type: 'task', task: { id: 'finished-paper', status: 'QUEUED' }, restatement: request.slice(0, 40) },
+    ]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill(request);
+    await composer.press('Enter');
+
+    await expect(page.getByRole('heading', { name: 'Abstract' })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('Supply chains decide what is on the shelf.')).toBeVisible();
+    await expect(
+      page.getByRole('region', { name: 'Result' }).getByRole('button', { name: 'Copy' }),
+    ).toBeVisible();
+
+    /* The code is for the replanner; the researcher reads a sentence. */
+    await expect(page.getByText('format.emptySection')).toHaveCount(0);
+    await expect(page.getByText('One heading has no text under it.')).toBeVisible();
+
+    /* Their own words appear once — in their message — not again under the panel. */
+    await expect(page.getByText(request.slice(0, 40), { exact: true })).toHaveCount(0);
+  });
+
+  test('an abandoned question can be dismissed from the top of the chat', async ({ page }) => {
+    await registerAndLogin(page, 'dismiss-task', 'en');
+
+    let cancelled = false;
+    await page.route('**/api/tasks/active', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            tasks: [
+              {
+                id: 'abandoned',
+                status: 'WAITING_FOR_INPUT',
+                request: 'Suggest research titles',
+                conversationId: 'another-conversation',
+                pendingQuestion: 'Which field?',
+                progress: { total: 2, completed: 0, current: null },
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    await page.route('**/api/tasks/abandoned', async (route) => {
+      cancelled = route.request().method() === 'DELETE';
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: { cancelled: true } }) });
+    });
+
+    await page.goto('/en/chat');
+    await expect(page.getByText('Suggest research titles')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Dismiss this task' }).click();
+    await expect(page.getByText('Suggest research titles')).toHaveCount(0);
+    expect(cancelled).toBe(true);
+  });
+
   test('a failure after the first byte is still reported', async ({ page }) => {
     await registerAndLogin(page, 'stream-error', 'en');
     await page.goto('/en/chat');

@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 import { LoginForm } from '@/components/auth/login-form';
 import { getEnv } from '@/config/env';
 import { getCurrentUser } from '@/server/auth/guards';
+import { SIGNED_IN_HOME } from '@/config/home';
 
 export async function generateMetadata({
   params,
@@ -23,7 +24,7 @@ export default async function LoginPage({
 }) {
   const { locale } = await params;
   const user = await getCurrentUser();
-  if (user) redirect(`/${locale}/dashboard`);
+  if (user) redirect(`/${locale}${SIGNED_IN_HOME}`);
 
   const env = getEnv();
   return <LoginForm googleEnabled={Boolean(env.AUTH_GOOGLE_ID && env.AUTH_GOOGLE_SECRET)} />;

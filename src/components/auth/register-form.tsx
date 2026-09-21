@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Field, TextInput } from '@/components/ui/field';
 import { Link, useRouter } from '@/i18n/navigation';
 import type { Locale } from '@/i18n/routing';
+import { SIGNED_IN_HOME } from '@/config/home';
 
 type FieldErrors = Partial<Record<'name' | 'email' | 'password' | 'confirmPassword', string>>;
 
@@ -71,7 +72,7 @@ export function RegisterForm({ googleEnabled }: { googleEnabled: boolean }) {
     });
 
     router.refresh();
-    router.push('/dashboard');
+    router.push(SIGNED_IN_HOME);
   }
 
   return (
@@ -170,7 +171,7 @@ export function RegisterForm({ googleEnabled }: { googleEnabled: boolean }) {
             type="button"
             variant="outline"
             className="w-full"
-            onClick={() => signIn('google', { callbackUrl: `/${locale}/dashboard` })}
+            onClick={() => signIn('google', { callbackUrl: `/${locale}${SIGNED_IN_HOME}` })}
           >
             {t('google')}
           </Button>

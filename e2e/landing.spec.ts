@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { registerAndLogin } from './helpers';
+
 test.describe('locale negotiation', () => {
   test.describe('an Arabic-speaking visitor', () => {
     test.use({ locale: 'ar-JO' });
@@ -49,6 +51,17 @@ test.describe('locale negotiation', () => {
 });
 
 test.describe('landing page', () => {
+  test('someone already signed in skips the pitch and opens the chat', async ({ page }) => {
+    await registerAndLogin(page, 'front-door');
+
+    await page.goto('/');
+    await expect(page).toHaveURL(/\/en\/chat$/);
+
+    /* Only the front door moves: the public pages stay open to them. */
+    await page.goto('/en/pricing');
+    await expect(page).toHaveURL(/\/en\/pricing$/);
+  });
+
   test('the Arabic page is reachable directly and reads right-to-left', async ({ page }) => {
     await page.goto('/ar');
     await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');

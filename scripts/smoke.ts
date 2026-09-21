@@ -1768,13 +1768,19 @@ assertTrue(
   sidebarSource2.includes("method: 'DELETE'") && sidebarSource2.includes('/api/conversations/'),
 );
 /*
- * Checked as an import rather than as any mention: the comment above the fix
- * names the icon, which is the point of the comment. A guard that cannot tell
- * an import from an explanation would force the explanation out.
+ * The icon is back, and the guard changed with it rather than being deleted.
+ *
+ * What was wrong was never the icon: it was an icon that promised a menu and
+ * opened nothing. The three hover icons that replaced it could not be reached
+ * on a touch screen, so the actions now sit behind this one button — and the
+ * thing worth guarding is that it really is a menu, holding all three.
  */
 assertTrue(
-  'the decorative icon that promised a menu is no longer imported',
-  !/^\s*MoreHorizontal,/m.test(sidebarSource2),
+  'the "more" icon opens a real menu rather than decorating the row',
+  !/^\s*MoreHorizontal,/m.test(sidebarSource2) ||
+    (sidebarSource2.includes('aria-haspopup="menu"') &&
+      sidebarSource2.includes('role="menuitem"') &&
+      ['onPin', 'onRename', 'onDelete'].every((action) => sidebarSource2.includes(`run: ${action}`))),
 );
 
 /*

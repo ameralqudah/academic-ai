@@ -37,9 +37,14 @@ interface Props {
   onChange: (projectId: string | null) => void;
   locale: string;
   disabled?: boolean;
+  /**
+   * Inside the composer: no border, and the list opens upwards, because the
+   * composer sits at the foot of the screen and a list below it has nowhere to go.
+   */
+  inline?: boolean;
 }
 
-export function ProjectPicker({ projects, value, onChange, locale, disabled }: Props) {
+export function ProjectPicker({ projects, value, onChange, locale, disabled, inline }: Props) {
   const t = useTranslations('agent');
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -74,12 +79,17 @@ export function ProjectPicker({ projects, value, onChange, locale, disabled }: P
         aria-haspopup="listbox"
         aria-expanded={open}
         className={cn(
-          'flex max-w-full items-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5',
-          'text-sm text-ink hover:border-accent disabled:opacity-60',
+          'flex max-w-full items-center gap-2 rounded-lg disabled:opacity-60',
+          inline
+            ? 'max-w-40 px-2 py-1.5 text-xs text-muted hover:bg-subtle hover:text-ink sm:max-w-56'
+            : 'border border-line bg-surface px-3 py-1.5 text-sm text-ink hover:border-accent',
         )}
       >
         <FolderOpen className="size-3.5 shrink-0 text-muted" />
-        <span className="truncate">{selected ? selected.title : t('noProject')}</span>
+        {/* On a phone the composer row has room for the icon, not the name. */}
+        <span className={cn('truncate', inline && 'sr-only sm:not-sr-only')}>
+          {selected ? selected.title : t('noProject')}
+        </span>
         <ChevronDown className="size-3.5 shrink-0 text-muted" />
       </button>
 
@@ -87,7 +97,8 @@ export function ProjectPicker({ projects, value, onChange, locale, disabled }: P
         <div
           role="listbox"
           className={cn(
-            'absolute top-full z-20 mt-1 max-h-80 w-72 overflow-y-auto rounded-lg',
+            'absolute z-20 max-h-80 w-72 overflow-y-auto rounded-lg',
+            inline ? 'bottom-full mb-1' : 'top-full mt-1',
             'border border-line bg-surface p-1 shadow-lg',
             'start-0',
           )}

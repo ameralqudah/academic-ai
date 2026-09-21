@@ -1308,7 +1308,14 @@
     "cancel": "Cancel",
     "webSearchPrompt": "Search the web for ",
     "deepResearchPrompt": "Do deep research on ",
-    "needsSetup": "Needs setup"
+    "needsSetup": "Needs setup",
+    "greeting": {
+      "morning": "Good morning",
+      "afternoon": "Good afternoon",
+      "evening": "Good evening",
+      "withName": "{greeting}, {name}"
+    },
+    "otherModes": "More modes"
   },
   "knowledge": {
     "coverage": {
@@ -1373,7 +1380,11 @@
     "deleteConversation": "Delete conversation",
     "confirmDelete": "Confirm delete",
     "cancelDelete": "Cancel",
-    "renameConversation": "Rename"
+    "renameConversation": "Rename",
+    "more": "More",
+    "less": "Less",
+    "chats": "Chats",
+    "accountMenu": "Account menu"
   },
   "chat": {
     "copy": "Copy",

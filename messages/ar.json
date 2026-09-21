@@ -1308,7 +1308,14 @@
     "cancel": "إلغاء",
     "webSearchPrompt": "ابحث في الويب عن ",
     "deepResearchPrompt": "أجرِ بحثًا معمّقًا عن ",
-    "needsSetup": "يحتاج إعدادًا"
+    "needsSetup": "يحتاج إعدادًا",
+    "greeting": {
+      "morning": "صباح الخير",
+      "afternoon": "مساء الخير",
+      "evening": "مساء الخير",
+      "withName": "{greeting}، {name}"
+    },
+    "otherModes": "أوضاع أخرى"
   },
   "knowledge": {
     "coverage": {
@@ -1373,7 +1380,11 @@
     "deleteConversation": "حذف المحادثة",
     "confirmDelete": "تأكيد الحذف",
     "cancelDelete": "إلغاء",
-    "renameConversation": "إعادة تسمية"
+    "renameConversation": "إعادة تسمية",
+    "more": "المزيد",
+    "less": "أقل",
+    "chats": "المحادثات",
+    "accountMenu": "قائمة الحساب"
   },
   "chat": {
     "copy": "نسخ",

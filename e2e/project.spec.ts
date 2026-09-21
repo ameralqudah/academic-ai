@@ -85,7 +85,9 @@ test.describe('research projects', () => {
 
     const otherPage = await context.newPage();
     await otherPage.goto('/en/dashboard');
-    await otherPage.getByRole('button', { name: 'Log out' }).click();
+    /* Sign out lives in the account menu at the foot of the sidebar. */
+    await otherPage.getByRole('button', { name: 'Account menu' }).click();
+    await otherPage.getByRole('menuitem', { name: 'Log out' }).click();
     await otherPage.waitForURL(/\/en$/);
 
     await registerAndLogin(otherPage, 'ownerB');

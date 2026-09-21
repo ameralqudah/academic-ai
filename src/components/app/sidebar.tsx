@@ -4,8 +4,10 @@ import {
   BarChart3,
   BookOpen,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronsUpDown,
   FolderKanban,
   GraduationCap,
   Library,
@@ -24,7 +26,7 @@ import {
 import { signOut } from 'next-auth/react';
 import { useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import { useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { LocaleSwitcher } from '@/components/locale-switcher';
 import { ThemeToggle } from '@/components/theme-toggle';
@@ -61,53 +63,45 @@ interface NavItem {
   prompt?: string;
 }
 
-interface NavSection {
-  key: string;
-  items: NavItem[];
-}
-
-const SECTIONS: NavSection[] = [
-  {
-    key: 'workspace',
-    items: [
-      { href: '/projects', key: 'projects', icon: FolderKanban },
-      /*
-       * Points at the files page, which is what "Library" means to a
-       * researcher. It pointed at the analysis tool, which inspects a single
-       * file — a different question from "what do I have".
-       */
-      { href: '/files', key: 'library', icon: Library },
-      { href: '/analysis', key: 'dataAnalysis', icon: BarChart3 },
-    ],
-  },
-  {
-    key: 'research',
-    items: [
-      /*
-       * These two carry a prompt rather than pointing at a page of their own.
-       * The agent already searches Crossref and OpenAlex; a dedicated page
-       * would be a second implementation of the same capability, drifting from
-       * the first the moment either changed.
-       */
-      { href: '/chat', key: 'academicSearch', icon: GraduationCap, prompt: 'academicSearchPrompt' },
-      { href: '/chat', key: 'literatureReview', icon: BookOpen, prompt: 'literatureReviewPrompt' },
-      /*
-       * Built. Whether they are reachable depends on a search provider key, and
-       * that is decided by the server rather than hard-coded here — a `soon`
-       * flag left in place after the feature shipped is the failure this
-       * replaces.
-       */
-      { href: '/chat', key: 'webSearch', icon: Search, prompt: 'webSearchPrompt' },
-      { href: '/chat', key: 'deepResearch', icon: Telescope, prompt: 'deepResearchPrompt' },
-    ],
-  },
+/*
+ * One flat list, with the places first and the shortcuts behind "More".
+ *
+ * The two headed sections put seven rows and two labels above the
+ * conversations, which is most of a laptop screen before the first chat. The
+ * places a researcher returns to stay in view; the four entries that only seed
+ * the composer are one click further away, because the composer itself is
+ * already on screen.
+ */
+const PRIMARY: NavItem[] = [
+  { href: '/projects', key: 'projects', icon: FolderKanban },
+  /*
+   * Points at the files page, which is what "Library" means to a researcher.
+   * It pointed at the analysis tool, which inspects a single file — a
+   * different question from "what do I have".
+   */
+  { href: '/files', key: 'library', icon: Library },
+  { href: '/analysis', key: 'dataAnalysis', icon: BarChart3 },
+  /*
+   * This and the three under "More" carry a prompt rather than pointing at a
+   * page of their own. The agent already searches Crossref and OpenAlex; a
+   * dedicated page would be a second implementation of the same capability,
+   * drifting from the first the moment either changed.
+   */
+  { href: '/chat', key: 'academicSearch', icon: GraduationCap, prompt: 'academicSearchPrompt' },
 ];
 
-/**
- * Billing and settings sit in the account block at the foot of the sidebar, as
- * icons beside the user's name. As a full section they took three rows of the
- * scrolling area, which is space the conversation list needs.
- */
+const MORE: NavItem[] = [
+  { href: '/chat', key: 'literatureReview', icon: BookOpen, prompt: 'literatureReviewPrompt' },
+  /*
+   * Built. Whether they are reachable depends on a search provider key, and
+   * that is decided by the server rather than hard-coded here — a `soon` flag
+   * left in place after the feature shipped is the failure this replaces.
+   */
+  { href: '/chat', key: 'webSearch', icon: Search, prompt: 'webSearchPrompt' },
+  { href: '/chat', key: 'deepResearch', icon: Telescope, prompt: 'deepResearchPrompt' },
+];
+
+/** Billing and settings live in the account menu at the foot of the sidebar. */
 const ACCOUNT_LINKS: { href: string; key: string; icon: LucideIcon }[] = [
   { href: '/billing', key: 'billing', icon: Wallet },
   { href: '/settings', key: 'settings', icon: Settings },
@@ -148,12 +142,15 @@ export function Sidebar({
   conversations,
   userName,
   userEmail,
+  planName,
   isAdmin,
   onNavigate,
 }: {
   conversations: ConversationSummary[];
   userName: string;
   userEmail: string;
+  /** Shown beside the name, so the plan is visible without opening billing. */
+  planName?: string;
   isAdmin: boolean;
   /** Closes the mobile drawer after a tap. Unused on desktop. */
   onNavigate?: () => void;
@@ -189,6 +186,9 @@ export function Sidebar({
   }
 
   const [query, setQuery] = useState('');
+  /* The search box stays out of the way until it is asked for. */
+  const [searching, setSearching] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   /*
    * False on the server and during hydration, true afterwards.
@@ -248,7 +248,7 @@ export function Sidebar({
          */
         'flex h-dvh flex-col gap-4 overflow-hidden border-e border-line bg-surface-2',
         'transition-[width] duration-200',
-        collapsed ? 'w-16 px-2 py-4' : 'w-64 px-3 py-4',
+        collapsed ? 'w-16 px-2 py-4' : 'w-72 px-3 py-4',
       )}
     >
       {/* Brand and the collapse control */}
@@ -257,7 +257,7 @@ export function Sidebar({
           <Link
             href="/chat"
             onClick={onNavigate}
-            className="flex items-center gap-2 px-1 text-sm font-semibold text-ink"
+            className="flex items-center gap-2.5 px-1 text-base font-semibold text-ink"
           >
             <span
               aria-hidden
@@ -283,7 +283,7 @@ export function Sidebar({
         href="/chat"
         onClick={onNavigate}
         className={cn(
-          'flex items-center gap-2.5 rounded-xl px-2 py-2 text-sm font-medium text-primary',
+          'flex items-center gap-3 rounded-xl px-2 py-2 text-[15px] font-medium text-primary',
           'hover:bg-primary-soft',
           collapsed && 'justify-center px-0',
         )}
@@ -296,27 +296,35 @@ export function Sidebar({
       </Link>
 
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
-        {SECTIONS.map((section) => (
-          <section key={section.key} className="flex flex-col gap-1">
-            {!collapsed && (
-              <h2 className="px-2 text-xs font-medium text-muted">{t(`section.${section.key}`)}</h2>
-            )}
-            {section.items.map((item) => (
-              <NavLink
-                key={`${section.key}-${item.key}`}
-                item={item}
-                collapsed={collapsed}
-                /* An entry that seeds the composer is a shortcut into the chat, not a
-                   place: marking it active lit up all four whenever the chat was open. */
-                active={item.href !== '#' && !item.prompt && isActive(item.href)}
-                label={t(`item.${item.key}`)}
-                soonLabel={t('soon')}
-                onNavigate={onNavigate}
+        <nav className="flex flex-col gap-0.5">
+          {[...PRIMARY, ...(moreOpen || collapsed ? MORE : [])].map((item) => (
+            <NavLink
+              key={item.key}
+              item={item}
+              collapsed={collapsed}
+              /* An entry that seeds the composer is a shortcut into the chat, not a
+                 place: marking it active lit up all four whenever the chat was open. */
+              active={item.href !== '#' && !item.prompt && isActive(item.href)}
+              label={t(`item.${item.key}`)}
+              soonLabel={t('soon')}
+              onNavigate={onNavigate}
+            />
+          ))}
+          {!collapsed && (
+            <button
+              type="button"
+              onClick={() => setMoreOpen((open) => !open)}
+              aria-expanded={moreOpen}
+              className="flex items-center gap-3 rounded-lg px-2 py-2 text-[15px] text-muted hover:bg-subtle hover:text-ink"
+            >
+              <ChevronDown
+                className={cn('size-[18px] shrink-0 transition-transform', moreOpen && 'rotate-180')}
+                aria-hidden
               />
-            ))}
-          </section>
-        ))}
-
+              {moreOpen ? t('less') : t('more')}
+            </button>
+          )}
+        </nav>
 
         {/*
           Conversations, under the navigation and grouped by when they were last
@@ -325,11 +333,30 @@ export function Sidebar({
         */}
         {!collapsed && conversations.length > 0 && (
           <section className="flex flex-col gap-1">
-            {conversations.length > 5 && (
+            <div className="flex items-center justify-between px-2">
+              <h2 className="text-xs font-medium text-muted">{t('chats')}</h2>
+              {conversations.length > 5 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearching((open) => !open);
+                    setQuery('');
+                  }}
+                  aria-label={t('searchChats')}
+                  aria-expanded={searching}
+                  className="rounded-md p-1 text-muted hover:bg-subtle hover:text-ink"
+                >
+                  {searching ? <X className="size-4" aria-hidden /> : <Search className="size-4" aria-hidden />}
+                </button>
+              )}
+            </div>
+
+            {searching && (
               <label className="mb-1 flex items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-muted focus-within:border-primary">
                 <Search className="size-3.5 shrink-0" aria-hidden />
                 <input
                   type="search"
+                  autoFocus
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder={t('searchChats')}
@@ -361,65 +388,158 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Account */}
-      <div className="flex flex-col gap-2 border-t border-line pt-3">
-        {!collapsed && (
-          <>
-            <div className="flex items-center gap-2.5 px-1">
-              <span
-                aria-hidden
-                className="grid size-8 shrink-0 place-items-center rounded-full bg-accent-soft text-sm font-semibold text-accent"
-              >
-                {userName.trim().charAt(0).toUpperCase()}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm leading-tight text-ink">{userName}</p>
-                <p className="truncate text-xs text-muted">{userEmail}</p>
-              </div>
-            </div>
-            {/* Here rather than in a page footer, so they are reachable from the chat too. */}
-            <div className="flex items-center gap-2 px-1">
-              <ThemeToggle />
-              <LocaleSwitcher />
-            </div>
-          </>
-        )}
+      <AccountMenu
+        userName={userName}
+        userEmail={userEmail}
+        planName={planName}
+        collapsed={collapsed}
+        links={[
+          ...ACCOUNT_LINKS.map((link) => ({ ...link, label: t(`item.${link.key}`) })),
+          ...(isAdmin ? [{ href: '/admin', key: 'admin', icon: Shield, label: tn('admin') }] : []),
+        ]}
+        isActive={isActive}
+        onNavigate={onNavigate}
+      />
+    </div>
+  );
+}
 
-        <div className={cn('flex gap-1', collapsed ? 'flex-col items-center' : 'flex-wrap items-center')}>
-          {[
-            ...ACCOUNT_LINKS.map((link) => ({ ...link, label: t(`item.${link.key}`) })),
-            ...(isAdmin ? [{ href: '/admin', key: 'admin', icon: Shield, label: tn('admin') }] : []),
-          ].map(({ href, key, icon: Icon, label }) => (
+/**
+ * The account, as one row that opens a menu.
+ *
+ * It was five rows — name, theme and language, billing and settings, admin,
+ * sign out — permanently on screen, under a list that needed the room more.
+ * None of them is used often enough to earn that. One row says who is signed in
+ * and on which plan; the rest is a click away, which is where settings belong.
+ */
+function AccountMenu({
+  userName,
+  userEmail,
+  planName,
+  collapsed,
+  links,
+  isActive,
+  onNavigate,
+}: {
+  userName: string;
+  userEmail: string;
+  planName?: string;
+  collapsed: boolean;
+  links: { href: string; key: string; icon: LucideIcon; label: string }[];
+  isActive: (href: string) => boolean;
+  onNavigate?: () => void;
+}) {
+  const t = useTranslations('sidebar');
+  const tn = useTranslations('nav');
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  /* Close on an outside click or Escape — the two ways anyone dismisses a menu. */
+  useEffect(() => {
+    if (!open) return;
+
+    function onPointerDown(event: MouseEvent) {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false);
+    }
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative border-t border-line pt-3">
+      {open && (
+        <div
+          role="menu"
+          className={cn(
+            'z-40 flex flex-col gap-1 rounded-xl border border-line bg-surface p-1.5 shadow-lg',
+            /*
+             * Fixed when collapsed: the rail is 4rem wide and clips its
+             * overflow, so a menu positioned inside it would be cut to a sliver.
+             */
+            collapsed ? 'fixed start-2 bottom-16 w-64' : 'absolute inset-x-0 bottom-full mb-2',
+          )}
+        >
+          <p className="truncate px-2.5 pt-1.5 pb-1 text-xs text-muted">
+            <bdi>{userEmail}</bdi>
+          </p>
+
+          {/* Here rather than in a page footer, so they are reachable from the chat too. */}
+          <div className="flex items-center gap-2 px-1.5 pb-1">
+            <ThemeToggle />
+            <LocaleSwitcher />
+          </div>
+
+          <div className="border-t border-line" />
+
+          {links.map(({ href, key, icon: Icon, label }) => (
             <Link
               key={key}
               href={href}
-              onClick={onNavigate}
-              title={label}
-              aria-label={label}
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onNavigate?.();
+              }}
               aria-current={isActive(href) ? 'page' : undefined}
               className={cn(
-                'flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-muted hover:bg-subtle hover:text-ink',
+                'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink-soft hover:bg-subtle hover:text-ink',
                 isActive(href) && 'bg-subtle text-ink',
               )}
             >
               <Icon className="size-4 shrink-0" aria-hidden />
-              {!collapsed && <span className="truncate">{label}</span>}
+              <span className="truncate">{label}</span>
             </Link>
           ))}
+
+          <div className="border-t border-line" />
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => void signOut({ callbackUrl: '/' })}
+            className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink-soft hover:bg-subtle hover:text-ink"
+          >
+            <LogOut className="size-4 shrink-0" aria-hidden />
+            {tn('logout')}
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={() => void signOut({ callbackUrl: '/' })}
-          className={cn(
-            'flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted hover:bg-subtle hover:text-ink',
-            collapsed && 'justify-center px-0',
-          )}
-          title={collapsed ? tn('logout') : undefined}
+      )}
+
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('accountMenu')}
+        className={cn(
+          'flex w-full items-center gap-2.5 rounded-xl px-1.5 py-1.5 text-start hover:bg-subtle',
+          collapsed && 'justify-center px-0',
+        )}
+      >
+        <span
+          aria-hidden
+          className="grid size-8 shrink-0 place-items-center rounded-full bg-accent-soft text-sm font-semibold text-accent"
         >
-          <LogOut className="size-4 shrink-0" aria-hidden />
-          {!collapsed && tn('logout')}
-        </button>
-      </div>
+          {userName.trim().charAt(0).toUpperCase()}
+        </span>
+        {!collapsed && (
+          <>
+            <span className="min-w-0 flex-1 truncate text-[15px] text-ink">
+              {userName}
+              {planName && <span className="text-muted"> · {planName}</span>}
+            </span>
+            <ChevronsUpDown className="size-4 shrink-0 text-muted" aria-hidden />
+          </>
+        )}
+      </button>
     </div>
   );
 }
@@ -621,7 +741,7 @@ function NavLink({
   const Icon = item.icon;
 
   const shared = cn(
-    'flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm',
+    'flex items-center gap-3 rounded-lg px-2 py-2 text-[15px]',
     collapsed && 'justify-center px-0',
   );
 
@@ -636,7 +756,7 @@ function NavLink({
         className={cn(shared, 'cursor-default text-muted/60')}
         title={collapsed ? `${label} — ${soonLabel}` : undefined}
       >
-        <Icon className="size-4 shrink-0" aria-hidden />
+        <Icon className="size-[18px] shrink-0" aria-hidden />
         {!collapsed && (
           <>
             <span>{label}</span>
@@ -663,7 +783,7 @@ function NavLink({
       )}
       title={collapsed ? label : undefined}
     >
-      <Icon className="size-4 shrink-0" aria-hidden />
+      <Icon className="size-[18px] shrink-0" aria-hidden />
       {!collapsed && label}
     </Link>
   );

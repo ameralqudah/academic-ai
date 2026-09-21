@@ -9,6 +9,7 @@ import {
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -81,6 +82,11 @@ interface Props {
   modelId: string | null;
   onModelChange: (modelId: string) => void;
   showModelSelector: boolean;
+
+  /** Sits beside the attachment button — the project picker, in practice. */
+  leading?: ReactNode;
+  /** A new conversation gets a taller box: it is the only thing on the page. */
+  roomy?: boolean;
 }
 
 export function Composer({
@@ -98,6 +104,8 @@ export function Composer({
   modelId,
   onModelChange,
   showModelSelector,
+  leading,
+  roomy,
 }: Props) {
   const t = useTranslations('agent');
   const tm = useTranslations('mode');
@@ -167,6 +175,17 @@ export function Composer({
 
   const activeMode = modes.find((option) => option.key === mode);
 
+  /*
+   * Plain conversation on one side, everything else on the other.
+   *
+   * Six modes do not fit in a row on a phone, and a bare dropdown hid the fact
+   * that there is a choice at all. Two segments show the choice; the second
+   * opens the list of the specialised modes and carries the name of whichever
+   * one is active.
+   */
+  const otherModes = modes.filter((option) => option.key !== 'chat');
+  const modelName = (modelId ?? models.find((model) => model.isDefault)?.id ?? '').split(':')[1];
+
   return (
     <form
       onSubmit={onSubmit}
@@ -204,11 +223,11 @@ export function Composer({
         value={value}
         onChange={(change) => onChange(change.target.value)}
         onKeyDown={onKeyDown}
-        rows={1}
+        rows={roomy ? 2 : 1}
         placeholder={t('placeholder')}
         disabled={busy}
         className={cn(
-          'max-h-[200px] w-full resize-none bg-transparent px-2 py-1.5 text-[15px] text-ink',
+          'max-h-[200px] w-full resize-none bg-transparent px-2 py-1.5 text-base text-ink',
           'outline-none placeholder:text-muted disabled:opacity-60',
         )}
       />
@@ -228,17 +247,37 @@ export function Composer({
           )}
         </button>
 
+        {leading}
+
         {/* Mode */}
-        <div className="relative">
+        <div className="relative flex items-center rounded-xl bg-subtle p-0.5">
+          <button
+            type="button"
+            onClick={() => {
+              onModeChange('chat');
+              setModeOpen(false);
+            }}
+            disabled={busy}
+            aria-pressed={mode === 'chat'}
+            className={cn(
+              'rounded-[10px] px-2.5 py-1 text-xs whitespace-nowrap disabled:opacity-50',
+              mode === 'chat' ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink',
+            )}
+          >
+            {tm('chat')}
+          </button>
           <button
             type="button"
             onClick={() => setModeOpen((open) => !open)}
             disabled={busy}
             aria-haspopup="listbox"
             aria-expanded={modeOpen}
-            className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-muted hover:bg-subtle hover:text-ink disabled:opacity-50"
+            className={cn(
+              'flex items-center gap-1 rounded-[10px] px-2.5 py-1 text-xs whitespace-nowrap disabled:opacity-50',
+              mode !== 'chat' ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink',
+            )}
           >
-            {tm(mode)}
+            {mode !== 'chat' ? tm(mode) : t('otherModes')}
             <ChevronDown className="size-3" aria-hidden />
           </button>
 
@@ -247,7 +286,7 @@ export function Composer({
               role="listbox"
               className="absolute bottom-full start-0 z-20 mb-1 w-56 rounded-lg border border-line bg-surface p-1 shadow-lg"
             >
-              {modes.map((option) =>
+              {otherModes.map((option) =>
                 option.available ? (
                   <button
                     key={option.key}
@@ -318,6 +357,12 @@ export function Composer({
         )}
 
         <span className="ms-auto flex items-center gap-2">
+          {/* Which model will answer, even where the plan offers no choice of it. */}
+          {!(showModelSelector && models.length > 1) && modelName && (
+            <span className="hidden text-xs text-muted sm:inline" dir="ltr">
+              {modelName}
+            </span>
+          )}
           {activeMode?.requiresDataset && (
             <span className="hidden text-[11px] text-muted sm:inline">{t('needsFile')}</span>
           )}

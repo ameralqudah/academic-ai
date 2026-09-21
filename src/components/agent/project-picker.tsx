@@ -42,9 +42,11 @@ interface Props {
    * composer sits at the foot of the screen and a list below it has nowhere to go.
    */
   inline?: boolean;
+  /** With `inline`: open downwards anyway, for a composer in the middle of the page. */
+  dropDown?: boolean;
 }
 
-export function ProjectPicker({ projects, value, onChange, locale, disabled, inline }: Props) {
+export function ProjectPicker({ projects, value, onChange, locale, disabled, inline, dropDown }: Props) {
   const t = useTranslations('agent');
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -98,7 +100,7 @@ export function ProjectPicker({ projects, value, onChange, locale, disabled, inl
           role="listbox"
           className={cn(
             'absolute z-20 max-h-80 w-72 overflow-y-auto rounded-lg',
-            inline ? 'bottom-full mb-1' : 'top-full mt-1',
+            inline && !dropDown ? 'bottom-full mb-1' : 'top-full mt-1',
             'border border-line bg-surface p-1 shadow-lg',
             'start-0',
           )}

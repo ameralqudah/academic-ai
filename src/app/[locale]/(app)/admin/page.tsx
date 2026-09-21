@@ -4,7 +4,9 @@ import { getTranslations } from 'next-intl/server';
 import { StatTile } from '@/components/app/stat-tile';
 import { UsageChart } from '@/components/admin/usage-chart';
 import { Card, CardHeader } from '@/components/ui/card';
+import { Alert } from '@/components/ui/alert';
 import { overview } from '@/server/services/admin.service';
+import { probeStorage } from '@/server/storage';
 
 export default async function AdminOverviewPage({
   params,
@@ -14,7 +16,10 @@ export default async function AdminOverviewPage({
   const { locale } = await params;
   const t = await getTranslations({ locale, namespace: 'admin' });
 
-  const { stats, byProvider, daily, periodKey } = await overview();
+  const [{ stats, byProvider, daily, periodKey }, storage] = await Promise.all([
+    overview(),
+    probeStorage(),
+  ]);
   const number = new Intl.NumberFormat(locale === 'ar' ? 'ar-EG' : 'en-US');
   const money = new Intl.NumberFormat(locale === 'ar' ? 'ar-EG' : 'en-US', {
     style: 'currency',
@@ -23,6 +28,25 @@ export default async function AdminOverviewPage({
 
   return (
     <div className="flex flex-col gap-6">
+      {/*
+        Said at the top of the first page an operator opens, and only when it is
+        broken. A file store that has stopped accepting writes fails every
+        generated document at its last step, and the researcher is the one who
+        finds out — this is so the operator finds out first.
+      */}
+      {!storage.ok && (
+        <Alert tone="danger">
+          <div className="flex flex-col gap-1">
+            <span>{t('storage.down', { provider: storage.provider })}</span>
+            <span dir="ltr" className="text-xs opacity-80">
+              {[storage.stage, storage.status, storage.reason, storage.detail]
+                .filter((part) => part !== undefined && part !== '')
+                .join(' · ')}
+            </span>
+          </div>
+        </Alert>
+      )}
+
       <p className="tabular text-xs text-muted">{t('period', { period: periodKey })}</p>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

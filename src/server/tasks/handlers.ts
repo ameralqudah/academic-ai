@@ -15,6 +15,7 @@
  */
 
 import { logger } from '@/lib/logger';
+import { StorageError } from '@/server/storage/provider';
 import { search as searchAcademic } from '@/server/knowledge';
 import { checkQuality } from '@/server/quality/engine';
 import { verifyDois } from '@/server/quality/doi';
@@ -1163,6 +1164,30 @@ export function registerAllHandlers(): void {
        * `success` with no artifact is the fake-file failure the pipeline
        * exists to prevent.
        */
+      /*
+       * A storage failure is said in words. The document was written; what
+       * failed is the server's file store — and "StorageError:
+       * storage.error.writeFailed" told the researcher neither that their work
+       * was fine nor that retrying later is the right move. The store's own
+       * status is kept in the metadata and the log, for whoever runs the server.
+       */
+      if (error instanceof StorageError) {
+        logger.error('artifact.storageFailed', { reason: error.reasonKey, ...error.params });
+
+        return failed([
+          {
+            code: 'artifact.generationFailed',
+            severity: 'error',
+            message: say(
+              context,
+              'The document was written, but the file could not be saved: file storage is not responding. A server problem — try again shortly.',
+              'كُتب المستند، لكن تعذّر حفظ الملف لأن خدمة التخزين لا تستجيب. المشكلة في الخادم لا في طلبك؛ أعد المحاولة بعد قليل.',
+            ),
+            metadata: { format: kind, title, reason: error.reasonKey, ...error.params },
+          },
+        ]);
+      }
+
       return failed([
         {
           code: 'artifact.generationFailed',

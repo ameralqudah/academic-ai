@@ -1,7 +1,7 @@
 'use client';
 
 import { Loader2, RefreshCcw } from 'lucide-react';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -11,17 +11,28 @@ export function WebhookReregister() {
   const t = useTranslations('admin.billing.webhook');
   const router = useRouter();
   const [pending, setPending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const locale = useLocale();
+  /* The server's own reason when it gives one; the generic line otherwise. */
+  const [failure, setFailure] = useState<string | null>(null);
 
   async function run() {
     setPending(true);
-    setFailed(false);
+    setFailure(null);
 
     try {
       const response = await fetch('/api/admin/billing/webhook', { method: 'POST' });
-      if (!response.ok) setFailed(true);
+
+      if (!response.ok) {
+        const json = (await response.json().catch(() => null)) as {
+          error?: { message?: string; messageAr?: string };
+        } | null;
+
+        setFailure(
+          (locale === 'ar' ? json?.error?.messageAr : json?.error?.message) ?? t('reregisterFailed'),
+        );
+      }
     } catch {
-      setFailed(true);
+      setFailure(t('reregisterFailed'));
     }
 
     setPending(false);
@@ -29,7 +40,7 @@ export function WebhookReregister() {
   }
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex flex-wrap items-center gap-3">
       <Button size="sm" variant="outline" onClick={() => void run()} disabled={pending}>
         {pending ? (
           <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -38,7 +49,7 @@ export function WebhookReregister() {
         )}
         {t('reregister')}
       </Button>
-      {failed && <span className="text-xs text-danger">{t('reregisterFailed')}</span>}
+      {failure && <span className="text-xs text-danger">{failure}</span>}
     </div>
   );
 }

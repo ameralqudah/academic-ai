@@ -6,6 +6,7 @@ import { StatTile } from '@/components/app/stat-tile';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader } from '@/components/ui/card';
+import { LocalTime } from '@/components/ui/local-time';
 import { billingOverview } from '@/server/services/admin.service';
 
 export default async function AdminBillingPage({
@@ -68,15 +69,15 @@ export default async function AdminBillingPage({
             </div>
 
             <p className="text-ink-soft">
-              {data.webhook.lastReceived
-                ? t('billing.webhook.lastReceived', {
-                    type: data.webhook.lastReceived.type,
-                    when: format.dateTime(new Date(data.webhook.lastReceived.at), {
-                      dateStyle: 'medium',
-                      timeStyle: 'short',
-                    }),
-                  })
-                : t('billing.webhook.neverReceived')}
+              {data.webhook.lastReceived ? (
+                <>
+                  {t('billing.webhook.lastReceivedLabel')}{' '}
+                  <span dir="ltr">{data.webhook.lastReceived.type}</span> —{' '}
+                  <LocalTime iso={data.webhook.lastReceived.at} />
+                </>
+              ) : (
+                t('billing.webhook.neverReceived')
+              )}
             </p>
 
             {data.webhook.otherUrls.length > 0 && (
@@ -86,6 +87,10 @@ export default async function AdminBillingPage({
                   {data.webhook.otherUrls.join(' , ')}
                 </span>
               </p>
+            )}
+
+            {data.webhook.pinnedId && (
+              <Alert tone="warning">{t('billing.webhook.pinned', { id: data.webhook.pinnedId })}</Alert>
             )}
 
             {data.webhook.detail && (

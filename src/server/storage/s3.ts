@@ -27,6 +27,7 @@
 import { createHash, createHmac } from 'node:crypto';
 
 import { getEnv } from '@/config/env';
+import { logger } from '@/lib/logger';
 
 import { assertSafeKey } from './keys';
 import { StorageError, type StorageProvider, type StoredMetadata, type StoredObject } from './provider';
@@ -188,7 +189,22 @@ export class S3StorageProvider implements StorageProvider {
     });
 
     if (!response.ok) {
-      throw new StorageError('storage.error.writeFailed', { key, status: response.status });
+      /*
+       * What the store said, not only that it said no. A paused project, a
+       * revoked key and a missing bucket all arrive here as "write failed", and
+       * they are fixed in three different dashboards. The status and the first
+       * line of the body tell them apart; the body is read defensively because
+       * an error page is not always text.
+       */
+      const detail = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 200);
+
+      logger.error('storage.s3.writeFailed', { status: response.status, detail });
+
+      throw new StorageError('storage.error.writeFailed', {
+        key,
+        status: response.status,
+        ...(detail ? { detail } : {}),
+      });
     }
 
     return { key, byteSize: bytes.byteLength, contentType, updatedAt: new Date() };

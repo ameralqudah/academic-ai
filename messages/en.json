@@ -666,8 +666,13 @@
         "neverReceived": "No PayPal event has reached this server yet. The first activation does not need one, but renewals and cancellations do.",
         "otherUrls": "Other URLs registered under the same app:",
         "reregister": "Register again",
-        "reregisterFailed": "Could not register again. Check the logs."
+        "reregisterFailed": "Could not register again. Check the logs.",
+        "pinned": "The webhook id is pinned by the PAYPAL_WEBHOOK_ID environment variable ({id}), so nothing is registered automatically and “Register again” will not work. Remove the variable unless you mean to pin it.",
+        "lastReceivedLabel": "Last event received:"
       }
+    },
+    "storage": {
+      "down": "File storage ({provider}) is not accepting writes, so every generated document will fail when it is saved. Check the storage provider's dashboard: a paused project, a revoked key or a deleted bucket."
     }
   },
   "errors": {

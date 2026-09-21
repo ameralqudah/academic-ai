@@ -81,8 +81,105 @@ export function storageStatus(): { provider: 'local' | 's3'; configured: boolean
 }
 
 /** Test seam: the provider is cached for the life of the process. */
+export interface StorageProbe {
+  provider: 'local' | 's3';
+  ok: boolean;
+  /** Which step failed: configuring, writing, reading back, or nothing. */
+  stage?: 'configure' | 'write' | 'read';
+  reason?: string;
+  /** The HTTP status the store answered with, when it is an HTTP store. */
+  status?: number;
+  detail?: string;
+  checkedAt: string;
+}
+
+/**
+ * Whether a file can actually be stored and read back, right now.
+ *
+ * `storageStatus` answers "are the variables set", and they were: the store
+ * behind them had been paused by its host for inactivity, every generated
+ * document failed at the last step, and nothing anywhere said why. Writing a
+ * few bytes and reading them back is the only check that would have caught it.
+ *
+ * Cached for a minute so that opening the admin page is not a write per visit.
+ * Never throws — it reports.
+ */
+const PROBE_KEY = 'health/probe.txt';
+
+/*
+ * A store that does not answer must not hold the page that reports on it. An
+ * unreachable host has no status to return — it simply never returns — and the
+ * admin page waited on it for as long as the platform allowed.
+ */
+const PROBE_TIMEOUT_MS = 5_000;
+
+function within<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new StorageError('storage.error.timeout', { afterMs: PROBE_TIMEOUT_MS })),
+      PROBE_TIMEOUT_MS,
+    );
+
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+const PROBE_TTL_MS = 60_000;
+let lastProbe: { at: number; result: StorageProbe } | null = null;
+
+export async function probeStorage(options: { fresh?: boolean } = {}): Promise<StorageProbe> {
+  if (!options.fresh && lastProbe && Date.now() - lastProbe.at < PROBE_TTL_MS) {
+    return lastProbe.result;
+  }
+
+  const provider = getEnv().STORAGE_PROVIDER === 's3' ? 's3' : 'local';
+  const checkedAt = new Date().toISOString();
+  let stage: StorageProbe['stage'] = 'configure';
+  let result: StorageProbe;
+
+  try {
+    const store = storageProvider();
+    const stamp = `ok ${checkedAt}`;
+
+    stage = 'write';
+    await within(store.put(PROBE_KEY, new TextEncoder().encode(stamp), 'text/plain'));
+
+    stage = 'read';
+    const back = new TextDecoder().decode((await within(store.get(PROBE_KEY))).bytes);
+    if (back !== stamp) throw new StorageError('storage.error.probeMismatch');
+
+    result = { provider, ok: true, checkedAt };
+  } catch (error) {
+    const params = error instanceof StorageError ? error.params : {};
+
+    result = {
+      provider,
+      ok: false,
+      stage,
+      reason: error instanceof StorageError ? error.reasonKey : String(error).slice(0, 200),
+      ...(typeof params.status === 'number' ? { status: params.status } : {}),
+      ...(typeof params.detail === 'string' ? { detail: params.detail } : {}),
+      checkedAt,
+    };
+
+    logger.error('storage.probeFailed', { ...result });
+  }
+
+  lastProbe = { at: Date.now(), result };
+  return result;
+}
+
 export function resetStorageCache(): void {
   cached = null;
+  lastProbe = null;
 }
 
 export { assertSafeKey, datasetKey, datasetPrefix, keyBelongsTo, userPrefix } from './keys';

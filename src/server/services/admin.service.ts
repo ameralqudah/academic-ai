@@ -123,6 +123,7 @@ export interface BillingOverview {
     id?: string;
     otherUrls: string[];
     lastReceived: { at: string; type: string } | null;
+    pinnedId?: string;
     detail?: string;
   };
 }

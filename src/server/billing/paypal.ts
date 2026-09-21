@@ -752,15 +752,31 @@ export class PayPalBillingProvider implements BillingProvider {
     id?: string;
     otherUrls: string[];
     lastReceived: { at: string; type: string } | null;
+    /**
+     * Set when `PAYPAL_WEBHOOK_ID` pins the id from the environment. A pinned id
+     * is used as it is — nothing is registered and nothing is looked up — so a
+     * stale one silently points verification at a webhook that may belong to
+     * another deployment. Shown because it is otherwise invisible.
+     */
+    pinnedId?: string;
     detail?: string;
   }> {
     const expectedUrl = this.webhookUrl();
+    const pinned = (getEnv().PAYPAL_WEBHOOK_ID ?? '').trim();
+    const pinnedId = pinned ? { pinnedId: pinned } : {};
     const lastReceived = await appSettingsRepo
       .getSetting<{ at: string; type: string }>(this.receivedSettingKey())
       .catch(() => null);
 
     if (!this.isConfigured()) {
-      return { expectedUrl, registered: false, otherUrls: [], lastReceived, detail: 'not configured' };
+      return {
+        expectedUrl,
+        registered: false,
+        otherUrls: [],
+        lastReceived,
+        ...pinnedId,
+        detail: 'not configured',
+      };
     }
 
     try {
@@ -776,6 +792,7 @@ export class PayPalBillingProvider implements BillingProvider {
         id: match?.id,
         otherUrls: hooks.filter((hook) => hook.url !== expectedUrl).map((hook) => hook.url),
         lastReceived,
+        ...pinnedId,
       };
     } catch (error) {
       return {
@@ -783,6 +800,7 @@ export class PayPalBillingProvider implements BillingProvider {
         registered: false,
         otherUrls: [],
         lastReceived,
+        ...pinnedId,
         detail: error instanceof Error ? error.message.slice(0, 200) : 'unknown error',
       };
     }
@@ -790,6 +808,21 @@ export class PayPalBillingProvider implements BillingProvider {
 
   /** Forgets the remembered id and registers again with the current credentials. */
   async reregisterWebhook(): Promise<string> {
+    /*
+     * Refused while the id is pinned. Registering a new webhook would succeed,
+     * and every event would then fail verification against the pinned one — a
+     * button that reports success and leaves payments unheard. The first
+     * version of this did nothing at all in that case, silently, which is how
+     * it was found.
+     */
+    if ((getEnv().PAYPAL_WEBHOOK_ID ?? '').trim()) {
+      throw new AppError(
+        'VALIDATION',
+        'PAYPAL_WEBHOOK_ID is set in the environment and overrides registration. Remove it, redeploy, then register again.',
+        'المتغير PAYPAL_WEBHOOK_ID مضبوط في بيئة الخادم ويتجاوز التسجيل. احذفه وأعد النشر، ثم أعد التسجيل.',
+      );
+    }
+
     /* An empty object rather than null: the column is not nullable. */
     await appSettingsRepo.setSetting(this.webhookSettingKey(), {});
     return this.ensureWebhookId();

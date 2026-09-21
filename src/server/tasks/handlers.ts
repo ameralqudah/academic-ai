@@ -56,6 +56,7 @@ import { estimateTokens } from '@/server/context/envelope';
 import { decideOutputLanguage, languageInstruction } from '@/server/context/language';
 import { generateLongForm, incompleteNotice } from '@/server/ai/long-form';
 import { broaden, topicOf } from './query';
+import { instructionFrom } from './step-instruction';
 
 /**
  * The producer identity every output carries.
@@ -70,6 +71,21 @@ function producer(context: StepContext, capability: string): ProducerContext {
     capability,
     projectId: context.projectId,
   };
+}
+
+/**
+ * The one piece of text a step works from.
+ *
+ * The names the handler expects first, then the task context as before, then
+ * whatever else the planner chose to call it — see `instructionFrom`.
+ */
+function instructionOf(context: StepContext, ...preferred: string[]): string {
+  for (const name of preferred) {
+    const found = textInput(context, name);
+    if (found) return found;
+  }
+
+  return instructionFrom(context.input, preferred);
 }
 
 /** Reads a string from a step's input or the task context, in that order. */
@@ -182,7 +198,13 @@ export function registerAllHandlers(): void {
   /* --------------------------- general answer --------------------------- */
 
   registerHandler('general.answer', async (context): Promise<Observation> => {
-    const question = textInput(context, 'question', textInput(context, 'topic'));
+    /*
+     * Falls back to the request itself. A step with no instruction of its own
+     * is still part of a task somebody asked for, and answering what they asked
+     * is always closer to right than stopping to ask them what they meant.
+     */
+    const question =
+      instructionOf(context, 'question', 'topic') || String(context.context.request ?? '').trim();
 
     if (!question) {
       return needsInput(say(context, 'What would you like me to answer?', 'ما السؤال الذي تريد أن أجيب عنه؟'), 'question');
@@ -206,7 +228,7 @@ export function registerAllHandlers(): void {
   /* ------------------------------ web search ---------------------------- */
 
   registerHandler('web.search', async (context): Promise<Observation> => {
-    const raw = textInput(context, 'query', textInput(context, 'topic'));
+    const raw = instructionOf(context, 'query', 'topic');
 
     if (!raw) return needsInput(say(context, 'What should I search for?', 'عمّ تريد أن أبحث؟'), 'query');
 
@@ -253,7 +275,7 @@ export function registerAllHandlers(): void {
   /* --------------------------- academic search -------------------------- */
 
   registerHandler('academic.search', async (context): Promise<Observation> => {
-    const query = textInput(context, 'query', textInput(context, 'topic'));
+    const query = instructionOf(context, 'query', 'topic');
 
     if (!query) return needsInput(say(context, 'What topic should I search for?', 'ما الموضوع الذي تريد أن أبحث عنه؟'), 'query');
 
@@ -380,7 +402,7 @@ export function registerAllHandlers(): void {
   /* --------------------------- deep research ---------------------------- */
 
   registerHandler('deep.research', async (context): Promise<Observation> => {
-    const question = textInput(context, 'question', textInput(context, 'topic'));
+    const question = instructionOf(context, 'question', 'topic');
 
     if (!question) return needsInput(say(context, 'What should I research?', 'ما الذي تريد أن أبحث فيه؟'), 'question');
 

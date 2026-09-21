@@ -1,0 +1,1 @@
+ALTER TABLE "ai_conversations" ADD COLUMN "pinned_at" timestamp with time zone;

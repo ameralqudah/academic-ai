@@ -339,6 +339,18 @@ export async function renameConversation(
   return renamed;
 }
 
+export async function pinConversation(
+  id: string,
+  userId: string,
+  pinned: boolean,
+): Promise<AIConversation> {
+  const updated = await chatRepo.setPinned(id, userId, pinned);
+  if (!updated) {
+    throw new AppError('NOT_FOUND', 'That conversation was not found.', 'لم يُعثر على المحادثة.');
+  }
+  return updated;
+}
+
 export async function deleteConversation(
   id: string,
   userId: string,

@@ -6,6 +6,7 @@ import {
   prepareRegeneration,
   editMessage,
   getThread,
+  pinConversation,
   renameConversation,
   switchToBranch,
 } from '@/server/services/chat.service';
@@ -28,6 +29,8 @@ export const GET = withApi<undefined, Params>({}, async ({ user, params }) => {
  */
 const patchSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('rename'), title: z.string().min(1).max(200) }),
+  z.object({ action: z.literal('pin') }),
+  z.object({ action: z.literal('unpin') }),
   z.object({
     action: z.literal('editMessage'),
     messageId: z.string(),
@@ -51,6 +54,12 @@ export const PATCH = withApi<PatchBody, Params>(
     switch (body.action) {
       case 'rename':
         return ok({ conversation: await renameConversation(params.id, user.id, body.title) });
+
+      case 'pin':
+      case 'unpin':
+        return ok({
+          conversation: await pinConversation(params.id, user.id, body.action === 'pin'),
+        });
 
       case 'editMessage': {
         const message = await editMessage({

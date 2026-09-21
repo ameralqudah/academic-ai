@@ -1349,6 +1349,7 @@
     "searchChats": "ابحث في المحادثات",
     "noMatches": "لا توجد محادثات مطابقة",
     "group": {
+      "pinned": "المثبّتة",
       "today": "اليوم",
       "yesterday": "أمس",
       "week": "آخر 7 أيام",
@@ -1381,6 +1382,8 @@
     "confirmDelete": "تأكيد الحذف",
     "cancelDelete": "إلغاء",
     "renameConversation": "إعادة تسمية",
+    "pinConversation": "تثبيت",
+    "unpinConversation": "إلغاء التثبيت",
     "more": "المزيد",
     "less": "أقل",
     "chats": "المحادثات",

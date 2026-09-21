@@ -83,8 +83,37 @@ export async function listRecent(
     .select()
     .from(aiConversations)
     .where(and(...conditions))
-    .orderBy(desc(sql`coalesce(${aiConversations.lastMessageAt}, ${aiConversations.updatedAt})`))
+    /*
+     * Pinned first, then by recency. The pinned ones lead the query and not
+     * just the display: the list is limited, and a conversation pinned months
+     * ago would otherwise fall outside the limit and vanish from the sidebar —
+     * the opposite of what pinning is for.
+     */
+    .orderBy(
+      sql`${aiConversations.pinnedAt} desc nulls last`,
+      desc(sql`coalesce(${aiConversations.lastMessageAt}, ${aiConversations.updatedAt})`),
+    )
     .limit(options.limit ?? 30);
+}
+
+/**
+ * Pins or unpins.
+ *
+ * `updatedAt` is left alone on purpose: pinning is a note about the
+ * conversation, not activity in it, and should not move it under "Today".
+ */
+export async function setPinned(
+  id: string,
+  userId: string,
+  pinned: boolean,
+): Promise<AIConversation | undefined> {
+  const [row] = await db
+    .update(aiConversations)
+    /* Set to itself: the column refreshes on every update unless it is given a value. */
+    .set({ pinnedAt: pinned ? new Date() : null, updatedAt: sql`${aiConversations.updatedAt}` })
+    .where(and(eq(aiConversations.id, id), eq(aiConversations.userId, userId), live()))
+    .returning();
+  return row;
 }
 
 export async function rename(

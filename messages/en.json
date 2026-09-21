@@ -1349,6 +1349,7 @@
     "searchChats": "Search chats",
     "noMatches": "No matching chats",
     "group": {
+      "pinned": "Pinned",
       "today": "Today",
       "yesterday": "Yesterday",
       "week": "Previous 7 days",
@@ -1381,6 +1382,8 @@
     "confirmDelete": "Confirm delete",
     "cancelDelete": "Cancel",
     "renameConversation": "Rename",
+    "pinConversation": "Pin",
+    "unpinConversation": "Unpin",
     "more": "More",
     "less": "Less",
     "chats": "Chats",

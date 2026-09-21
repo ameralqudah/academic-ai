@@ -60,12 +60,12 @@ export function passwordResetEmail(input: ResetInput): EmailMessage {
           <p style="margin:0 0 16px;font-size:16px;font-weight:600;">${copy.greeting(input.name)}</p>
           <p style="margin:0 0 24px;font-size:15px;line-height:1.8;color:#33445a;">${copy.body}</p>
           <p style="margin:0 0 24px;">
-            <a href="${input.url}" style="display:inline-block;background:#12417a;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:15px;font-weight:500;">${copy.action}</a>
+            <a href="${input.url}" style="display:inline-block;background:#0f5c4a;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:15px;font-weight:500;">${copy.action}</a>
           </p>
           <p style="margin:0 0 8px;font-size:13px;color:#5d6b7f;">${copy.expiry(input.expiresMinutes)}</p>
           <p style="margin:0 0 24px;font-size:13px;color:#5d6b7f;">${copy.ignore}</p>
           <p style="margin:0 0 6px;font-size:12px;color:#5d6b7f;">${copy.fallback}</p>
-          <p style="margin:0;font-size:12px;word-break:break-all;" dir="ltr"><a href="${input.url}" style="color:#12417a;">${input.url}</a></p>
+          <p style="margin:0;font-size:12px;word-break:break-all;" dir="ltr"><a href="${input.url}" style="color:#0f5c4a;">${input.url}</a></p>
         </td>
       </tr>
     </table>

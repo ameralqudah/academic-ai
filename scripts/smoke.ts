@@ -4293,6 +4293,16 @@ console.log('\nwhat a model costs');
   check('Sonnet 5 is not priced as Sonnet 4.5', priceFor('claude-sonnet-5', fallback).output, 10);
   check('and Sonnet 4.5 keeps its own', priceFor('claude-sonnet-4-5', fallback).output, 15);
   check('an unknown model falls back rather than costing nothing', priceFor('mystery-1', fallback), fallback);
+  const { costFor } = await import('../src/ai/prices');
+  const served = { tokensIn: 757, tokensOut: 25 };
+  check(
+    'a request the fallback model served is priced as the fallback model',
+    costFor('gemini-3.5-flash', served, () => 0, new Date('2026-09-21')),
+    /* 757 x $1.50 + 25 x $9.00 per million. It was recorded as 662, the first model's price. */
+    1361,
+  );
+  check('and an unknown model keeps the provider’s own estimate', costFor('mystery-2', served, () => 42), 42);
+
   check(
     'a request is costed in millionths of a dollar',
     costMicroUsd({ input: 0.75, output: 3.75 }, { tokensIn: 1_000_000, tokensOut: 1_000_000 }),

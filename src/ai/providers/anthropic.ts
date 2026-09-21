@@ -7,6 +7,7 @@ import {
   type TokenUsage,
 } from '../types';
 import { isUsableApiKey } from '@/ai/key';
+import { costMicroUsd, priceFor } from '@/ai/prices';
 
 const ENDPOINT = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
@@ -16,7 +17,8 @@ const API_VERSION = '2023-06-01';
  * reporting only. Cache writes cost 1.25× input; cache reads cost 0.1×, which is
  * why the system block is cached.
  */
-const PRICE_PER_MTOK = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
+/** Used only for a model the price table does not know; see `@/ai/prices`. */
+const FALLBACK_PRICE = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
 
 /**
  * Anthropic caches a prefix only above a model-dependent minimum (~1024 tokens).
@@ -50,12 +52,7 @@ export class AnthropicProvider implements AIProvider {
   }
 
   estimateCostMicroUsd(usage: TokenUsage): number {
-    const dollars =
-      (usage.tokensIn / 1_000_000) * PRICE_PER_MTOK.input +
-      (usage.tokensOut / 1_000_000) * PRICE_PER_MTOK.output +
-      ((usage.cacheWriteTokens ?? 0) / 1_000_000) * PRICE_PER_MTOK.cacheWrite +
-      ((usage.cacheReadTokens ?? 0) / 1_000_000) * PRICE_PER_MTOK.cacheRead;
-    return Math.round(dollars * 1_000_000);
+    return costMicroUsd(priceFor(this.model, FALLBACK_PRICE), usage);
   }
 
   private systemBlocks(request: AIRequest) {

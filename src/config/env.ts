@@ -25,7 +25,7 @@ const serverSchema = z.object({
   // AI — provider is swappable without touching application code.
   AI_PROVIDER: z.enum(['anthropic', 'openai', 'google']).default('anthropic'),
   ANTHROPIC_API_KEY: z.string().optional(),
-  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-5'),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-5'),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4.1'),
   GOOGLE_AI_API_KEY: z.string().optional(),

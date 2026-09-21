@@ -135,7 +135,9 @@ function ArtifactPanel({
       <div className="shadow-float flex min-h-0 flex-1 flex-col overflow-hidden border-line bg-surface lg:rounded-2xl lg:border">
         <header className="flex items-center gap-2 border-b border-line px-4 py-2.5">
           <FileText className="size-4 shrink-0 text-primary" aria-hidden />
-          <h2 className="min-w-0 truncate font-sans text-sm font-medium text-ink">{title}</h2>
+          <h2 dir="auto" className="min-w-0 truncate font-sans text-sm font-medium text-ink">
+            {title}
+          </h2>
 
           {data && data.versions.length > 1 ? (
             <select
@@ -223,7 +225,12 @@ function ArtifactPanel({
           </div>
         )}
 
-        <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-8">
+        {/*
+          `overflow-x-hidden` with `overflow-wrap: anywhere`: a DOI or a long URL
+          in a reference list is one unbreakable word, and it pushed the whole
+          panel sideways under a horizontal scrollbar.
+        */}
+        <div className="scrollbar-slim min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-5 py-6 [overflow-wrap:anywhere] sm:px-8">
           {failed ? (
             <p className="text-sm text-danger">{t('failed')}</p>
           ) : !data ? (
@@ -234,7 +241,17 @@ function ArtifactPanel({
           ) : data.markdown ? (
             <>
               {/* Set as a document rather than a chat reply: a centred title, headings that lead. */}
-              <div className="[&_h1]:!mb-4 [&_h1]:!text-center [&_h1]:!text-2xl [&_h1]:!leading-relaxed [&_h2]:!text-xl [&_h3]:!mt-6 [&_h3]:!text-lg [&_h3]:!text-primary [&_h4]:!text-base">
+              {/*
+                `dir="auto"`: the direction comes from the document, not the
+                interface. An English proposal opened from the Arabic interface
+                was set right-to-left — ragged on the wrong side, its full stops
+                at the start of the line. The browser reads the first strong
+                character and sets the block accordingly.
+              */}
+              <div
+                dir="auto"
+                className="[&_h1]:!mb-4 [&_h1]:!text-center [&_h1]:!text-2xl [&_h1]:!leading-relaxed [&_h2]:!text-xl [&_h3]:!mt-6 [&_h3]:!text-lg [&_h3]:!text-primary [&_h4]:!text-base"
+              >
                 <Markdown content={data.markdown} reading />
               </div>
               {data.truncated && (

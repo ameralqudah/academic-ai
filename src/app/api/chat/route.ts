@@ -90,6 +90,8 @@ type Body = z.infer<typeof schema>;
 export const POST = withApi<Body>(
   { schema, rateLimit: { max: 60, windowSeconds: 300, key: 'chat.send' } },
   async ({ user, body }) => {
+    const receivedAt = Date.now();
+
     /*
      * The dataset profile, when one is attached.
      *
@@ -411,12 +413,21 @@ export const POST = withApi<Body>(
       return streamResponse(async (send) => {
         const stream = streamGeneralAnswer(answerInput);
         let content = '';
+        /*
+         * Measured from the moment the request arrived, because that is what the
+         * person waits through: routing and context included, not the model alone.
+         */
+        let firstWordMs: number | null = null;
 
         for (;;) {
           const next = await stream.next();
           if (next.done) {
             content = next.value.content;
             break;
+          }
+          if (firstWordMs === null) {
+            firstWordMs = Date.now() - receivedAt;
+            logger.info('chat.stream.firstWord', { ms: firstWordMs, intent: decision.intent.intent });
           }
           send({ type: 'delta', text: next.value });
         }
@@ -439,6 +450,11 @@ export const POST = withApi<Body>(
         }
 
         await keepTurn(content);
+        logger.info('chat.stream.done', {
+          ms: Date.now() - receivedAt,
+          firstWordMs,
+          chars: content.length,
+        });
         send({ type: 'done', routing });
       });
     }

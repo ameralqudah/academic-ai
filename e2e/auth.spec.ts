@@ -15,7 +15,11 @@ test.describe('authentication', () => {
   test('the free plan limits are shown, not hidden', async ({ page }) => {
     await registerAndLogin(page, 'limits');
     await expect(page.getByText('AI requests left')).toBeVisible();
-    await expect(page.locator('aside').getByText('Usage this month')).toBeVisible();
+    /*
+     * Not inside the sidebar: the meter moved to the foot of the page when the
+     * sidebar was given over to navigation and conversations.
+     */
+    await expect(page.getByText('Usage this month')).toBeVisible();
   });
 
   test('logging out returns to the marketing site and protects the dashboard', async ({ page }) => {

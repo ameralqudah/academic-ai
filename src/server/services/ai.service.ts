@@ -38,6 +38,7 @@ import * as titlesRepo from '@/server/repositories/titles.repository';
 import { getOwnedProject, getProjectWithSections, updateProject } from './project.service';
 import { saveSection } from './section.service';
 import { assertCanUseAI, recordAIUsage } from './usage.service';
+import { costFor } from '@/ai/prices';
 
 /**
  * What the provider actually billed as input. Cached reads are cheap but they
@@ -175,7 +176,8 @@ export async function runCompletion(input: {
       generatedWords: countWords(result.text),
       tokensIn: billableInput(result.usage),
       tokensOut: result.usage.tokensOut,
-      costMicroUsd: input.provider.estimateCostMicroUsd(result.usage),
+      /* Priced as the model that answered, which after a failover is not the one asked. */
+      costMicroUsd: costFor(result.model, result.usage, () => input.provider.estimateCostMicroUsd(result.usage)),
       provider: result.provider,
       model: result.model,
     });
@@ -781,7 +783,7 @@ export async function* streamGeneralAnswer(
         generatedWords: countWords(content),
         tokensIn: billableInput(counted),
         tokensOut: counted.tokensOut,
-        costMicroUsd: prepared.provider.estimateCostMicroUsd(counted),
+        costMicroUsd: costFor(servedBy, counted, () => prepared.provider.estimateCostMicroUsd(counted)),
         provider: prepared.provider.name,
         model: servedBy,
       }).catch((error: unknown) => {

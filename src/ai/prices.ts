@@ -91,3 +91,21 @@ export function costMicroUsd(
 
   return Math.round(dollars * 1_000_000);
 }
+
+/**
+ * The cost of a request, by the model that actually served it.
+ *
+ * When an overloaded model hands a request to its sibling, the sibling's price
+ * applies — and the provider object in hand is still the first model's. Usage
+ * was recorded under the right name at the wrong price. `estimate` is the
+ * provider's own figure, used only for a model this table does not know.
+ */
+export function costFor(
+  model: string,
+  usage: { tokensIn: number; tokensOut: number; cacheWriteTokens?: number; cacheReadTokens?: number },
+  estimate: () => number,
+  now: Date = new Date(),
+): number {
+  const known = KEYS.some((candidate) => model.startsWith(candidate));
+  return known ? costMicroUsd(priceFor(model, { input: 0, output: 0 }, now), usage) : estimate();
+}

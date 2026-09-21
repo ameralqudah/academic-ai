@@ -107,20 +107,24 @@ test.describe('the sidebar', () => {
     await expect(page.getByRole('link', { name: 'Academic search' })).toBeVisible();
   });
 
-  test('shows unbuilt features as disabled rather than hiding them', async ({ page }) => {
-    await registerAndLogin(page, 'sidebar-soon', 'en');
+  test('keeps the research shortcuts one click away, behind More', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar-more', 'en');
     await page.goto('/en/chat');
 
     /*
-     * Web search and deep research are visible and marked "Soon". Hiding them
-     * would leave a user unable to tell a missing feature from one they failed
-     * to find; making them clickable would promise something that does not
-     * exist. They are rendered as plain text, so they are not links.
+     * Web search and deep research were once unbuilt and shown as plain,
+     * disabled text. They are built now, and they are links like the rest —
+     * folded behind "More" so the sidebar's first screen belongs to the places a
+     * researcher returns to and to their conversations.
      */
-    await expect(page.getByText('Web search')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Web search' })).toHaveCount(0);
-    await expect(page.getByText('Deep research')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Deep research' })).toHaveCount(0);
+    const sidebar = page.locator('aside');
+    await expect(sidebar.getByRole('link', { name: 'Web search' })).toHaveCount(0);
+
+    await sidebar.getByRole('button', { name: 'More' }).click();
+
+    await expect(sidebar.getByRole('link', { name: 'Web search' })).toBeVisible();
+    await expect(sidebar.getByRole('link', { name: 'Deep research' })).toBeVisible();
+    await expect(sidebar.getByRole('link', { name: 'Literature review' })).toBeVisible();
   });
 
   test('collapses and stays collapsed after a reload', async ({ page }) => {

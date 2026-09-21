@@ -24,7 +24,11 @@
  *   5. Everything else falls through untouched.
  */
 
-const VERSION = 'v1';
+/*
+ * Bumped when a file with a stable name changes — the icons were recoloured, and
+ * a cache keyed by name would have kept serving the old ones for ever.
+ */
+const VERSION = 'v2';
 const STATIC_CACHE = `academic-ai-static-${VERSION}`;
 const OFFLINE_URL = '/offline.html';
 

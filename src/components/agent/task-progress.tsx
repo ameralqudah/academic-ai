@@ -544,6 +544,8 @@ function failureMessage(step: TaskStepView): string | null {
 }
 function StepRow({ step }: { step: TaskStepView }) {
   const t = useTranslations('task');
+  /* Root namespace: the label keys are stored fully qualified. */
+  const root = useTranslations();
 
   return (
     <li className="flex items-start gap-2 text-sm">
@@ -570,7 +572,11 @@ function StepRow({ step }: { step: TaskStepView }) {
             (step.status === 'BLOCKED' || step.status === 'SKIPPED') && 'text-muted line-through',
           )}
         >
-          {step.label}
+          {/*
+            A step the task added to itself is labelled with its capability's
+            message key rather than a sentence, and the key was shown as it was.
+          */}
+          {step.label.startsWith('task.') && root.has(step.label) ? root(step.label) : step.label}
         </span>
 
         {/*
@@ -579,6 +585,11 @@ function StepRow({ step }: { step: TaskStepView }) {
         */}
         {step.status === 'BLOCKED' && (
           <span className="text-[11px] text-muted">{t('step.blocked')}</span>
+        )}
+
+        {/* Set aside, not failed: the task went on without it, and says so. */}
+        {step.status === 'SKIPPED' && (
+          <span className="text-[11px] text-muted">{t('step.skipped')}</span>
         )}
 
         {/*

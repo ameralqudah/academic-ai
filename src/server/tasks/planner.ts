@@ -500,7 +500,16 @@ export function blockedSteps<T extends { id: string; status: string; dependsOn: 
 
     const step = byId.get(id);
     if (!step) return false;
-    if (step.status === 'FAILED' || step.status === 'BLOCKED') return true;
+    /*
+     * Set aside counts as gone.
+     *
+     * A step the task added to itself and then could not run leaves whatever
+     * waited on it waiting forever: never ready, never blocked, and the task
+     * pauses as deadlocked instead of finishing the work that was asked for.
+     */
+    if (step.status === 'FAILED' || step.status === 'BLOCKED' || step.status === 'SKIPPED') {
+      return true;
+    }
 
     return step.dependsOn.some((parent) => failedOrBlocked(parent, depth + 1));
   };

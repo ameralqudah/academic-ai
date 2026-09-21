@@ -458,6 +458,22 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
 
       const { step, capability, result } = outcome;
 
+      if (result.kind === 'needs-input' && step.dynamic) {
+        /*
+         * A step the task added to itself does not get to question the user.
+         *
+         * A researcher asked for titles on a topic they had named. The search
+         * that was meant to help came back off-topic, a second search was added
+         * without a query, and it stopped the whole task to ask "what topic?" —
+         * the one thing the request had made clear — while the titles, which
+         * were the point, waited behind it. Help that cannot proceed is set
+         * aside; only the work the researcher asked for may ask them anything.
+         */
+        logger.info('task.step.skippedForInput', { taskId, stepId: step.id, capability: step.capability });
+        await tasksRepo.skipStep(step.id, 'task.step.skippedForInput');
+        continue;
+      }
+
       if (result.kind === 'needs-input') {
         /*
          * The step returns to pending, so answering resumes from here rather

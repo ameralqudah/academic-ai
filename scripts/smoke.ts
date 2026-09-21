@@ -4100,6 +4100,18 @@ console.log('\ndocument previews for the side panel');
   });
 }
 
+console.log('\na recommendation is only acted on when it can be');
+
+{
+  const { isActionable } = await import('../src/server/tasks/recommendations');
+
+  check('search again, with nothing new to search for, is not an instruction', isActionable({ capability: 'academic.search', input: {} }), false);
+  check('nor with a blank query', isActionable({ capability: 'web.search', input: { query: '  ' } }), false);
+  check('a broadened query is', isActionable({ capability: 'academic.search', input: { topic: 'hybrid learning' } }), true);
+  check('writing again needs no input of its own', isActionable({ capability: 'document.write', input: {} }), true);
+  check('and a recommendation naming nothing is dropped', isActionable({ capability: ' ', input: { topic: 'x' } }), false);
+}
+
 console.log('\nspeed of the first word');
 
 {

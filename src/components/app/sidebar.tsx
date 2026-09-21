@@ -24,7 +24,7 @@ import {
 import { signOut } from 'next-auth/react';
 import { useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useSyncExternalStore } from 'react';
 
 import { LocaleSwitcher } from '@/components/locale-switcher';
 import { ThemeToggle } from '@/components/theme-toggle';
@@ -191,6 +191,22 @@ export function Sidebar({
   const [query, setQuery] = useState('');
 
   /*
+   * False on the server and during hydration, true afterwards.
+   *
+   * "Today" depends on the reader's timezone, and the server does not know it:
+   * a conversation from 23:30 UTC is yesterday in one place and today in
+   * another. Grouping during the server render would put a heading in the HTML
+   * that the browser then disagrees with — a hydration error, and a list that
+   * visibly rearranges. So the first paint is one plain list, and the grouping
+   * is applied once the browser's own clock is the one being read.
+   */
+  const hydrated = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false,
+  );
+
+  /*
    * Filtered, then grouped. The list arrives newest first, so each group keeps
    * that order without sorting again.
    */
@@ -206,11 +222,11 @@ export function Sidebar({
 
     for (const conversation of conversations) {
       if (needle && !(conversation.title ?? '').toLowerCase().includes(needle)) continue;
-      result[groupOf(conversation.at, now)].push(conversation);
+      result[hydrated ? groupOf(conversation.at, now) : 'today'].push(conversation);
     }
 
     return result;
-  }, [conversations, query]);
+  }, [conversations, query, hydrated]);
 
   const matches = GROUP_ORDER.reduce((sum, key) => sum + groups[key].length, 0);
 
@@ -328,7 +344,9 @@ export function Sidebar({
             {GROUP_ORDER.map((key) =>
               groups[key].length === 0 ? null : (
                 <div key={key} className="flex flex-col gap-0.5 pb-2">
-                  <h2 className="px-2 text-xs font-medium text-muted">{t(`group.${key}`)}</h2>
+                  <h2 className="px-2 text-xs font-medium text-muted">
+                    {hydrated ? t(`group.${key}`) : t('recent')}
+                  </h2>
                   {groups[key].map((conversation) => (
                     <ConversationRow
                       key={conversation.id}

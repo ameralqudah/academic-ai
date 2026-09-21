@@ -14,6 +14,7 @@
  * is a POST body, and anyone can change one.
  */
 
+import { isUsableApiKey } from '@/ai/key';
 import { getEnv } from '@/config/env';
 
 import type { IntentKey } from './registry';
@@ -196,9 +197,14 @@ export function configuredModels(): ModelOption[] {
     return [];
   }
 
+  /*
+   * `isUsableApiKey`, not truthiness: a key field holding placeholder text was
+   * listed as a model, offered in the picker, chosen by the user — and then
+   * swapped for another provider at request time without a word.
+   */
   const options: ModelOption[] = [];
 
-  if (env.ANTHROPIC_API_KEY) {
+  if (isUsableApiKey(env.ANTHROPIC_API_KEY)) {
     options.push({
       id: `anthropic:${env.ANTHROPIC_MODEL}`,
       provider: 'anthropic',
@@ -206,7 +212,7 @@ export function configuredModels(): ModelOption[] {
       isDefault: false,
     });
   }
-  if (env.OPENAI_API_KEY) {
+  if (isUsableApiKey(env.OPENAI_API_KEY)) {
     options.push({
       id: `openai:${env.OPENAI_MODEL}`,
       provider: 'openai',
@@ -214,7 +220,7 @@ export function configuredModels(): ModelOption[] {
       isDefault: false,
     });
   }
-  if (env.GOOGLE_AI_API_KEY) {
+  if (isUsableApiKey(env.GOOGLE_AI_API_KEY)) {
     options.push({
       id: `google:${env.GOOGLE_MODEL}`,
       provider: 'google',
@@ -239,7 +245,7 @@ export function configuredModels(): ModelOption[] {
 /**
  * What a given tier may use.
  *
- * Free gets the default and nothing else — a free account choosing the most
+ * Free gets one economical model and nothing else — a free account choosing the most
  * expensive model available is a bill the product pays and the user does not.
  * Paid gets everything configured. Admin the same, explicitly, so the intent is
  * stated rather than inherited.
@@ -248,8 +254,16 @@ export function modelsFor(tier: PlanTier): ModelOption[] {
   const all = configuredModels();
 
   if (tier === 'free') {
-    const fallback = all[0];
-    const preferred = all.find((option) => option.isDefault) ?? fallback;
+    /*
+     * The economical model when there is one. "The default" was the rule, and
+     * the default provider is the premium one — so the free plan's single model
+     * was the most expensive model configured, which is the bill this function
+     * exists to prevent. The premium model is what the paid plan buys; a free
+     * account gets it only when it is the only model there is.
+     */
+    const economical = all.filter((option) => option.provider !== 'anthropic');
+    const pool = economical.length > 0 ? economical : all;
+    const preferred = pool.find((option) => option.isDefault) ?? pool[0];
     return preferred ? [preferred] : [];
   }
 

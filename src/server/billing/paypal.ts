@@ -688,10 +688,22 @@ export class PayPalBillingProvider implements BillingProvider {
     if (configured && /^[A-Za-z0-9-]{6,}$/.test(configured)) return configured;
 
     const url = this.webhookUrl();
-    const cached = await appSettingsRepo.getSetting<{ id: string; url: string }>(
+    const owner = this.credentialOwner();
+    const cached = await appSettingsRepo.getSetting<{ id: string; url: string; owner?: string }>(
       this.webhookSettingKey(),
     );
-    if (cached?.id && cached.url === url) return cached.id;
+    /*
+     * Trusted only for the credentials it was registered with.
+     *
+     * A PayPal webhook belongs to the REST app whose client id created it. The
+     * cache was keyed by environment and URL alone, so swapping to another
+     * app's credentials kept returning the first app's webhook id: nothing was
+     * registered for the new app, PayPal had nowhere to send its events, and
+     * subscriptions activated on return but never heard about a renewal or a
+     * cancellation. An entry written before this check has no owner and is
+     * re-verified once against PayPal, which is one request.
+     */
+    if (cached?.id && cached.url === url && cached.owner === owner) return cached.id;
 
     const existing = await this.call<{ webhooks?: { id: string; url: string }[] }>(
       '/v1/notifications/webhooks',
@@ -709,8 +721,78 @@ export class PayPalBillingProvider implements BillingProvider {
       logger.info('paypal.webhook.reused', { id, url });
     }
 
-    await appSettingsRepo.setSetting(this.webhookSettingKey(), { id, url });
+    await appSettingsRepo.setSetting(this.webhookSettingKey(), { id, url, owner });
     return id;
+  }
+
+  /**
+   * Identifies the REST app without storing its client id: enough of it to
+   * notice the credentials changed, not enough to be worth stealing.
+   */
+  private credentialOwner(): string {
+    const { clientId } = this.credentials;
+    return `${clientId.slice(0, 6)}…${clientId.slice(-4)}:${clientId.length}`;
+  }
+
+  private receivedSettingKey(): string {
+    return `paypal.webhook.lastReceived.${getEnv().PAYPAL_ENVIRONMENT}`;
+  }
+
+  /**
+   * What PayPal actually has on file for these credentials, next to what this
+   * deployment believes — for the admin page.
+   *
+   * The two disagreeing is the failure that is otherwise invisible: checkout
+   * works, plans activate, and the only symptom arrives a month later when a
+   * renewal is never recorded. Never throws; it reports.
+   */
+  async webhookStatus(): Promise<{
+    expectedUrl: string;
+    registered: boolean;
+    id?: string;
+    otherUrls: string[];
+    lastReceived: { at: string; type: string } | null;
+    detail?: string;
+  }> {
+    const expectedUrl = this.webhookUrl();
+    const lastReceived = await appSettingsRepo
+      .getSetting<{ at: string; type: string }>(this.receivedSettingKey())
+      .catch(() => null);
+
+    if (!this.isConfigured()) {
+      return { expectedUrl, registered: false, otherUrls: [], lastReceived, detail: 'not configured' };
+    }
+
+    try {
+      const remote = await this.call<{ webhooks?: { id: string; url: string }[] }>(
+        '/v1/notifications/webhooks',
+      );
+      const hooks = remote.webhooks ?? [];
+      const match = hooks.find((hook) => hook.url === expectedUrl);
+
+      return {
+        expectedUrl,
+        registered: Boolean(match),
+        id: match?.id,
+        otherUrls: hooks.filter((hook) => hook.url !== expectedUrl).map((hook) => hook.url),
+        lastReceived,
+      };
+    } catch (error) {
+      return {
+        expectedUrl,
+        registered: false,
+        otherUrls: [],
+        lastReceived,
+        detail: error instanceof Error ? error.message.slice(0, 200) : 'unknown error',
+      };
+    }
+  }
+
+  /** Forgets the remembered id and registers again with the current credentials. */
+  async reregisterWebhook(): Promise<string> {
+    /* An empty object rather than null: the column is not nullable. */
+    await appSettingsRepo.setSetting(this.webhookSettingKey(), {});
+    return this.ensureWebhookId();
   }
 
 
@@ -771,6 +853,18 @@ export class PayPalBillingProvider implements BillingProvider {
       event_type?: string;
       resource?: SubscriptionResource & SaleResource;
     };
+
+    /*
+     * Remembered so the admin page can answer "are PayPal's events reaching
+     * us?" without anyone reading server logs. Best effort: a failed write must
+     * not fail a verified event.
+     */
+    await appSettingsRepo
+      .setSetting(this.receivedSettingKey(), {
+        at: new Date().toISOString(),
+        type: event.event_type ?? 'unknown',
+      })
+      .catch(() => undefined);
 
     const resource = event.resource ?? {};
     const base = {

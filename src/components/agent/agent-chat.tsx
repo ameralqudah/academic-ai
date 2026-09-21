@@ -92,6 +92,10 @@ interface Turn {
   question?: string;
   unavailable?: { intent: string; reasonKey: string; alternatives: string[] };
   units?: number;
+  /** A direct answer still being written. */
+  streaming?: boolean;
+  /** Shown until the first words arrive, when the model had to be retried. */
+  notice?: 'busy';
 }
 
 /** A fork in the thread, as the server reports it. */
@@ -1137,9 +1141,13 @@ export function AgentChat({
       { id: crypto.randomUUID(), role: 'user', text: message },
     ]);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           message,
@@ -1147,8 +1155,15 @@ export function AgentChat({
           conversationId: thread ?? undefined,
           projectId: projectId ?? undefined,
           datasetId: file?.datasetId ?? undefined,
+          /* A direct answer arrives as it is written; a task still arrives as JSON. */
+          stream: true,
         }),
       });
+
+      if (response.ok && response.body && response.headers.get('content-type')?.includes('text/event-stream')) {
+        await readAnswerStream(response.body);
+        return;
+      }
 
       const json = await response.json();
 
@@ -1180,10 +1195,99 @@ export function AgentChat({
         ...current,
         { id: crypto.randomUUID(), role: 'assistant', text: json.data.content as string },
       ]);
-    } catch {
-      setError(te('network'));
+    } catch (error) {
+      /* Stopped on purpose: what was written stays, and nothing is reported. */
+      if ((error as { name?: string })?.name !== 'AbortError') setError(te('network'));
     } finally {
+      abortRef.current = null;
       setBusy(false);
+    }
+  }
+
+  /**
+   * Shows a direct answer while it is being written.
+   *
+   * The turn exists from the first moment, empty, so the reader sees that
+   * something is happening; each piece is appended as it arrives. If the server
+   * decides midway that the request needs a task after all, the text written so
+   * far is replaced by the task — it was a refusal, and showing both would put
+   * "I cannot do that" above the thing doing it.
+   */
+  async function readAnswerStream(body: ReadableStream<Uint8Array>) {
+    const id = crypto.randomUUID();
+    const patch = (change: (turn: Turn) => Turn) =>
+      setTurns((current) => current.map((turn) => (turn.id === id ? change(turn) : turn)));
+
+    setTurns((current) => [...current, { id, role: 'assistant', text: '', streaming: true }]);
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let received = false;
+
+    const handle = (raw: string) => {
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      switch (event.type) {
+        case 'delta':
+          received = true;
+          patch((turn) => ({ ...turn, notice: undefined, text: (turn.text ?? '') + String(event.text ?? '') }));
+          break;
+
+        case 'notice':
+          /* Only before the first words: after that the answer speaks for itself. */
+          if (!received) patch((turn) => ({ ...turn, notice: 'busy' }));
+          break;
+
+        case 'task': {
+          const task = event.task as { id: string };
+          patch(() => ({
+            id,
+            role: 'assistant',
+            ...(event.restatement ? { text: String(event.restatement) } : {}),
+            results: [{ kind: 'task', runId: task.id, payload: null }],
+          }));
+          break;
+        }
+
+        case 'error':
+          setError(String((locale === 'ar' ? event.messageAr : event.message) ?? te('generic')));
+          break;
+      }
+    };
+
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary !== -1) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('data:')) handle(line.slice(5).trim());
+          }
+
+          boundary = buffer.indexOf('\n\n');
+        }
+      }
+    } finally {
+      /* Finished, stopped or failed: either way it is no longer being written. */
+      setTurns((current) =>
+        current
+          .map((turn) => (turn.id === id ? { ...turn, streaming: false, notice: undefined } : turn))
+          /* An answer that never produced a word leaves no empty bubble behind. */
+          .filter((turn) => turn.id !== id || Boolean(turn.text) || Boolean(turn.results?.length)),
+      );
     }
   }
 
@@ -1600,13 +1704,20 @@ function TurnView({
         </div>
       )}
 
+      {turn.streaming && !turn.text && (
+        <span className="flex items-center gap-2 text-sm text-muted" role="status">
+          <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          {turn.notice === 'busy' ? t('modelBusyRetrying') : t('thinking')}
+        </span>
+      )}
+
       {turn.text && <Markdown content={turn.text} compact reading />}
 
       {/*
         Only once the reply is complete. Offering "regenerate" mid-stream would
         invite a click that races the answer still arriving.
       */}
-      {turn.text && !turn.stages?.some((stage) => stage.status === 'running') && (
+      {turn.text && !turn.streaming && !turn.stages?.some((stage) => stage.status === 'running') && (
         <MessageActions
           role="assistant"
           content={turn.text}

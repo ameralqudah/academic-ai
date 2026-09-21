@@ -3,12 +3,13 @@ import { z } from 'zod';
 import { logger } from '@/lib/logger';
 import { routeRequest } from '@/server/agent/router';
 import { namedFormat, resolveReference, type Resolution } from '@/server/agent/continuity';
-import { decideOutputLanguage } from '@/server/context/language';
+import { decideConversationLanguage, decideOutputLanguage } from '@/server/context/language';
 import { buildContextPrompt } from '@/server/context/manager';
 import { ok, withApi } from '@/server/http/api';
-import { answerGeneralQuestion } from '@/server/services/ai.service';
+import { answerGeneralQuestion, streamGeneralAnswer } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
 import { recordTurn } from '@/server/services/chat.service';
+import { streamResponse } from '@/server/http/stream';
 import { ensureTasksReady } from '@/server/services/startup';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
@@ -80,6 +81,8 @@ const schema = z.object({
   conversationId: z.string().optional(),
   projectId: z.string().optional(),
   datasetId: z.string().optional(),
+  /** Ask for a direct answer as it is written, rather than once it is finished. */
+  stream: z.boolean().optional(),
 });
 
 type Body = z.infer<typeof schema>;
@@ -154,6 +157,12 @@ export const POST = withApi<Body>(
       history: history.filter((turn) => turn.role === 'user').map((turn) => turn.content),
       interfaceLocale: body.locale,
     }).language;
+
+    /* The language to address the researcher in; see `decideConversationLanguage`. */
+    const userLanguage = decideConversationLanguage({
+      request: body.message,
+      interfaceLocale: body.locale,
+    });
 
     const decision = await routeRequest({
       message: body.message,
@@ -237,6 +246,7 @@ export const POST = withApi<Body>(
         userId: user.id,
         request: body.message,
         locale: requestLanguage,
+        userLanguage,
         projectId: body.projectId ?? null,
         conversationId: body.conversationId ?? null,
         datasetId:
@@ -338,21 +348,102 @@ export const POST = withApi<Body>(
       logger.warn('chat.contextFailed', { error: String(error).slice(0, 200) });
     }
 
-    const answer = await answerGeneralQuestion({
+    const answerInput = {
       userId: user.id,
       message: body.message,
       locale: requestLanguage,
       projectId: body.projectId ?? null,
       history: [],
-      ...(contextPrompt
-        ? {
-            context: {
-              conversationId: body.conversationId ?? null,
-              datasetId: body.datasetId ?? null,
-            },
+      /* Already built above — passed on rather than built a second time. */
+      ...(contextPrompt ? { contextPrompt } : {}),
+    };
+
+    /*
+     * A direct answer is kept, like every other kind of turn.
+     *
+     * It was not. Tasks, searches and analyses each wrote their turn to the
+     * conversation, and the plain answer — the most common turn there is — wrote
+     * nothing: a researcher who reloaded the page found their question and its
+     * answer gone, and a conversation with only direct answers in it was stored
+     * as an empty one.
+     */
+    const keepTurn = async (assistantMessage: string) => {
+      if (!body.conversationId || !assistantMessage.trim()) return;
+
+      await recordTurn({
+        conversationId: body.conversationId,
+        userId: user.id,
+        userMessage: body.message,
+        assistantMessage,
+      }).catch((error: unknown) => {
+        logger.warn('chat.turnNotRecorded', { error: String(error).slice(0, 200) });
+      });
+    };
+
+    const routing = {
+      intent: decision.intent.intent,
+      confidence: decision.confidence,
+      suggestedCapabilities: decision.suggestedCapabilities,
+    };
+
+    /** Starts the task a direct answer turned out to need. */
+    const escalate = async (signal: string) => {
+      const task = await startTask({
+        userId: user.id,
+        request: body.message,
+        locale: requestLanguage,
+        userLanguage,
+        projectId: body.projectId ?? null,
+        conversationId: body.conversationId ?? null,
+        datasetId: body.datasetId ?? null,
+      });
+
+      logger.info('chat.escalated', {
+        taskId: task.id,
+        intent: decision.intent.intent,
+        signal,
+      });
+
+      return task;
+    };
+
+    if (body.stream) {
+      return streamResponse(async (send) => {
+        const stream = streamGeneralAnswer(answerInput);
+        let content = '';
+
+        for (;;) {
+          const next = await stream.next();
+          if (next.done) {
+            content = next.value.content;
+            break;
           }
-        : {}),
-    });
+          send({ type: 'delta', text: next.value });
+        }
+
+        /*
+         * The same check as the complete answer, made once the text exists. By
+         * now the refusal is on screen, so the client is told to replace it
+         * with the task rather than to show both.
+         */
+        const signal = detectEscalation(content, body.locale);
+
+        if (signal) {
+          const task = await escalate(signal);
+          send({
+            type: 'task',
+            task: { id: task.id, status: task.status },
+            restatement: decision.intent.restatement,
+          });
+          return;
+        }
+
+        await keepTurn(content);
+        send({ type: 'done', routing });
+      });
+    }
+
+    const answer = await answerGeneralQuestion(answerInput);
 
     /*
      * The fast path noticing it was the wrong path.
@@ -370,20 +461,7 @@ export const POST = withApi<Body>(
     const escalation = detectEscalation(answer.content, body.locale);
 
     if (escalation) {
-      const task = await startTask({
-        userId: user.id,
-        request: body.message,
-        locale: requestLanguage,
-        projectId: body.projectId ?? null,
-        conversationId: body.conversationId ?? null,
-        datasetId: body.datasetId ?? null,
-      });
-
-      logger.info('chat.escalated', {
-        taskId: task.id,
-        intent: decision.intent.intent,
-        signal: escalation,
-      });
+      const task = await escalate(escalation);
 
       return ok(
         {
@@ -397,6 +475,8 @@ export const POST = withApi<Body>(
       );
     }
 
+    await keepTurn(answer.content);
+
     return ok({
       path: 'fast' as const,
       content: answer.content,
@@ -407,11 +487,7 @@ export const POST = withApi<Body>(
        * another name — but the client needs it to decide whether to offer an
        * escalation, and a wrong decision has to be traceable from a response.
        */
-      routing: {
-        intent: decision.intent.intent,
-        confidence: decision.confidence,
-        suggestedCapabilities: decision.suggestedCapabilities,
-      },
+      routing,
     });
   },
 );

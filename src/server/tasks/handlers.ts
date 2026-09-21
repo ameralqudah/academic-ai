@@ -57,6 +57,7 @@ import { decideOutputLanguage, languageInstruction } from '@/server/context/lang
 import { generateLongForm, incompleteNotice } from '@/server/ai/long-form';
 import { broaden, topicOf } from './query';
 import { instructionFrom } from './step-instruction';
+import { sourcesAsMaterial } from './found-sources';
 
 /**
  * The producer identity every output carries.
@@ -186,8 +187,20 @@ function sectionsFrom(context: StepContext): { heading: string; text: string }[]
  * catalogue because a handler runs on the server, outside any request that
  * carries translations — the locale on the task context is what it has.
  */
-function say(context: { locale: 'ar' | 'en' }, en: string, ar: string): string {
-  return context.locale === 'ar' ? ar : en;
+function say(
+  context: { locale: 'ar' | 'en'; context?: Record<string, unknown> },
+  en: string,
+  ar: string,
+): string {
+  /*
+   * The language the researcher writes in, where the task recorded one. The
+   * task's own locale is the language of the work, and a request for English
+   * output had every question put to an Arabic speaker in English.
+   */
+  const spoken = context.context?.userLanguage;
+  const language = spoken === 'ar' || spoken === 'en' ? spoken : context.locale;
+
+  return language === 'ar' ? ar : en;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -216,6 +229,8 @@ export function registerAllHandlers(): void {
       locale: context.locale,
       projectId: null,
       history: [],
+      /* What the steps before this one found, when they found anything. */
+      material: sourcesAsMaterial(referencesFrom(context)),
     });
 
     return succeeded(

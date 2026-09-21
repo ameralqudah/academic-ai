@@ -49,6 +49,13 @@ export async function startTask(input: {
   userId: string;
   request: string;
   locale: 'ar' | 'en';
+  /**
+   * The language to address the researcher in — questions, notes, step names.
+   *
+   * Distinct from `locale`, which is the language of the work. Asking for
+   * English titles is not asking to be spoken to in English.
+   */
+  userLanguage?: 'ar' | 'en';
   projectId?: string | null;
   conversationId?: string | null;
   datasetId?: string | null;
@@ -101,6 +108,7 @@ export async function startTask(input: {
       ...(input.references ? { references: input.references } : {}),
       /* The request itself, so a handler can read what was asked. */
       request: input.request,
+      ...(input.userLanguage ? { userLanguage: input.userLanguage } : {}),
     },
     budget: budget as unknown as Record<string, number>,
     spent: { modelCalls: 0, retries: 0 },

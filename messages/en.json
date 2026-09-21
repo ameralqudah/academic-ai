@@ -1092,6 +1092,8 @@
     "welcome": "What would you like to work on?",
     "welcomeSubtitle": "Upload a data file and ask for an analysis, or ask anything about your research.",
     "disclaimer": "The assistant can make mistakes. Check facts and references before relying on them.",
+    "thinking": "Thinking…",
+    "modelBusyRetrying": "The model is busy — trying another…",
     "placeholder": "Write your request, or attach a file…",
     "attachFile": "Attach a file",
     "detachFile": "Remove file",

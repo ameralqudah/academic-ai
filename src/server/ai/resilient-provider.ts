@@ -3,6 +3,7 @@ import type { AIChunk, AIRequest, AIResult, TokenUsage } from '@/ai/types';
 import { logger } from '@/lib/logger';
 
 import { shouldFailOver } from './model-requirements';
+import { notify } from './notices';
 
 /**
  * A provider that survives the failures that are not the request's fault.
@@ -51,6 +52,7 @@ export function resilient(
       const fallback = await alternative();
 
       if (fallback) {
+        notify({ kind: 'failover' });
         logger.warn('ai.failover', {
           from: `${primary.name}:${primary.model}`,
           to: `${fallback.name}:${fallback.model}`,
@@ -65,6 +67,7 @@ export function resilient(
         }
       }
 
+      notify({ kind: 'retry' });
       logger.warn('ai.retry', {
         provider: primary.name,
         model: primary.model,
@@ -103,13 +106,15 @@ export function resilient(
       try {
         for await (const chunk of provider.stream(request)) {
           started = true;
-          yield chunk;
+          /* Named on the way out, so usage is recorded against the model that did the work. */
+          yield provider === primary ? chunk : { ...chunk, model: provider.model };
         }
         return;
       } catch (error) {
         if (started || !shouldFailOver(error)) throw error;
 
         lastError = error;
+        notify({ kind: 'retry' });
         logger.warn('ai.stream.retry', {
           provider: provider.name,
           reason: String(error).slice(0, 200),

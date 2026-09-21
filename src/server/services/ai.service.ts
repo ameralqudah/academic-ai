@@ -590,26 +590,73 @@ export async function answerGeneralQuestion(input: {
     datasetId?: string | null;
     instructions?: string[];
   };
+  /**
+   * Context already assembled by the caller.
+   *
+   * The chat route builds it to decide between paths and then handed over only
+   * the scope, so this function built the same context a second time — two
+   * rounds of database reads for every message. A caller that has the prompt
+   * passes the prompt.
+   */
+  contextPrompt?: string;
+  /**
+   * Extra material for this answer alone, placed after the context.
+   *
+   * What an earlier step of a task found, for instance. Kept separate from
+   * `context.instructions`, which are the researcher's standing wishes rather
+   * than the working material of one step.
+   */
+  material?: string;
 }): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
+  const prepared = await prepareGeneralAnswer(input);
+
+  const result = await runCompletion({
+    userId: input.userId,
+    // Usage is recorded against the project when one is selected, and against
+    // the user alone when none is — the column is nullable for exactly this.
+    projectId: input.projectId ?? '',
+    provider: prepared.provider,
+    task: 'chat',
+    locale: input.locale,
+    system: prepared.system,
+    messages: prepared.messages,
+    maxTokens: 2000,
+    temperature: 0.6,
+  });
+
+  return { content: result.text, usage: result.usage };
+}
+
+type GeneralAnswerInput = Parameters<typeof answerGeneralQuestion>[0];
+
+/**
+ * Everything an answer needs before a model is called.
+ *
+ * Shared by the complete answer and the streamed one, so that the two cannot
+ * drift: the same model chosen the same way, the same prompt, the same context.
+ * A streamed answer that read differently from a complete one would be a second
+ * product hiding inside the first.
+ */
+async function prepareGeneralAnswer(input: GeneralAnswerInput) {
   await assertCanUseAI(input.userId, 400);
 
   /*
-    * Routed rather than resolved.
-    *
-    * `resolveProvider` answers "which provider is configured"; the router
-    * answers "which model should run this particular work". Ten call sites in
-    * this file asked the first question, so a one-line classification and a
-    * chapter of prose reached the same model — the router existed and almost
-    * nothing went through it.
-    *
-    * The user's explicit choice still wins: it is passed as `preferred`, and
-    * the router returns it untouched.
-    */
-   const provider = (
-     await selectModel(requirementsFor({ capability: input.capability ?? 'general.answer' }), {
-       preferred: input.chosenModel ?? null,
-     })
-   ).provider;
+   * Routed rather than resolved.
+   *
+   * `resolveProvider` answers "which provider is configured"; the router
+   * answers "which model should run this particular work". Ten call sites in
+   * this file asked the first question, so a one-line classification and a
+   * chapter of prose reached the same model — the router existed and almost
+   * nothing went through it.
+   *
+   * The user's explicit choice still wins: it is passed as `preferred`, and
+   * the router returns it untouched.
+   */
+  const provider = (
+    await selectModel(requirementsFor({ capability: input.capability ?? 'general.answer' }), {
+      preferred: input.chosenModel ?? null,
+    })
+  ).provider;
 
   /*
    * Context replaces the history slice when the caller supplies a scope.
@@ -618,9 +665,9 @@ export async function answerGeneralQuestion(input: {
    * a caller that has not moved over still gets the behaviour it was written
    * against, and nothing has to change in the same commit.
    */
-  let contextPrompt = '';
+  let contextPrompt = input.contextPrompt ?? '';
 
-  if (input.context) {
+  if (!contextPrompt && input.context) {
     try {
       const built = await buildContextPrompt({
         purpose: 'answer',
@@ -641,17 +688,11 @@ export async function answerGeneralQuestion(input: {
     }
   }
 
-  const result = await runCompletion({
-    userId: input.userId,
-    // Usage is recorded against the project when one is selected, and against
-    // the user alone when none is — the column is nullable for exactly this.
-    projectId: input.projectId ?? '',
+  const base = generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null });
+
+  return {
     provider,
-    task: 'chat',
-    locale: input.locale,
-    system: contextPrompt
-      ? `${generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null })}\n\n${contextPrompt}`
-      : generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null }),
+    system: [base, contextPrompt, input.material ?? ''].filter((part) => part.trim()).join('\n\n'),
     /*
      * With context assembled, the message array carries only the question:
      * the conversation is already in the envelope, selected and ordered by
@@ -661,11 +702,95 @@ export async function answerGeneralQuestion(input: {
     messages: contextPrompt
       ? [{ role: 'user' as const, content: input.message }]
       : [...(input.history ?? []).slice(-6), { role: 'user' as const, content: input.message }],
-    maxTokens: 2000,
-    temperature: 0.6,
-  });
+  };
+}
 
-  return { content: result.text, usage: result.usage };
+/**
+ * The same answer, a piece at a time.
+ *
+ * A reply that takes eight seconds to write was shown after eight seconds, all
+ * at once, though its first words existed after one. Nothing about the answer
+ * changes here — only that the reader gets each piece when the model produces
+ * it, which is the whole difference between a product that feels fast and one
+ * that feels stuck.
+ *
+ * Usage is recorded once the stream ends, from the provider's own count. If the
+ * connection drops midway the words already sent are still counted: they were
+ * generated and paid for.
+ */
+export async function* streamGeneralAnswer(
+  input: GeneralAnswerInput,
+): AsyncGenerator<string, { content: string; usage: { tokensIn: number; tokensOut: number } }> {
+  const prepared = await prepareGeneralAnswer(input);
+
+  let content = '';
+  let usage = { tokensIn: 0, tokensOut: 0 };
+  /* Changes when an overloaded model hands over to another mid-request. */
+  let servedBy = prepared.provider.model;
+
+  try {
+    for await (const chunk of prepared.provider.stream({
+      task: 'chat',
+      locale: input.locale,
+      system: prepared.system,
+      messages: prepared.messages,
+      maxTokens: 2000,
+      temperature: 0.6,
+    })) {
+      if (chunk.usage) usage = { tokensIn: chunk.usage.tokensIn, tokensOut: chunk.usage.tokensOut };
+      if (chunk.model) servedBy = chunk.model;
+      if (!chunk.delta) continue;
+
+      content += chunk.delta;
+      yield chunk.delta;
+    }
+  } catch (error) {
+    if (error instanceof AIProviderError) {
+      logger.error('ai.provider.failed', {
+        provider: error.provider,
+        status: error.status,
+        task: 'chat',
+        model: prepared.provider.model,
+        detail: error.message.slice(0, 300),
+      });
+
+      if (error.status === 429 || /quota|rate.?limit/i.test(error.message)) {
+        throw new AppError(
+          'AI_UNAVAILABLE',
+          'The AI provider quota has been used up. It resets on its own — try again later, or raise the limit in the provider console.',
+          'انتهت حصّتك من مزوّد الذكاء الاصطناعي. تتجدّد تلقائيًا — أعد المحاولة لاحقًا أو ارفع الحدّ من لوحة المزوّد.',
+          error.message.slice(0, 400),
+        );
+      }
+
+      throw AppError.aiUnavailable(error.message.slice(0, 400));
+    }
+
+    throw error;
+  } finally {
+    if (content) {
+      /* An estimate when the provider sent no count — a dropped stream, usually. */
+      const counted =
+        usage.tokensOut > 0
+          ? usage
+          : { tokensIn: usage.tokensIn, tokensOut: prepared.provider.countTokens(content) };
+
+      await recordAIUsage({
+        userId: input.userId,
+        projectId: input.projectId ?? '',
+        generatedWords: countWords(content),
+        tokensIn: billableInput(counted),
+        tokensOut: counted.tokensOut,
+        costMicroUsd: prepared.provider.estimateCostMicroUsd(counted),
+        provider: prepared.provider.name,
+        model: servedBy,
+      }).catch((error: unknown) => {
+        logger.warn('ai.usageNotRecorded', { error: String(error).slice(0, 200) });
+      });
+    }
+  }
+
+  return { content, usage };
 }
 
 /**

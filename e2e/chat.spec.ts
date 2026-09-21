@@ -163,6 +163,38 @@ test.describe('the sidebar', () => {
     /* Conversations are grouped by date now; a new one lands under Today. */
     await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   });
+
+  test('a conversation can be pinned and unpinned', async ({ page }) => {
+    await registerAndLogin(page, 'sidebar-pin', 'en');
+    await page.goto('/en/chat');
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('What is a confidence interval?');
+    await composer.press('Enter');
+    await expect(page.getByText('What is a confidence interval?').first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await page.reload();
+
+    const sidebar = page.locator('aside');
+    const row = sidebar.getByRole('link', { name: /confidence interval/i });
+    await row.hover();
+    await sidebar.getByRole('button', { name: 'Pin', exact: true }).click();
+
+    /* Moved, not copied: it is under Pinned and no longer under Today. */
+    await expect(sidebar.getByRole('heading', { name: 'Pinned' })).toBeVisible();
+    await expect(sidebar.getByRole('heading', { name: 'Today' })).toHaveCount(0);
+
+    /* It survives a reload, which is the difference between pinned and highlighted. */
+    await page.reload();
+    await expect(sidebar.getByRole('heading', { name: 'Pinned' })).toBeVisible();
+
+    await sidebar.getByRole('link', { name: /confidence interval/i }).hover();
+    await sidebar.getByRole('button', { name: 'Unpin', exact: true }).click();
+    await expect(sidebar.getByRole('heading', { name: 'Pinned' })).toHaveCount(0);
+    await expect(sidebar.getByRole('heading', { name: 'Today' })).toBeVisible();
+  });
 });
 
 test.describe('switching language', () => {

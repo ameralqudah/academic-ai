@@ -547,6 +547,13 @@ export const aiConversations = pgTable(
      * separate, deliberate action.
      */
     archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'date' }),
+    /**
+     * When the user pinned it, or null.
+     *
+     * A time rather than a flag so that pinned conversations have an order of
+     * their own — the most recently pinned first — without a second column.
+     */
+    pinnedAt: timestamp('pinned_at', { withTimezone: true, mode: 'date' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

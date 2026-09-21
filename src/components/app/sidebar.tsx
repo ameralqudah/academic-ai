@@ -14,6 +14,8 @@ import {
   LogOut,
   Plus,
   Pencil,
+  Pin,
+  PinOff,
   Search,
   Settings,
   Shield,
@@ -112,11 +114,13 @@ export interface ConversationSummary {
   title: string | null;
   /** ISO time of the last activity. Optional so older callers keep working. */
   at?: string;
+  pinned?: boolean;
 }
 
-type GroupKey = 'today' | 'yesterday' | 'week' | 'older';
+type GroupKey = 'pinned' | 'today' | 'yesterday' | 'week' | 'older';
 
-const GROUP_ORDER: GroupKey[] = ['today', 'yesterday', 'week', 'older'];
+/* Pinned leads, and a pinned conversation is not repeated under its date. */
+const GROUP_ORDER: GroupKey[] = ['pinned', 'today', 'yesterday', 'week', 'older'];
 
 /**
  * Which heading a conversation belongs under.
@@ -214,6 +218,7 @@ export function Sidebar({
     const needle = query.trim().toLowerCase();
     const now = new Date();
     const result: Record<GroupKey, ConversationSummary[]> = {
+      pinned: [],
       today: [],
       yesterday: [],
       week: [],
@@ -222,7 +227,9 @@ export function Sidebar({
 
     for (const conversation of conversations) {
       if (needle && !(conversation.title ?? '').toLowerCase().includes(needle)) continue;
-      result[hydrated ? groupOf(conversation.at, now) : 'today'].push(conversation);
+      /* Pinning does not depend on the clock, so it is safe before hydration too. */
+      const key = conversation.pinned ? 'pinned' : hydrated ? groupOf(conversation.at, now) : 'today';
+      result[key].push(conversation);
     }
 
     return result;
@@ -372,7 +379,7 @@ export function Sidebar({
               groups[key].length === 0 ? null : (
                 <div key={key} className="flex flex-col gap-0.5 pb-2">
                   <h2 className="px-2 text-xs font-medium text-muted">
-                    {hydrated ? t(`group.${key}`) : t('recent')}
+                    {hydrated || key === 'pinned' ? t(`group.${key}`) : t('recent')}
                   </h2>
                   {groups[key].map((conversation) => (
                     <ConversationRow
@@ -607,6 +614,19 @@ function ConversationRow({
     }
   }
 
+  async function togglePin() {
+    try {
+      await fetch(`/api/conversations/${conversation.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: conversation.pinned ? 'unpin' : 'pin' }),
+      });
+    } finally {
+      /* The list is the server's; refreshing moves the row to where it now belongs. */
+      router.refresh();
+    }
+  }
+
   async function rename() {
     const trimmed = title.trim();
 
@@ -697,6 +717,14 @@ function ConversationRow({
         </span>
       ) : (
         <span className="absolute end-1 flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <button
+            type="button"
+            onClick={() => void togglePin()}
+            aria-label={conversation.pinned ? t('unpinConversation') : t('pinConversation')}
+            className="rounded p-1 text-muted hover:bg-subtle hover:text-ink"
+          >
+            {conversation.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+          </button>
           <button
             type="button"
             onClick={() => setRenaming(true)}

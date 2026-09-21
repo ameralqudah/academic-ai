@@ -34,6 +34,7 @@ export default async function AppLayout({
       conversations={conversations.map((conversation) => ({
         id: conversation.id,
         title: conversation.title,
+        pinned: conversation.pinnedAt !== null,
         /* An ISO string: a Date does not cross the server/client boundary cleanly. */
         at: (conversation.lastMessageAt ?? conversation.updatedAt).toISOString(),
       }))}

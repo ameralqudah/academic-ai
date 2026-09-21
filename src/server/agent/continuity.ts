@@ -23,7 +23,7 @@ import * as artifactsRepo from '@/server/repositories/artifacts.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import type { OutputReference } from '@/server/tasks/contracts';
-import { writtenWork } from '@/server/agent/written-work';
+import { meantByIt, writtenWork } from '@/server/agent/written-work';
 
 /** What kind of earlier thing a message points at. */
 export type ReferenceKind = 'artifact' | 'prose' | 'dataset' | 'task';
@@ -227,7 +227,7 @@ async function writtenCandidates(input: ResolveInput, since: Date): Promise<Cand
       (!input.conversationId || task.conversationId === input.conversationId),
   );
 
-  const candidates: Candidate[] = [];
+  const candidates: (Candidate & { capability: string })[] = [];
 
   for (const task of tasks) {
     const written = writtenWork(await tasksRepo.stepsOf(task.id));
@@ -243,10 +243,11 @@ async function writtenCandidates(input: ResolveInput, since: Date): Promise<Cand
       reason: `the written work of task ${task.id}`,
       output: written.output as OutputReference,
       taskId: task.id,
+      capability: written.step.capability,
     });
   }
 
-  return candidates;
+  return meantByIt(candidates).map(({ capability: _capability, ...candidate }) => candidate);
 }
 
 /**

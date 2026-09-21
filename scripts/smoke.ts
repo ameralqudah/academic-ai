@@ -4310,5 +4310,66 @@ console.log('\nwhat a model costs');
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* What a finished task shows for itself                               */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nA finished task shows what it wrote');
+
+  const { deliverableText, findingKey } = await import('../src/components/agent/task-result');
+  const { isEcho } = await import('../src/agents/restatement');
+  const { noDataRule } = await import('../src/server/tasks/no-data-rule');
+
+  const step = (capability: string, legacy: Record<string, unknown>, artifactIds: string[] = []) => ({
+    capability,
+    status: 'COMPLETED',
+    artifactIds,
+    output: { legacy },
+  });
+
+  /* The task from production: five ticks, a whole paper stored, nothing on screen. */
+  const paper = [
+    step('academic.search', { found: 4, query: 'hospitals' }),
+    step('literature.review', { text: 'The review.' }),
+    step('document.write', { text: '# The paper' }),
+    step('citation.verify', { checked: 4 }),
+    step('quality.check', { warnings: 1 }),
+  ];
+
+  check('the paper is what is shown, not the review before it', deliverableText(paper), '# The paper');
+  check(
+    'text that went into a file is left to the file',
+    deliverableText([...paper, step('document.generate', { filename: 'paper.docx' }, ['a1'])]),
+    null,
+  );
+  check('a search alone has nothing to read', deliverableText([paper[0]!]), null);
+  check(
+    'a step still running is not the result',
+    deliverableText([{ ...step('document.write', { text: 'half' }), status: 'RUNNING' }]),
+    null,
+  );
+
+  const request =
+    'Act as an academic researcher.\n\nWrite a complete academic research paper titled:\n\n"The Impact of Supply Chain Management on Service Quality"';
+
+  check('a request cut short is an echo', isEcho('Act as an academic researcher. Write a complete academic research paper titled: "The Impact of Supply Chain Manageme', request), true);
+  check('an empty restatement has nothing to show', isEcho('  ', request), true);
+  check('a real restatement is kept', isEcho('You want a full paper on hospital supply chains.', request), false);
+
+  check('a finding code is recognised', findingKey('format.emptySection'), 'format_emptySection');
+  check('a sentence is not a code', findingKey('Generation stopped early (length) after 3 rounds.'), null);
+
+  const messages = (await import('../messages/en.json')).default as { task: { finding: Record<string, string> } };
+  const arabic = (await import('../messages/ar.json')).default as { task: { finding: Record<string, string> } };
+  const engine = (await import('node:fs')).readFileSync('src/server/quality/engine.ts', 'utf8');
+  const codes = [...new Set([...engine.matchAll(/code: '([a-z]+\.[A-Za-z]+)'/g)].map((m) => m[1]!.replace('.', '_')))];
+
+  check('every quality finding has an English sentence', codes.filter((code) => !messages.task.finding[code]), []);
+  check('and an Arabic one', codes.filter((code) => !arabic.task.finding[code]), []);
+
+  check('without data, results may not be reported', /do not say that a hypothesis was supported/i.test(noDataRule('en')), true);
+  check('in Arabic too', noDataRule('ar').includes('جمع البيانات لم يتم بعد'), true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

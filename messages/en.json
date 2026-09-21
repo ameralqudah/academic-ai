@@ -1545,6 +1545,23 @@
     }
   },
   "task": {
+    "result": "Result",
+    "copy": "Copy",
+    "copied": "Copied",
+    "dismiss": "Dismiss this task",
+    "finding": {
+      "format_emptySection": "{count, plural, one {One heading has} other {# headings have}} no text under {count, plural, one {it} other {them}}.",
+      "format_placeholder": "{count, plural, one {A placeholder was} other {# placeholders were}} left in the text.",
+      "format_malformedCitation": "{count, plural, one {One citation is} other {# citations are}} not closed properly.",
+      "citation_noReference": "A citation points to a reference that is not in the list.",
+      "claim_unsupported": "Some claims are made without a source.",
+      "consistency_sampleSize": "The sample size is not the same everywhere in the text.",
+      "reference_duplicate": "The same reference is listed more than once.",
+      "reference_neverCited": "A listed reference is never cited in the text.",
+      "reference_possiblyFabricated": "A reference could not be confirmed and may not exist.",
+      "statistic_negativeAlpha": "A reliability coefficient is negative — check the item coding.",
+      "statistic_outOfRange": "A reported statistic is outside its possible range."
+    },
     "starting": "Starting…",
     "planning": "Planning the steps…",
     "stepCount": "{done} of {total}",

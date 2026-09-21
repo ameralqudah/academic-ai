@@ -1,6 +1,6 @@
 'use client';
 
-import { Loader2, MessageCircleQuestion } from 'lucide-react';
+import { Loader2, MessageCircleQuestion, X } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { useEffect, useState } from 'react';
 
@@ -69,48 +69,76 @@ export function ActiveTasks({ currentConversationId }: { currentConversationId?:
     };
   }, [currentConversationId]);
 
+  async function dismiss(taskId: string) {
+    /* Taken off the screen first; a failed request brings nothing back worth waiting for. */
+    setTasks((current) => current.filter((task) => task.id !== taskId));
+    await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' }).catch(() => undefined);
+  }
+
   if (tasks.length === 0) return null;
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-4 pt-3">
       {tasks.map((task) => (
-        <button
-          key={task.id}
-          type="button"
-          onClick={() => {
-            /*
-             * Opening the conversation rather than the task. The progress panel
-             * lives in the thread where the work was asked for, and that thread
-             * is also where the answer will appear.
-             */
-            if (task.conversationId) router.push(`/chat?c=${task.conversationId}`);
-          }}
-          className="flex w-full items-center gap-2 rounded-xl border border-line bg-surface p-3 text-start hover:border-accent"
-        >
-          {task.status === 'WAITING_FOR_INPUT' ? (
-            <MessageCircleQuestion className="size-4 shrink-0 text-accent" aria-hidden />
-          ) : (
-            <Loader2 className="size-4 shrink-0 animate-spin text-accent" aria-hidden />
-          )}
+        <div key={task.id} className="flex items-stretch gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              /*
+               * Opening the conversation rather than the task. The progress panel
+               * lives in the thread where the work was asked for, and that thread
+               * is also where the answer will appear.
+               */
+              if (task.conversationId) router.push(`/chat?c=${task.conversationId}`);
+            }}
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-surface p-3 text-start hover:border-accent"
+          >
+            {task.status === 'WAITING_FOR_INPUT' ? (
+              <MessageCircleQuestion className="size-4 shrink-0 text-accent" aria-hidden />
+            ) : (
+              <Loader2 className="size-4 shrink-0 animate-spin text-accent" aria-hidden />
+            )}
 
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-sm text-ink">{task.request}</span>
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-sm text-ink">{task.request}</span>
 
-            <span className="text-xs text-muted">
-              {/*
-                A task waiting for an answer says so rather than showing a step
-                count: the count has stopped moving and will not move until the
-                researcher acts, so reporting progress would be misleading.
-              */}
-              {task.status === 'WAITING_FOR_INPUT'
-                ? t('status.WAITING_FOR_INPUT')
-                : `${t(`status.${task.status}`)} · ${t('stepCount', {
-                    done: task.progress.completed,
-                    total: task.progress.total,
-                  })}`}
+              <span className="text-xs text-muted">
+                {/*
+                  A task waiting for an answer says so rather than showing a step
+                  count: the count has stopped moving and will not move until the
+                  researcher acts, so reporting progress would be misleading.
+                */}
+                {task.status === 'WAITING_FOR_INPUT'
+                  ? t('status.WAITING_FOR_INPUT')
+                  : `${t(`status.${task.status}`)} · ${t('stepCount', {
+                      done: task.progress.completed,
+                      total: task.progress.total,
+                    })}`}
+              </span>
             </span>
-          </span>
-        </button>
+          </button>
+
+          {/*
+            A way out, for a question nobody is going to answer.
+
+            A task that asked something and was abandoned waited for ever, and
+            its card followed the researcher into every conversation with no
+            way to be rid of it. Only for waiting tasks: work that is running is
+            stopped from its own panel, where what is being stopped is in view —
+            one stray click here should not end ten minutes of research.
+          */}
+          {task.status === 'WAITING_FOR_INPUT' && (
+            <button
+              type="button"
+              aria-label={t('dismiss')}
+              title={t('dismiss')}
+              onClick={() => void dismiss(task.id)}
+              className="flex shrink-0 items-center rounded-xl border border-line bg-surface px-2.5 text-muted hover:border-danger hover:text-danger"
+            >
+              <X className="size-4" aria-hidden />
+            </button>
+          )}
+        </div>
       ))}
     </div>
   );

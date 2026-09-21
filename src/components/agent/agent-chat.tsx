@@ -17,6 +17,7 @@ import {
 } from '@/components/agent/role-picker';
 import { ResultCard, type StatisticalResult } from '@/components/agent/result-card';
 import { SourceList, type RetrievedSource, type SourceCoverage } from '@/components/agent/source-list';
+import { isEcho } from '@/agents/restatement';
 import { Markdown } from '@/components/chat/markdown';
 import { Alert } from '@/components/ui/alert';
 import { useRouter } from '@/i18n/navigation';
@@ -1326,10 +1327,10 @@ export function AgentChat({
           <Welcome userName={userName} />
         ) : (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 pt-2 pb-6">
-            {turns.map((turn) => (
+            {turns.map((turn, index) => (
               <TurnView
                 key={turn.id}
-                turn={turn}
+                turn={withoutEcho(turn, turns[index - 1])}
                 branch={branches.find((point) => point.messageId === turn.id)}
                 onSwitchBranch={(messageId) => void switchBranch(messageId)}
                 editing={editingId === turn.id}
@@ -1564,6 +1565,21 @@ function addsMeaning(restatement: string, userMessage?: string): boolean {
   for (const word of restated) if (said.has(word)) shared += 1;
 
   return shared / restated.size < 0.7;
+}
+
+/**
+ * A task turn, minus a "restatement" that is the request cut short.
+ *
+ * New turns no longer store one; conversations from before still do, and a
+ * researcher reopening one should not find their own words under the panel
+ * where the result belongs. Only task turns: an ordinary answer that happens to
+ * begin like the question is an answer.
+ */
+function withoutEcho(turn: Turn, previous?: Turn): Turn {
+  const isTask = turn.results?.some((result) => result.kind === 'task');
+  if (!isTask || !turn.text || previous?.role !== 'user' || !previous.text) return turn;
+
+  return isEcho(turn.text, previous.text) ? { ...turn, text: undefined } : turn;
 }
 
 function TurnView({

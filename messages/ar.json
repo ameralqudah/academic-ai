@@ -1545,6 +1545,23 @@
     }
   },
   "task": {
+    "result": "النتيجة",
+    "copy": "نسخ",
+    "copied": "تم النسخ",
+    "dismiss": "إخفاء هذه المهمة",
+    "finding": {
+      "format_emptySection": "{count, plural, one {يوجد عنوان واحد} two {يوجد عنوانان} few {توجد # عناوين} other {يوجد # عنوانًا}} بلا نص تحته.",
+      "format_placeholder": "بقيت في النص علامات مؤقتة لم تُستبدل.",
+      "format_malformedCitation": "يوجد توثيق غير مغلق بشكل صحيح.",
+      "citation_noReference": "يوجد توثيق يشير إلى مرجع غير موجود في القائمة.",
+      "claim_unsupported": "بعض العبارات وردت بلا مصدر.",
+      "consistency_sampleSize": "حجم العينة غير متطابق في مواضع النص.",
+      "reference_duplicate": "المرجع نفسه مكرر في القائمة.",
+      "reference_neverCited": "يوجد مرجع في القائمة لم يُستشهد به في النص.",
+      "reference_possiblyFabricated": "تعذّر التحقق من أحد المراجع وقد لا يكون موجودًا.",
+      "statistic_negativeAlpha": "معامل الثبات سالب — راجع ترميز الفقرات.",
+      "statistic_outOfRange": "إحدى القيم الإحصائية خارج نطاقها الممكن."
+    },
     "starting": "جارٍ البدء…",
     "planning": "جارٍ تخطيط الخطوات…",
     "stepCount": "{done} من {total}",

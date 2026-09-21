@@ -58,6 +58,7 @@ import { generateLongForm, incompleteNotice } from '@/server/ai/long-form';
 import { broaden, topicOf } from './query';
 import { instructionFrom } from './step-instruction';
 import { sourcesAsMaterial } from './found-sources';
+import { noDataRule } from '@/server/tasks/no-data-rule';
 
 /**
  * The producer identity every output carries.
@@ -799,10 +800,13 @@ export function registerAllHandlers(): void {
 
     const language = decision.language;
 
+    /* Sources support what others found; only an analysis supports what this study found. */
+    const evidenceRule = analysisBlock ? '' : noDataRule(language);
+
     const instruction =
       language === 'ar'
-        ? `اكتب قسم «${section}» من البحث بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}`
-        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}`;
+        ? `اكتب قسم «${section}» من البحث بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}${evidenceRule}`
+        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}${evidenceRule}`;
 
     /*
      * The model chosen for this step, rather than the one configured globally.

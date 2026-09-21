@@ -15,6 +15,7 @@ import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as artifactsRepo from '@/server/repositories/artifacts.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
+import { isEcho } from '@/agents/restatement';
 
 /**
  * One place a message goes.
@@ -86,6 +87,11 @@ const schema = z.object({
 });
 
 type Body = z.infer<typeof schema>;
+
+/** A restatement worth showing, or nothing when it is the request cut short. */
+function restatementOf(restatement: string, message: string): string {
+  return isEcho(restatement, message) ? '' : restatement;
+}
 
 export const POST = withApi<Body>(
   { schema, rateLimit: { max: 60, windowSeconds: 300, key: 'chat.send' } },
@@ -281,7 +287,7 @@ export const POST = withApi<Body>(
           conversationId: body.conversationId,
           userId: user.id,
           userMessage: body.message,
-          assistantMessage: decision.intent.restatement || ' ',
+          assistantMessage: restatementOf(decision.intent.restatement, body.message) || ' ',
           /*
            * Written in the shape the chat already reads back.
            *
@@ -314,7 +320,7 @@ export const POST = withApi<Body>(
           path: 'agent' as const,
           task: { id: task.id, status: task.status },
           /* Shown while the plan is being built, so the wait is not silent. */
-          restatement: decision.intent.restatement,
+          restatement: restatementOf(decision.intent.restatement, body.message),
         },
         { status: 202 },
       );
@@ -444,7 +450,7 @@ export const POST = withApi<Body>(
           send({
             type: 'task',
             task: { id: task.id, status: task.status },
-            restatement: decision.intent.restatement,
+            restatement: restatementOf(decision.intent.restatement, body.message),
           });
           return;
         }
@@ -483,7 +489,7 @@ export const POST = withApi<Body>(
         {
           path: 'agent' as const,
           task: { id: task.id, status: task.status },
-          restatement: decision.intent.restatement,
+          restatement: restatementOf(decision.intent.restatement, body.message),
           /* Recorded so a wrong escalation can be traced from the response. */
           escalatedFrom: 'fast' as const,
         },

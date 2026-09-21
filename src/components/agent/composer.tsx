@@ -284,7 +284,14 @@ export function Composer({
           {modeOpen && (
             <div
               role="listbox"
-              className="absolute bottom-full start-0 z-20 mb-1 w-56 rounded-lg border border-line bg-surface p-1 shadow-lg"
+              /*
+               * Downwards on a new conversation, where the composer sits in the
+               * middle of the page and a list above it lands on the greeting.
+               */
+              className={cn(
+                'absolute start-0 z-20 w-56 rounded-lg border border-line bg-surface p-1 shadow-lg',
+                roomy ? 'top-full mt-1' : 'bottom-full mb-1',
+              )}
             >
               {otherModes.map((option) =>
                 option.available ? (

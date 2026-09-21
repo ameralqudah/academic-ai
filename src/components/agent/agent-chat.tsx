@@ -1408,6 +1408,7 @@ export function AgentChat({
             locale={locale}
             disabled={busy}
             inline
+            dropDown={empty}
           />
         }
       />
@@ -1993,7 +1994,12 @@ function Welcome({ userName }: { userName?: string }) {
   );
 
   /* An account with no name falls back to its email, which is not a greeting. */
-  const name = userName && !userName.includes('@') ? userName.trim() : '';
+  /*
+   * The first name only. A full four-part name ran past the edge of the column
+   * and pushed the greeting itself out of view; nobody is greeted that way
+   * aloud either.
+   */
+  const name = userName && !userName.includes('@') ? (userName.trim().split(/\s+/)[0] ?? '') : '';
   const hour = hydrated ? new Date().getHours() : 9;
   const part = hour < 5 ? 'evening' : hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
   const greeting = t(`greeting.${part}`);
@@ -2012,7 +2018,12 @@ function Welcome({ userName }: { userName?: string }) {
           !hydrated && 'opacity-0',
         )}
       >
-        {name ? t('greeting.withName', { greeting, name }) : greeting}
+        {name ? (
+          /* Isolated, so an Arabic name inside an English greeting keeps its own order. */
+          t.rich('greeting.withName', { greeting, name, bdi: (chunks) => <bdi>{chunks}</bdi> })
+        ) : (
+          greeting
+        )}
       </h2>
     </div>
   );

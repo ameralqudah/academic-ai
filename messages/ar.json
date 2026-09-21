@@ -1313,7 +1313,7 @@
       "morning": "صباح الخير",
       "afternoon": "مساء الخير",
       "evening": "مساء الخير",
-      "withName": "{greeting}، {name}"
+      "withName": "{greeting}، <bdi>{name}</bdi>"
     },
     "otherModes": "أوضاع أخرى"
   },

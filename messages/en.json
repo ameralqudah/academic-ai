@@ -1313,7 +1313,7 @@
       "morning": "Good morning",
       "afternoon": "Good afternoon",
       "evening": "Good evening",
-      "withName": "{greeting}, {name}"
+      "withName": "{greeting}, <bdi>{name}</bdi>"
     },
     "otherModes": "More modes"
   },

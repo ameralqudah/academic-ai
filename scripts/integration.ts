@@ -125,6 +125,10 @@ import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls
 import { clearUnselectedTitles, deleteTitle, listTitles } from '@/server/services/ai.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
+import { simulateFromReading } from '@/server/services/simulation.service';
+import { SIMULATED_NOTICE } from '@/server/simulation/notice';
+import { parseXlsx } from '@/analysis/parse-xlsx';
+import ExcelJS from 'exceljs';
 import { isOwnerEmail } from '@/server/auth/owner';
 import {
   assertCanCreateProject,
@@ -5393,6 +5397,150 @@ async function main() {
       'the planner distinguishes tables from documents',
       plannerSource.includes('AN UPLOADED FILE IS EITHER A TABLE OR A DOCUMENT'),
     );
+  }
+
+
+  /* ------------------------------------------------------- simulated data */
+  section('Simulated practice data');
+  {
+    const teacher = await newUser('sim-teacher');
+
+    const paperText = [
+      'Determinants of e-learning adoption',
+      '',
+      'Method',
+      'A questionnaire on a five-point Likert scale was completed by 312 students.',
+      '',
+      'Results',
+      'Perceived usefulness (PU, 4 items) had a mean of 3.84 (SD = 0.71) and Cronbach alpha of .88.',
+      'Intention (INT, 3 items) had a mean of 4.21 (SD = 0.66) and alpha of .90.',
+      'The correlation between PU and INT was .58.',
+    ].join('\n');
+
+    const paper = await saveUpload({
+      userId: teacher,
+      file: { name: 'adoption-study.txt', bytes: new TextEncoder().encode(paperText).buffer as ArrayBuffer },
+    });
+
+    check('a paper is not a simulation', paper.dataset.simulated, false);
+
+    /* What a careful reading would return, plus one number the paper never printed. */
+    const reading = {
+      title: 'Determinants of e-learning adoption',
+      n: 312,
+      scale: { min: 1, max: 5 },
+      constructs: [
+        { name: 'PU', label: 'Perceived usefulness', items: 4, mean: 3.84, sd: 0.71, alpha: 0.88 },
+        { name: 'INT', label: 'Intention', items: 3, mean: 4.21, sd: 0.66, alpha: 0.9 },
+      ],
+      correlations: [{ a: 'PU', b: 'INT', r: 0.58 }],
+      paths: [{ from: 'PU', to: 'INT', beta: 0.47 }],
+    };
+
+    const outcome = await simulateFromReading({
+      userId: teacher,
+      datasetId: paper.dataset.id,
+      locale: 'ar',
+      reading,
+    });
+
+    check('the simulation completes', outcome.status, 'done');
+    if (outcome.status !== 'done') throw new Error('simulation did not complete');
+
+    check('the stored row is flagged', outcome.dataset.simulated, true);
+    assertTrue('the file name says what it is', outcome.dataset.originalName.startsWith('SIMULATED_'));
+    assertTrue('and so does the workbook', outcome.artifact.filename.startsWith('SIMULATED_'));
+    check('one row per respondent', outcome.dataset.rowCount, 312);
+    assertTrue('the report opens with the disclosure', outcome.report.includes(SIMULATED_NOTICE.ar));
+
+    check(
+      'a number the paper never printed is reported as unverified',
+      outcome.unverified.map((entry) => `${entry.statistic}:${entry.value}`).join(','),
+      'path:0.47',
+    );
+
+    const loaded = await loadForAnalysis(outcome.dataset.id, teacher);
+    check('every stored row carries the marker', loaded.data.columns[0], '_simulated');
+
+    /* The workbook: opens on the warning, and uploads back as what it is. */
+    const workbook = await readArtifact(outcome.artifact.id, teacher);
+    const excel = new ExcelJS.Workbook();
+    await excel.xlsx.load(workbook.bytes.buffer as ArrayBuffer);
+
+    check('the first sheet is the warning', excel.worksheets[0]?.name, 'READ ME - SIMULATED');
+    assertTrue(
+      'in both languages',
+      JSON.stringify(excel.worksheets[0]?.getSheetValues()).includes('SIMULATED DATA') &&
+        JSON.stringify(excel.worksheets[0]?.getSheetValues()).includes('بيانات محاكاة'),
+    );
+
+    const reparsed = await parseXlsx(workbook.bytes.buffer as ArrayBuffer, 'x.xlsx');
+    check('the data sheet is the one a re-upload reads', reparsed.rows.length, 312);
+
+    /* Renamed and uploaded again: the marker column still gives it away. */
+    const renamed = await saveUpload({
+      userId: teacher,
+      file: { name: 'my-thesis-data.xlsx', bytes: workbook.bytes.buffer as ArrayBuffer },
+    });
+    check('a renamed re-upload is still recognised', renamed.dataset.simulated, true);
+
+    const cleanedCopy = await saveCleanedCopy({ datasetId: outcome.dataset.id, userId: teacher, actions: [] });
+    check('a cleaned copy stays simulated', cleanedCopy.dataset.simulated, true);
+
+    /* Analysed freely; never attached to a project. */
+    const practice = await runAnalysis({
+      datasetId: outcome.dataset.id,
+      userId: teacher,
+      test: 'correlation.pearson',
+      columns: { independents: ['PU1', 'INT1'] },
+    });
+
+    check('the run records what it ran on', (practice.run.spec as { simulated?: boolean }).simulated, true);
+
+    const thesis = await createProject(teacher, projectInput);
+
+    await expectAppError('a simulated analysis cannot be attached to a project', 'VALIDATION', () =>
+      attachRun({ runId: practice.run.id, userId: teacher, projectId: thesis.id, sectionKey: 'RESULTS' }),
+    );
+
+    /* Still refused after the file is gone, because the run remembers. */
+    await deleteFileOnly(outcome.dataset.id, teacher);
+
+    await expectAppError('nor after its file is deleted', 'VALIDATION', () =>
+      attachRun({ runId: practice.run.id, userId: teacher, projectId: thesis.id, sectionKey: 'RESULTS' }),
+    );
+
+    check(
+      'so the results chapter never sees it',
+      buildResultsContext(await analysisRunsRepo.listForSection(thesis.id, teacher, 'RESULTS')),
+      null,
+    );
+
+    /* What the generator will not assume. */
+    const noSize = await simulateFromReading({
+      userId: teacher,
+      datasetId: paper.dataset.id,
+      locale: 'en',
+      reading: { ...reading, n: null },
+    });
+    check('a missing sample size is asked for, not invented', noSize.status === 'needs-input' && noSize.missing, 'n');
+
+    const answered = await simulateFromReading({
+      userId: teacher,
+      datasetId: paper.dataset.id,
+      locale: 'en',
+      reading: { ...reading, n: null },
+      n: 150,
+    });
+    check('and the researcher\'s answer is used', answered.status === 'done' && answered.dataset.rowCount, 150);
+
+    const table = await simulateFromReading({
+      userId: teacher,
+      datasetId: renamed.dataset.id,
+      locale: 'en',
+      reading,
+    });
+    check('a table is not a paper', table.status === 'needs-input' && table.missing, 'document');
   }
 
   /* --------------------------------------------------------------- cleanup */

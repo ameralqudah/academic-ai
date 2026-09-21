@@ -431,6 +431,8 @@ export async function startBootstrap(input: {
       resamples,
       confidenceLevel: input.confidenceLevel ?? 0.95,
       seed: input.seed ?? 20260101,
+      /* On the job itself, so an export still knows after the file is deleted. */
+      ...(loaded.row.simulated ? { simulated: true } : {}),
     },
   });
 
@@ -599,6 +601,8 @@ export interface JobView {
   result: { bootstrap: BootstrapResult; report?: PlsReport } | null;
   durationMs: number | null;
   createdAt: string;
+  /** The analysis ran on simulated data; every export of it says so. */
+  simulated: boolean;
 }
 
 export async function getJob(id: string, userId: string): Promise<JobView> {
@@ -622,6 +626,7 @@ export async function getJob(id: string, userId: string): Promise<JobView> {
     result: (job.result as { bootstrap: BootstrapResult; report?: PlsReport } | null) ?? null,
     durationMs: job.durationMs,
     createdAt: job.createdAt.toISOString(),
+    simulated: (job.spec as { simulated?: unknown } | null)?.simulated === true,
   };
 }
 

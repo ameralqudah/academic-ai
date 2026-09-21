@@ -23,7 +23,7 @@
 
 import { logger } from '@/lib/logger';
 import { classifyIntent, type IntentResult } from '@/agents/intent';
-import { decide, detectReference } from './routing-rules';
+import { decide, detectReference, wantsSimulatedData } from './routing-rules';
 import type { DatasetProfile } from '@/analysis/types';
 
 export type RoutePath = 'fast' | 'agent';
@@ -176,8 +176,13 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
   const wantsFile = FORMAT_WORDS.some((pattern) => pattern.test(input.message));
   const needsTools = NEEDS_TOOLS.has(intent.intent);
 
+  const wantsSimulation = wantsSimulatedData(input.message);
+
   const suggested = new Set(CAPABILITY_FOR[intent.intent] ?? []);
-  if (wantsFile) suggested.add('document.generate');
+  if (wantsFile && !wantsSimulation) suggested.add('document.generate');
+
+  /* The step builds its own workbook, so no generation step is suggested beside it. */
+  if (wantsSimulation) suggested.add('data.simulate');
 
   /*
    * A dataset in the conversation and a request that mentions it. The intent
@@ -194,6 +199,7 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
     wantsFile,
     referencesPrevious,
     hasDataset: input.hasDataset ?? false,
+    wantsSimulation,
   });
 
   logger.info('route.decided', {
@@ -213,5 +219,5 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
   };
 }
 
-export { decide, detectReference } from './routing-rules';
+export { decide, detectReference, wantsSimulatedData } from './routing-rules';
 

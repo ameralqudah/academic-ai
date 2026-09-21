@@ -164,6 +164,13 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisOut
       options: request.options ?? {},
       rowsAnalysed: loaded.data.rows.length,
       ...(loaded.truncatedTo ? { truncatedTo: loaded.truncatedTo } : {}),
+      /*
+       * Written onto the run, not looked up from the dataset later. A run
+       * outlives its file — "delete the file" keeps the analyses — and a run
+       * whose simulated source has been deleted would otherwise look like any
+       * other.
+       */
+      ...(loaded.row.simulated ? { simulated: true } : {}),
     },
     result: result as unknown as Record<string, unknown>,
   });
@@ -552,6 +559,25 @@ export async function attachRun(input: {
   projectId: string;
   sectionKey: string;
 }): Promise<AnalysisRun> {
+  /*
+   * An analysis of simulated data is never attached to a project.
+   *
+   * Attaching is what turns a number into one the results chapter is written
+   * from, under a heading that tells the model these are "facts computed from
+   * the researcher's own data". For invented respondents that sentence is
+   * false, and the chapter written from it would be a fabricated one. Practice
+   * belongs in the conversation; a project is a real study.
+   */
+  const existing = await runsRepo.findOwned(input.runId, input.userId);
+
+  if (existing && isSimulatedRun(existing)) {
+    throw new AppError(
+      'VALIDATION',
+      'This analysis was run on simulated data, so it cannot be attached to a research project. Simulated data is for teaching and practice only.',
+      'هذا التحليل أُجري على بيانات محاكاة، فلا يمكن إرفاقه بمشروع بحثي. البيانات المحاكاة للتدريس والتدرّب فقط.',
+    );
+  }
+
   const run = await runsRepo.attachToSection(
     input.runId,
     input.userId,
@@ -562,6 +588,11 @@ export async function attachRun(input: {
     throw new AppError('NOT_FOUND', 'That analysis was not found.', 'لم يُعثر على التحليل.');
   }
   return run;
+}
+
+/** Whether a run was computed from a simulated dataset. Read from the run itself. */
+export function isSimulatedRun(run: Pick<AnalysisRun, 'spec'>): boolean {
+  return (run.spec as { simulated?: unknown } | null)?.simulated === true;
 }
 
 export async function detachRun(runId: string, userId: string): Promise<AnalysisRun> {

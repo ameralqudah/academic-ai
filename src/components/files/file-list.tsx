@@ -33,6 +33,8 @@ export interface DatasetSummary {
   projectTitle?: string | null;
   /** ORIGINAL or CLEANED — a cleaned copy goes when its original does. */
   kind?: 'ORIGINAL' | 'CLEANED';
+  /** Generated to reproduce a paper's statistics, for teaching. Never real responses. */
+  simulated?: boolean;
 }
 
 export function FileList({ datasets }: { datasets: DatasetSummary[] }) {
@@ -165,6 +167,16 @@ function FileRow({
           <span className="mt-0.5 flex items-center gap-2">
             {dataset.projectTitle && (
               <span className="truncate text-[11px] text-muted">{dataset.projectTitle}</span>
+            )}
+            {/*
+              Louder than the cleaned badge on purpose. Mistaking a cleaned copy
+              for an original costs a re-run; mistaking invented respondents for
+              collected ones is how fabricated data reaches a thesis.
+            */}
+            {dataset.simulated && (
+              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">
+                {t('simulated')}
+              </span>
             )}
             {dataset.kind === 'CLEANED' && (
               <span className="rounded bg-subtle px-1.5 py-0.5 text-[10px] text-muted">

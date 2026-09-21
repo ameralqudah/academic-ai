@@ -59,7 +59,9 @@ import { generateLongForm, incompleteNotice } from '@/server/ai/long-form';
 import { broaden, topicOf } from './query';
 import { instructionFrom } from './step-instruction';
 import { sourcesAsMaterial } from './found-sources';
-import { noDataRule } from '@/server/tasks/no-data-rule';
+import { anySimulated, noDataRule, simulatedDataRule } from '@/server/tasks/no-data-rule';
+import { simulateFromPaper } from '@/server/services/simulation.service';
+import { SIMULATED_NOTICE } from '@/server/simulation/notice';
 
 /**
  * The producer identity every output carries.
@@ -203,6 +205,44 @@ function say(
   const language = spoken === 'ar' || spoken === 'en' ? spoken : context.locale;
 
   return language === 'ar' ? ar : en;
+}
+
+/**
+ * Whether a dataset is a simulation.
+ *
+ * Asked by every step that turns a dataset into numbers, so the answer can
+ * travel with the numbers. A writing step sees an analysis, not the file it ran
+ * on — and an analysis of invented respondents looks exactly like any other.
+ */
+async function isSimulatedDataset(datasetId: string, userId: string): Promise<boolean> {
+  const dataset = await datasetsRepo.findOwned(datasetId, userId);
+  return dataset?.simulated === true;
+}
+
+/**
+ * Whether anything this step can see rests on simulated data.
+ *
+ * Read from every type that can carry the mark — the dataset, an analysis of
+ * it, and prose already written about it — because a file may be assembled
+ * from prose two steps removed from the dataset that made it simulated.
+ */
+function restsOnSimulatedData(context: StepContext): boolean {
+  return (['dataset.v1', 'analysis.v1', 'pls-results.v1', 'prose.v1'] as const).some((type) =>
+    anySimulated(readAllOutputs<Record<string, unknown>>(context.available, type)),
+  );
+}
+
+/**
+ * The disclosure placed in the text by code.
+ *
+ * The writing prompt asks the model to open with a notice, and a model asked
+ * to do something usually does. "Usually" is not the standard for the one
+ * sentence that separates a teaching exercise from a fabricated result, so it
+ * is also written here, where it cannot be forgotten, reworded or dropped.
+ */
+function withSimulatedNotice(text: string, language: 'ar' | 'en'): string {
+  const notice = SIMULATED_NOTICE[language];
+  return text.includes(notice) ? text : `${notice}\n\n${text}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -685,6 +725,8 @@ export function registerAllHandlers(): void {
       model: model as never,
     });
 
+    const simulated = await isSimulatedDataset(datasetId, context.userId);
+
     /*
      * The verdict and section summaries, not the raw estimate. A later step
      * cites what the analysis concluded; the loading matrix would be thousands
@@ -695,6 +737,8 @@ export function registerAllHandlers(): void {
         producer(context, 'statistics.pls'),
         'pls-results.v1',
         {
+          /* First, not last: a consumer that truncates a payload must still see it. */
+          ...(simulated ? { simulated: true } : {}),
           verdict: analysis.report.verdict,
           sections: analysis.report.sections.map((section) => ({
             titleKey: section.titleKey,
@@ -702,7 +746,7 @@ export function registerAllHandlers(): void {
           })),
           n: analysis.n,
         },
-        { metadata: { datasetId, converged: true } },
+        { metadata: { datasetId, converged: true, simulated } },
       ),
     ]);
   });
@@ -727,6 +771,7 @@ export function registerAllHandlers(): void {
     }
 
     const result = await runCbSem({ datasetId, userId: context.userId, model: model as never });
+    const simulated = await isSimulatedDataset(datasetId, context.userId);
 
     /*
      * Reported as `analysis.v1` rather than a CB-SEM-specific type: a document
@@ -738,6 +783,7 @@ export function registerAllHandlers(): void {
         producer(context, 'statistics.cbsem'),
         'analysis.v1',
         {
+          ...(simulated ? { simulated: true } : {}),
           method: 'cb-sem',
           fit: result.fit,
           loadings: result.loadings.map((loading) => ({
@@ -747,7 +793,7 @@ export function registerAllHandlers(): void {
           })),
           n: result.n,
         },
-        { metadata: { datasetId, verdict: result.fit.verdict } },
+        { metadata: { datasetId, verdict: result.fit.verdict, simulated } },
       ),
     ]);
   });
@@ -779,10 +825,19 @@ export function registerAllHandlers(): void {
      * adding a statistical capability required remembering to name it
      * consistently or the writing step would silently ignore its results.
      */
-    const analysisBlock = [
+    const analysisResults = [
       ...readAllOutputs<Record<string, unknown>>(context.available, 'pls-results.v1'),
       ...readAllOutputs<Record<string, unknown>>(context.available, 'analysis.v1'),
-    ]
+    ];
+
+    /*
+     * Simulated data anywhere in the task, not only behind an analysis: a
+     * dataset generated two steps ago and described from its profile is just
+     * as invented as one that went through PLS first.
+     */
+    const onSimulatedData = restsOnSimulatedData(context);
+
+    const analysisBlock = analysisResults
       .map((result) => `\n\nAnalysis results: ${JSON.stringify(result).slice(0, 2000)}`)
       .join('');
 
@@ -802,7 +857,16 @@ export function registerAllHandlers(): void {
     const language = decision.language;
 
     /* Sources support what others found; only an analysis supports what this study found. */
-    const evidenceRule = analysisBlock ? '' : noDataRule(language);
+    /*
+     * Three cases, not two. An analysis of real data supports findings. No
+     * analysis supports none. An analysis of simulated data is arithmetic on
+     * respondents who do not exist, and what is written from it must say so.
+     */
+    const evidenceRule = onSimulatedData
+      ? simulatedDataRule(language)
+      : analysisBlock
+        ? ''
+        : noDataRule(language);
 
     const instruction =
       language === 'ar'
@@ -832,18 +896,20 @@ export function registerAllHandlers(): void {
       locale: language,
     });
 
-    const text = generated.text;
-    if (text.trim().length < 40) {
+    if (generated.text.trim().length < 40) {
       return failed([
         {
           code: 'write.empty',
           severity: 'error',
           message: `The model returned no usable text for "${section}".`,
           reference: section,
-          metadata: { returned: text.length },
+          metadata: { returned: generated.text.length },
         },
       ]);
     }
+    const text = onSimulatedData ? withSimulatedNotice(generated.text, language) : generated.text;
+    const simulatedMark = onSimulatedData ? { simulated: true } : {};
+
     const notice = incompleteNotice(generated, language);
     const body = notice ? `${text}\n\n${notice}` : text;
 
@@ -851,6 +917,7 @@ export function registerAllHandlers(): void {
       return partial(
         [
           makeOutput(producer(context, 'document.write'), 'prose.v1', {
+            ...simulatedMark,
             text: body,
             references,
             heading: section,
@@ -881,6 +948,7 @@ export function registerAllHandlers(): void {
     return succeeded(
       [
         makeOutput(producer(context, 'document.write'), 'prose.v1', {
+          ...simulatedMark,
           text,
           references,
           heading: section,
@@ -1082,7 +1150,24 @@ export function registerAllHandlers(): void {
      */
     const title = namedTitle || carriedTitle || 'Document';
 
+    /*
+     * A file built from work on simulated data says so on its first page and
+     * in its name. A document is what gets forwarded, without the conversation
+     * that explained what it was.
+     */
+    const simulatedFile = restsOnSimulatedData(context);
+    const fileLanguage: 'ar' | 'en' = context.locale;
+
     const sections = [
+      ...(simulatedFile
+        ? [
+            {
+              heading: fileLanguage === 'ar' ? 'تنبيه: بيانات محاكاة' : 'Notice: simulated data',
+              level: 1,
+              paragraphs: [SIMULATED_NOTICE[fileLanguage]],
+            },
+          ]
+        : []),
       ...carried,
       ...sectionsFrom(context).map((section, index) => ({
         heading: section.heading || `${index + 1}`,
@@ -1208,6 +1293,14 @@ export function registerAllHandlers(): void {
         }
       }
 
+      if (simulatedFile) {
+        sheets.unshift({
+          name: 'READ ME - SIMULATED',
+          headers: ['SIMULATED DATA — بيانات محاكاة'],
+          rows: [[SIMULATED_NOTICE.ar], [SIMULATED_NOTICE.en]] as never,
+        });
+      }
+
       const own = context.input.table as { headers: string[]; rows: unknown[][] } | undefined;
       if (own) sheets.push({ name: 'Data', headers: own.headers, rows: own.rows as never });
 
@@ -1231,12 +1324,13 @@ export function registerAllHandlers(): void {
       artifact = await storeArtifact({
         userId: context.userId,
         kind,
-        filename: `${title.slice(0, 60).replace(/[^\p{L}\p{N}\s-]/gu, '')}.${kind}`,
+        filename: `${simulatedFile ? 'SIMULATED_' : ''}${title.slice(0, 60).replace(/[^\p{L}\p{N}\s-]/gu, '')}.${kind}`,
         bytes,
         projectId: (context.context.projectId as string) ?? null,
         metadata: {
           citationStyle: style,
           taskId: context.taskId,
+          ...(simulatedFile ? { simulated: true } : {}),
           ...(kind !== requested ? { requestedFormat: requested, substituted: true } : {}),
         },
         ...(prose ? { quality: { text: prose, references } } : {}),
@@ -1552,11 +1646,112 @@ export function registerAllHandlers(): void {
         datasetId,
         ready: true,
         fileKind: 'table',
+        ...(dataset.simulated ? { simulated: true } : {}),
         name: dataset.originalName,
         rowCount: dataset.rowCount,
         columns: columns.map((column) => column.name).filter(Boolean),
       }),
     ]);
+  });
+
+  /* ---------------------------- simulated data -------------------------- */
+
+  registerHandler('data.simulate', async (context): Promise<Observation> => {
+    const datasetId = textInput(context, 'datasetId');
+
+    if (!datasetId) {
+      return needsInput(
+        say(
+          context,
+          'Upload the paper (PDF or Word) whose published statistics the practice data should reproduce.',
+          'ارفع البحث (PDF أو Word) الذي تريد أن تُعيد بيانات التدريب إنتاج إحصاءاته المنشورة.',
+        ),
+        'datasetId',
+      );
+    }
+
+    /*
+     * The researcher's answers, when an earlier attempt had to ask.
+     *
+     * An answer counts as a sample size only when it is nothing but one — "312",
+     * "العينة ٣١٢ مستجيبًا". An answer to the other question this step can ask,
+     * about the constructs, is full of numbers ("PU 4 items alpha 0.85") and
+     * reading its last one as N would replace the paper's own sample size with
+     * an alpha. Every answer is also handed to the reader as material, so what
+     * the researcher typed is used rather than asked for again.
+     */
+    const answers = (Array.isArray(context.context.userAnswers) ? context.context.userAnswers : [])
+      .map((answer) => String(answer).replace(/[\u0660-\u0669]/g, (digit) => String(digit.charCodeAt(0) - 0x0660)))
+      .filter((answer) => answer.trim() !== '');
+
+    const sizeAnswer = [...answers].reverse().find((answer) => /^\D*\d{2,6}\D*$/.test(answer));
+    const answered = Number(context.input.n ?? sizeAnswer?.match(/\d{2,6}/)?.[0]);
+
+    const outcome = await simulateFromPaper({
+      userId: context.userId,
+      datasetId,
+      locale: context.context.userLanguage === 'en' || context.context.userLanguage === 'ar'
+        ? context.context.userLanguage
+        : context.locale,
+      projectId: context.projectId,
+      conversationId: typeof context.context.conversationId === 'string' ? context.context.conversationId : null,
+      ...(Number.isInteger(answered) && answered >= 10 ? { n: answered } : {}),
+      ...(answers.length > 0 ? { supplement: answers.join('\n') } : {}),
+    });
+
+    if (outcome.status === 'needs-input') {
+      return needsInput(outcome.question, outcome.missing === 'document' ? 'datasetId' : outcome.missing);
+    }
+
+    const stamp = producer(context, 'data.simulate');
+
+    return succeeded(
+      [
+        /*
+         * `simulated: true` in the payload is what every later step reads. A
+         * statistics step planned after this one runs on the new file, and the
+         * writing step after that must know what the numbers rest on.
+         */
+        makeOutput(
+          stamp,
+          'dataset.v1',
+          {
+            datasetId: outcome.dataset.id,
+            ready: true,
+            fileKind: 'table',
+            simulated: true,
+            name: outcome.dataset.originalName,
+            rowCount: outcome.dataset.rowCount,
+            constructs: outcome.labels,
+          },
+          { location: { kind: 'dataset', id: outcome.dataset.id }, metadata: { simulated: true } },
+        ),
+        makeOutput(stamp, 'prose.v1', { simulated: true, text: outcome.report, heading: '' }),
+        makeOutput(
+          stamp,
+          'artifact.v1',
+          {
+            artifactId: outcome.artifact.id,
+            filename: outcome.artifact.filename,
+            kind: outcome.artifact.kind,
+            validationStatus: outcome.artifact.validationStatus,
+            simulated: true,
+          },
+          { metadata: { simulated: true } },
+        ),
+      ],
+      {
+        modelCalls: 1,
+        artifacts: [
+          {
+            id: outcome.artifact.id,
+            kind: outcome.artifact.kind,
+            filename: outcome.artifact.filename,
+            validationStatus: outcome.artifact.validationStatus,
+          },
+        ],
+      },
+    );
   });
 
   registerHandler('statistics.run', async (context): Promise<Observation> => {
@@ -1577,6 +1772,6 @@ export function registerAllHandlers(): void {
     );
   });
 
-  logger.info('task.handlersRegistered', { count: 12 });
+  logger.info('task.handlersRegistered', { count: 13 });
 }
 

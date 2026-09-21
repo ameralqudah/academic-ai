@@ -92,6 +92,47 @@ const REFERS_BACK = {
 } as const;
 
 
+/*
+ * A request for simulated practice data built from a paper.
+ *
+ * Lexical, like the format words in the router and for the same reason: the
+ * intent classifier has a closed list of intents and this is not one of them,
+ * so it files the request under a general question and the fast path answers
+ * with a description of a dataset instead of a dataset. What is matched is the
+ * combination — data, and either "simulated" or "from this paper" — never the
+ * word "data" alone, which appears in half the messages this product sees.
+ */
+const DATA_WORD = String.raw`${WORD_START}(?:ال)?(?:بيانات|داتا|دتا)${WORD_END}`;
+const PAPER_WORD = String.raw`(?:البحث|بحث|الدراسة|دراسة|الورقة|ورقة|المقال|مقال)`;
+
+/* Verbs that make or hand over a thing. "أريد" and "استخرج" are not among them. */
+const MAKE_VERB = String.raw`(?:ولّد|ولد|ولّدي|ولدلي|توليد|أنشئ|انشئ|اعمل|اعملي|سوّي|سوي|طلّع|طلع|طلعلي|طلّعلي|أعطني|اعطني|اعطيني|أعطيني|يعطيني|بدي|هات)`;
+
+/*
+ * Each pattern was widened until it caught the requests it should and then
+ * narrowed against the ones it should not. The near misses are instructive:
+ * "أريد تحليل بيانات الدراسة" and "create a data analysis plan for my study"
+ * both hold a verb, the word data and the word study, and neither asks for a
+ * dataset. So the verb must govern the data word directly, the data word must
+ * be a word (it is also the tail of "استبيانات"), and in English "data" must
+ * not be the first half of "data analysis".
+ */
+const SIMULATION_REQUEST = [
+  /\b(?:simulat(?:ed|ion)|synthetic|mock|dummy|fake)\s+(?:respondent[- ]level\s+|survey\s+|raw\s+)?(?:data|dataset)\b/i,
+  /\bpractice\s+dataset\b/i,
+  /\b(?:generate|create|build|make|give\s+me)\s+(?:me\s+)?(?:an?\s+|the\s+|some\s+)?(?:respondent[- ]level\s+|raw\s+)?(?:data|dataset)\b(?!\s+(?:analysis|collection|cleaning|plan|section|management|dictionary))\b.{0,60}\b(?:paper|study|article)\b/i,
+  /\bdata(?:set)?\s+that\s+(?:reproduces?|replicates?)\b/i,
+  new RegExp(`${DATA_WORD}\\s+(?:محاكاة|محاكية|اصطناعية|تدريبية)`, 'u'),
+  new RegExp(`محاكاة\\s+${DATA_WORD}`, 'u'),
+  new RegExp(`${WORD_START}${MAKE_VERB}\\s+(?:لي\\s+)?${DATA_WORD}.{0,60}${PAPER_WORD}`, 'u'),
+  new RegExp(`${DATA_WORD}.{0,30}(?:تعيد\\s+إنتاج|تحاكي).{0,40}(?:نتائج|إحصاءات|${PAPER_WORD})`, 'u'),
+];
+
+/** Whether the message asks for practice data generated from a paper. */
+export function wantsSimulatedData(message: string): boolean {
+  return SIMULATION_REQUEST.some((pattern) => pattern.test(message));
+}
+
 /**
  * The routing rule itself, separated so it can be tested without a model.
  *
@@ -104,7 +145,18 @@ export function decide(input: {
   wantsFile: boolean;
   referencesPrevious: RouteDecision['referencesPrevious'];
   hasDataset: boolean;
+  /** Practice data from a paper was asked for; see `wantsSimulatedData`. */
+  wantsSimulation?: boolean;
 }): { path: RoutePath; reason: string; confidence: number } {
+  /*
+   * Simulated data is a file with a label on it, built by an engine. Answered
+   * conversationally it becomes a model describing — or worse, typing out —
+   * rows of numbers, with no label and no arithmetic behind them.
+   */
+  if (input.wantsSimulation) {
+    return { path: 'agent', reason: 'simulated practice data was requested', confidence: 0.85 };
+  }
+
   /*
    * A file was asked for. Producing one is a task with an artifact at the end,
    * and no conversational answer satisfies it — telling someone to copy text

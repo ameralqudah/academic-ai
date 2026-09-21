@@ -132,6 +132,8 @@ function toTurnsFromMessages(
 interface AttachedFile {
   datasetId: string;
   name: string;
+  /** A simulated teaching file, not collected data. Shown wherever the file is. */
+  simulated?: boolean;
   rows: number;
   columns: number;
   /**
@@ -335,6 +337,7 @@ export function AgentChat({
       setFile({
         datasetId: json.data.dataset.id,
         name: json.data.dataset.originalName,
+        simulated: json.data.dataset.simulated === true,
         rows: json.data.profile.rowCount,
         columns: json.data.profile.columnCount,
         fields: (json.data.profile.columns ?? []).map(
@@ -374,7 +377,7 @@ export function AgentChat({
           id: crypto.randomUUID(),
           role: 'assistant',
           isUploadNotice: true,
-          text: t('fileReady', {
+          text: t(json.data.dataset.simulated === true ? 'fileReadySimulated' : 'fileReady', {
             name: json.data.dataset.originalName,
             rows: json.data.profile.rowCount,
             columns: json.data.profile.columnCount,
@@ -1351,6 +1354,11 @@ export function AgentChat({
         <div className="flex items-center gap-2 rounded-lg border border-line bg-subtle px-3 py-2 text-sm">
           <FileSpreadsheet className="size-4 shrink-0 text-muted" />
           <span className="truncate text-ink">{file.name}</span>
+          {file.simulated && (
+            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">
+              {t('simulatedBadge')}
+            </span>
+          )}
           <span className="shrink-0 text-xs text-muted">
             {t('fileSummary', { rows: file.rows, columns: file.columns })}
           </span>

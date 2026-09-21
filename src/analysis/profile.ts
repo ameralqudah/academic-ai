@@ -1,3 +1,4 @@
+import { isSimulationMarker } from './simulate';
 import {
   kurtosis,
   mean,
@@ -353,7 +354,8 @@ function collectIssues(
       });
     }
 
-    if (column.constant) {
+    /* The simulation marker is constant on purpose, and is not a defect to report. */
+    if (column.constant && !isSimulationMarker(column.name)) {
       issues.push({
         kind: 'constant-column',
         severity: 'warning',

@@ -52,6 +52,12 @@ export interface PlsExportInput {
   locale: 'ar' | 'en';
   projectTitle?: string | null;
   datasetName?: string | null;
+  /**
+   * Set when the analysis ran on simulated data. Printed above everything
+   * else, because a report is the thing that gets forwarded without the
+   * conversation that explains it.
+   */
+  simulatedNotice?: string | null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -79,6 +85,11 @@ export async function exportPlsToWord(input: PlsExportInput): Promise<Buffer> {
       ],
     }),
   );
+
+  if (input.simulatedNotice) {
+    children.push(paragraph(input.simulatedNotice, { rtl, align, bold: true }));
+    children.push(new Paragraph({ text: '' }));
+  }
 
   if (input.projectTitle) {
     children.push(
@@ -262,6 +273,11 @@ export async function exportPlsToExcel(input: PlsExportInput): Promise<Buffer> {
 
   summary.addRow([t('analysis.pls.export.title')]);
   (summary.getRow(1).getCell(1).font = { bold: true, size: 14 });
+
+  if (input.simulatedNotice) {
+    summary.addRow([input.simulatedNotice]);
+    summary.lastRow!.font = { bold: true, color: { argb: 'FF9A3412' } };
+  }
 
   if (input.projectTitle) summary.addRow([input.projectTitle]);
   if (input.datasetName) summary.addRow([input.datasetName]);

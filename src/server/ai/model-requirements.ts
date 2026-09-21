@@ -61,6 +61,9 @@ const CAPABILITY_PROFILE: Record<string, Partial<ModelRequirements>> = {
   'citation.verify': { needsReasoning: false, expectedOutputTokens: 800 },
   'survey.generate': { needsReasoning: true, expectedOutputTokens: 3000 },
 
+  /* Transcribing tables out of a paper: careful reading, a long structured reply. */
+  'data.simulate': { needsReasoning: true, expectedOutputTokens: 4000, latencySensitive: false },
+
   /*
    * Statistics run in the engines. The model interprets a result rather than
    * computing one, so the output is short and the reasoning is real.

@@ -678,6 +678,17 @@ export const datasets = pgTable(
     /** The `DatasetProfile` computed at upload: column types, scales, issues. */
     profile: jsonb('profile').$type<Record<string, unknown>>(),
     /**
+     * Generated rather than collected.
+     *
+     * A file built to reproduce a paper's published statistics, for teaching.
+     * Its rows are invented respondents, and nothing computed from them is a
+     * finding — so this is a column rather than a note in the profile: every
+     * path that writes about an analysis asks it, and a cleaned copy inherits
+     * it. Separate from `kind`, because a simulated file can be cleaned like
+     * any other and must still be simulated afterwards.
+     */
+    simulated: boolean('simulated').default(false).notNull(),
+    /**
      * Soft delete. "Delete the file" removes the bytes and sets this; the
      * analyses computed from it survive, because a number already cited in a
      * thesis should not vanish when its source file is tidied away. "Delete

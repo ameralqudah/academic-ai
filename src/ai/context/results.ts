@@ -228,7 +228,17 @@ export function describeRun(run: AnalysisRun, index: number): string {
  * behaviour is strictly additive — it appears only when there is something real
  * to write from.
  */
-export function buildResultsContext(runs: AnalysisRun[]): string | null {
+export function buildResultsContext(attached: AnalysisRun[]): string | null {
+  /*
+   * Runs on simulated data are dropped before anything is built. Attaching one
+   * is already refused; this is the second lock, for a row that arrived some
+   * other way. The block below calls its contents facts from the researcher's
+   * own data, and that must never be said of invented respondents.
+   */
+  const runs = attached.filter(
+    (run) => (run.spec as { simulated?: unknown } | null)?.simulated !== true,
+  );
+
   if (runs.length === 0) return null;
 
   const described = runs.map((run, index) => describeRun(run, index)).join('\n\n');

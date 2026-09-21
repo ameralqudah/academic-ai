@@ -171,6 +171,7 @@ export default async function ChatPage({
             ? {
                 datasetId: attached.id,
                 name: attached.originalName,
+                simulated: attached.simulated,
                 rows: attached.rowCount ?? 0,
                 columns: attached.columnCount ?? 0,
                 fields: columnsOf(attached.profile),

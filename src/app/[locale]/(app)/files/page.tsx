@@ -63,6 +63,7 @@ export default async function FilesPage({
      * needs to see which is which.
      */
     kind: dataset.kind,
+    simulated: dataset.simulated,
   }));
 
   return (

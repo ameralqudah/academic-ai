@@ -11,6 +11,18 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import {
+  looksSimulated,
+  simulateDataset,
+  SimulationError,
+  SIMULATED_COLUMN,
+  type SimulationSpec,
+} from '@/analysis/simulate';
+import { normaliseSpec, numberAppears, statisticalPassages, unverifiedValues } from '@/server/simulation/spec';
+import { anySimulated, noDataRule, simulatedDataRule } from '@/server/tasks/no-data-rule';
+import { wantsSimulatedData } from '@/server/agent/routing-rules';
+import { capabilityFor as taskCapabilityFor } from '@/server/tasks/capabilities';
+import { buildResultsContext } from '@/ai/context/results';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 
@@ -6004,6 +6016,288 @@ console.log('\nuploaded documents are attributed');
   check('one survives', kept.length, 1);
   check('and it is the file, not the paraphrase', kept[0]?.authority, 'user-document');
 }
+
+
+  /* ------------------------------------------------------ simulated data */
+  {
+    const spec: SimulationSpec = {
+      n: 312,
+      scale: { min: 1, max: 5 },
+      seed: 42,
+      constructs: [
+        { name: 'PU', items: 4, mean: 3.84, sd: 0.71, alpha: 0.88 },
+        { name: 'PEOU', items: 4, mean: 3.62, sd: 0.8, alpha: 0.85 },
+        { name: 'TR', items: 3, mean: 3.35, sd: 0.92, loadings: [0.81, 0.85, 0.78] },
+        { name: 'INT', items: 3, mean: 4.21, sd: 0.66, alpha: 0.9 },
+      ],
+      correlations: [
+        { a: 'PU', b: 'PEOU', r: 0.52 },
+        { a: 'PU', b: 'TR', r: 0.41 },
+        { a: 'PU', b: 'INT', r: 0.58 },
+        { a: 'PEOU', b: 'TR', r: 0.37 },
+        { a: 'PEOU', b: 'INT', r: 0.44 },
+        { a: 'TR', b: 'INT', r: 0.49 },
+      ],
+      demographics: [
+        { name: 'gender', categories: [{ label: 'Male', share: 0.57 }, { label: 'Female', share: 0.43 }] },
+      ],
+    };
+
+    const first = simulateDataset(spec);
+    const second = simulateDataset(spec);
+    const other = simulateDataset({ ...spec, seed: 43 });
+
+    check('the same seed gives the same file', JSON.stringify(first.dataset.rows), JSON.stringify(second.dataset.rows));
+    assertTrue('a different seed gives a different file', JSON.stringify(first.dataset.rows) !== JSON.stringify(other.dataset.rows));
+
+    check('one row per respondent', first.dataset.rows.length, 312);
+    check('the marker is the first column', first.dataset.columns[0], SIMULATED_COLUMN);
+    assertTrue('every row carries the marker', first.dataset.rows.every((row) => row[0] === 1));
+    check('items are named by construct', first.dataset.columns.includes('TR3'), true);
+
+    const itemStart = first.dataset.columns.indexOf('PU1');
+    assertTrue(
+      'every response is a whole number on the scale',
+      first.dataset.rows.every((row) =>
+        row.slice(itemStart).every((cell) => Number.isInteger(cell) && (cell as number) >= 1 && (cell as number) <= 5),
+      ),
+    );
+
+    const worst = (statistic: string) =>
+      Math.max(
+        ...first.comparison
+          .filter((row) => row.statistic === statistic && row.difference !== null)
+          .map((row) => Math.abs(row.difference as number)),
+      );
+
+    assertTrue('means reproduce within 0.02', worst('mean') <= 0.02);
+    assertTrue('standard deviations reproduce within 0.02', worst('sd') <= 0.02);
+    assertTrue('alphas reproduce within 0.03', worst('alpha') <= 0.03);
+    assertTrue('correlations reproduce within 0.03', worst('correlation') <= 0.03);
+    assertTrue('shares reproduce within one respondent', worst('share') <= 1 / 312 + 1e-9);
+
+    assertTrue(
+      'an unpublished statistic is compared with nothing',
+      first.comparison.some((row) => row.statistic === 'alpha' && row.subject === 'TR' && row.published === null),
+    );
+    assertTrue(
+      'loadings derived from alpha are declared',
+      first.assumptions.some((entry) => entry.code === 'loadings.fromAlpha' && entry.subject === 'PU'),
+    );
+    assertTrue(
+      'published loadings are not declared as assumed',
+      !first.assumptions.some((entry) => entry.subject === 'TR' && entry.code.startsWith('loadings.')),
+    );
+
+    /* Paths only: the correlations are implied, and said to be. */
+    const fromPaths = simulateDataset({
+      n: 200,
+      scale: { min: 1, max: 7 },
+      seed: 7,
+      constructs: [{ name: 'A', items: 3 }, { name: 'B', items: 3 }, { name: 'C', items: 4 }],
+      paths: [
+        { from: 'A', to: 'B', beta: 0.5 },
+        { from: 'A', to: 'C', beta: 0.2 },
+        { from: 'B', to: 'C', beta: 0.45 },
+      ],
+    });
+
+    assertTrue(
+      'path coefficients reproduce within 0.04',
+      fromPaths.comparison.filter((row) => row.statistic === 'path').every((row) => Math.abs(row.difference as number) <= 0.04),
+    );
+    assertTrue('implied correlations are declared', fromPaths.assumptions.some((entry) => entry.code === 'correlation.fromPaths'));
+    assertTrue('assumed means are declared', fromPaths.assumptions.some((entry) => entry.code === 'mean.assumed'));
+
+    /* A table that cannot be a correlation matrix is repaired, and the repair reported. */
+    const impossible = simulateDataset({
+      n: 100,
+      scale: { min: 1, max: 5 },
+      seed: 3,
+      constructs: [{ name: 'A', items: 3 }, { name: 'B', items: 3 }, { name: 'C', items: 3 }],
+      correlations: [
+        { a: 'A', b: 'B', r: 0.9 },
+        { a: 'A', b: 'C', r: 0.9 },
+        { a: 'B', b: 'C', r: -0.6 },
+      ],
+    });
+    assertTrue('an impossible matrix is shrunk and said so', impossible.assumptions.some((entry) => entry.code === 'matrix.shrunk'));
+
+    const codeOf = (run: () => unknown): string => {
+      try {
+        run();
+        return 'no error';
+      } catch (error) {
+        return error instanceof SimulationError ? error.code : 'other';
+      }
+    };
+
+    check('a sample size is never invented', codeOf(() => simulateDataset({ ...spec, n: 0 })), 'simulation.error.sampleSize');
+    check(
+      'a circular model is refused',
+      codeOf(() =>
+        simulateDataset({
+          ...spec,
+          correlations: [],
+          paths: [{ from: 'PU', to: 'INT', beta: 0.3 }, { from: 'INT', to: 'PU', beta: 0.3 }],
+        }),
+      ),
+      'simulation.error.cyclicPaths',
+    );
+
+    /*
+     * Cleaning must not remove the marker. It is constant by design, which is
+     * exactly what "drop constant columns" looks for.
+     */
+    const simulatedProfile = profileDataset(first.dataset);
+    assertTrue(
+      'the marker is not reported as a defect',
+      !simulatedProfile.issues.some((issue) => issue.column === SIMULATED_COLUMN),
+    );
+    assertTrue(
+      'nor offered for removal',
+      !planCleaning(simulatedProfile).some((action) => action.columns.includes(SIMULATED_COLUMN)),
+    );
+
+    const forced = applyCleaning(first.dataset, simulatedProfile, [
+      {
+        kind: 'drop-constant-columns',
+        columns: [SIMULATED_COLUMN],
+        reasonKey: 'analysis.clean.reason.constantColumns',
+        recommended: false,
+        destructive: true,
+      },
+    ]);
+    assertTrue('and survives being asked for by name', forced.cleaned.columns.includes(SIMULATED_COLUMN));
+
+    /* The mark survives a round trip through a download. */
+    check('recognised by file name', looksSimulated('simulated_paper.csv', ['a', 'b']), true);
+    check('recognised by marker column', looksSimulated('data.xlsx', ['id', ' _SIMULATED ']), true);
+    check('an ordinary file is not', looksSimulated('survey.csv', ['id', 'q1']), false);
+  }
+
+  /* ------------------------------------------- reading a paper's statistics */
+  {
+    const read = normaliseSpec(
+      {
+        title: 'A study',
+        n: '٣١٢',
+        scale: { min: 1, max: 5 },
+        constructs: [
+          { name: 'PU', label: 'Perceived Usefulness', items: 4, mean: 3.84, sd: 0.71, alpha: '.88' },
+          { name: '', label: 'الثقة', items: null, alpha: 1.4 },
+          { name: 'PU', label: 'Duplicate', items: 2 },
+        ],
+        correlations: [
+          { a: 'Perceived Usefulness', b: 'الثقة', r: 0.41 },
+          { a: 'PU', b: 'الثقة', r: 0.99 },
+          { a: 'PU', b: 'NOPE', r: 0.3 },
+          { a: 'PU', b: 'Duplicate', r: 1.2 },
+        ],
+        demographics: [{ name: 'gender', categories: [{ label: 'M', share: 57 }, { label: 'F', share: 43 }] }],
+      },
+      { seed: 1, maxRows: 5000 },
+    );
+
+    check('Arabic-Indic digits are read', read.spec.n, 312);
+    check('a leading-dot decimal is read', read.spec.constructs[0]?.alpha, 0.88);
+    check('an impossible alpha is dropped', read.spec.constructs[1]?.alpha, undefined);
+    check('an Arabic label gets a Latin column name', read.spec.constructs[1]?.name, 'C2');
+    check('and keeps its label', read.labels.C2, 'الثقة');
+    check('duplicate names are made unique', read.spec.constructs[2]?.name, 'PU_2');
+    check('a missing item count is assumed and said', read.problems.some((p) => p.code === 'items.assumed' && p.subject === 'C2'), true);
+    check('labels resolve, duplicates and unknowns drop', read.spec.correlations?.length, 1);
+    check('percentages become proportions', read.spec.demographics?.[0]?.categories[0]?.share, 0.57);
+
+    const empty = normaliseSpec({ constructs: [] }, { seed: 1, maxRows: 5000 });
+    check('no sample size is a problem, not a default', empty.problems.some((p) => p.code === 'n.missing'), true);
+    check('no constructs is a problem', empty.problems.some((p) => p.code === 'constructs.missing'), true);
+
+    check('.84 is found as 0.84', numberAppears(0.84, 'alpha = .84 for the scale'), true);
+    check('0.840 is found as 0.84', numberAppears(0.84, 'α 0.840'), true);
+    check('0.84 is not found inside 10.845', numberAppears(0.84, 'value 10.845 here'), false);
+    check('312 is not found inside 312.5', numberAppears(312, 'a mean of 312.5 units'), false);
+    check('but is found at the end of a sentence', numberAppears(312, 'The sample was 312.'), true);
+    check('312 is found with a thousands mark elsewhere', numberAppears(1312, 'N = 1,312 respondents'), true);
+
+    const missing = unverifiedValues(
+      { n: 312, scale: { min: 1, max: 5 }, seed: 1, constructs: [{ name: 'PU', items: 4, mean: 3.84, alpha: 0.91 }] },
+      'The sample was ٣١٢ students. PU had a mean of 3.84.',
+    );
+    check('a number absent from the paper is reported', missing.map((m) => m.statistic).join(','), 'alpha');
+
+    const passages = statisticalPassages(
+      [
+        { heading: 'Introduction', text: 'Technology adoption has long been studied by many scholars. '.repeat(40) },
+        { heading: 'Results', text: 'Table 2. Cronbach alpha PU .88 PEOU .85; correlation PU-PEOU .52; N = 312.' },
+      ],
+      400,
+    );
+    assertTrue('the statistical passage is kept when the budget is tight', passages.includes('Table 2'));
+    assertTrue('and the prose is what gives way', !passages.includes('Technology adoption'));
+  }
+
+  /* ------------------------------------------ simulated data is never a finding */
+  {
+    check('an analysis of simulated data is recognised', anySimulated([{ n: 10 }, { simulated: true }]), true);
+    check('an ordinary analysis is not', anySimulated([{ n: 10 }, { simulated: 'true' }]), false);
+
+    for (const language of ['ar', 'en'] as const) {
+      const rule = simulatedDataRule(language);
+      assertTrue(`the ${language} rule requires the disclosure`, /simulated data|بيانات محاكاة/.test(rule));
+      assertTrue(`the ${language} rule forbids publishing`, /must not be published|لا يجوز نشره/.test(rule));
+      assertTrue(`the ${language} rule differs from the no-data rule`, rule !== noDataRule(language));
+    }
+
+    const real = { id: 'r1', testKey: 'correlation.pearson', spec: { columns: {} }, result: { test: 'correlation.pearson', n: 50 } };
+    const invented = { ...real, id: 'r2', spec: { columns: {}, simulated: true } };
+
+    check('only simulated runs means no verified results at all', buildResultsContext([invented as never]), null);
+    assertTrue('a real run still produces the block', (buildResultsContext([real as never, invented as never]) ?? '').includes('VERIFIED ANALYSIS RESULTS'));
+
+    check('the capability is registered', taskCapabilityFor('data.simulate')?.id, 'data.simulate');
+    check('and is not retried into a second file', taskCapabilityFor('data.simulate')?.maxAttempts, 1);
+
+    for (const message of [
+      'ولّد بيانات من هذا البحث',
+      'بدي داتا محاكاة للبحث',
+      'اعطيه بحث يعطيني دتا تم تحليل عليها البحث',
+      'generate a dataset that reproduces this paper',
+      'I need simulated data for teaching',
+    ]) {
+      check(`routes to simulation: ${message}`, wantsSimulatedData(message), true);
+    }
+
+    for (const message of [
+      'حلل هذه البيانات',
+      'ما حجم العينة في هذا البحث؟',
+      'clean my data',
+      'اكتب فصل النتائج',
+      /* Each of these holds a verb, "data" and "study", and none asks for a dataset. */
+      'أريد تحليل بيانات الدراسة',
+      'اعمل تحليل PLS على البيانات المرفقة لهذه الدراسة',
+      'استخرج البيانات الوصفية من هذا البحث',
+      'أريد استبيانات لدراسة عن القيادة',
+      'Create a data analysis plan for my study as a Word file',
+      'Make a data collection section for my paper',
+      'What are best practice data cleaning steps?',
+    ]) {
+      check(`does not route to simulation: ${message}`, wantsSimulatedData(message), false);
+    }
+
+    check(
+      'a simulation request is agent work',
+      decide({
+        intent: { intent: 'general.question', confidence: 0.9 },
+        needsTools: false,
+        wantsFile: false,
+        referencesPrevious: null,
+        hasDataset: true,
+        wantsSimulation: true,
+      }).path,
+      'agent',
+    );
+  }
 
 
 console.log(

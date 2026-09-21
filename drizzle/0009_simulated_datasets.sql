@@ -1,0 +1,1 @@
+ALTER TABLE "datasets" ADD COLUMN "simulated" boolean DEFAULT false NOT NULL;

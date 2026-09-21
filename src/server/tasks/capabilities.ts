@@ -27,6 +27,7 @@ export type CapabilityId =
   | 'statistics.pls'
   | 'statistics.cbsem'
   | 'survey.generate'
+  | 'data.simulate'
   | 'document.write'
   | 'document.generate'
   | 'quality.check'
@@ -170,6 +171,26 @@ const CAPABILITIES: Record<CapabilityId, CapabilityDefinition> = {
     maxAttempts: 2,
     requiresDataset: false,
     parallelSafe: true,
+  },
+  'data.simulate': {
+    id: 'data.simulate',
+    labelKey: 'task.capability.simulate',
+    /*
+     * One model call to read the paper, then arithmetic. The largest file this
+     * will build — five thousand rows, two hundred items — generates in a few
+     * seconds; the rest is the reading.
+     */
+    timeoutMs: 180_000,
+    estimatedModelCalls: 1,
+    /*
+     * Not retried. A second run stores a second file, and the usual failure —
+     * a paper whose tables did not survive extraction — fails the same way.
+     */
+    retryable: false,
+    maxAttempts: 1,
+    /* The "dataset" it needs is the uploaded paper. */
+    requiresDataset: true,
+    parallelSafe: false,
   },
   'document.write': {
     id: 'document.write',

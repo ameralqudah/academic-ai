@@ -42,6 +42,7 @@ import {
   type Dataset as ParsedDataset,
   type DatasetProfile,
 } from '@/analysis';
+import { looksSimulated, SIMULATED_PREFIX } from '@/analysis/simulate';
 import { logger } from '@/lib/logger';
 import { extractDocument, isReadableDocument } from '@/server/files/extract';
 import { chunkDocument } from '@/server/files/retrieve';
@@ -248,6 +249,12 @@ export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset>
       projectId: input.projectId ?? null,
       conversationId: input.conversationId ?? null,
       kind: 'ORIGINAL',
+      /*
+       * A simulated file that was downloaded and uploaded again is still a
+       * simulated file. The stored flag does not survive the download, so the
+       * file is asked: its marker column and its name both survive Excel.
+       */
+      simulated: looksSimulated(file.name, parsed.columns),
       originalName: file.name.slice(0, 255),
       storageKey: key,
       mimeType: 'text/csv',
@@ -381,6 +388,83 @@ export async function downloadOwned(
 }
 
 /* -------------------------------------------------------------------------- */
+/*                               Simulated data                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Stores a generated dataset.
+ *
+ * The same storage, the same quota and the same ownership rules as an upload —
+ * a simulated file is a file — with two differences that are the point of it:
+ * the row is flagged, and the name says what it is. Neither is a parameter.
+ *
+ * Not linked to the paper as a parent. `parentDatasetId` cascades, and deleting
+ * a paper should not silently delete a teaching file built from it; where it
+ * came from is recorded in the profile instead.
+ */
+export async function saveSimulated(input: {
+  userId: string;
+  data: ParsedDataset;
+  /** The paper's file name, for naming this one. */
+  sourceName: string;
+  sourceDatasetId: string;
+  seed: number;
+  projectId?: string | null;
+  conversationId?: string | null;
+}): Promise<DatasetRow> {
+  const existing = await datasetsRepo.listByUser(input.userId, MAX_DATASETS_PER_USER + 1);
+  if (existing.length >= MAX_DATASETS_PER_USER) {
+    throw new AppError(
+      'VALIDATION',
+      `You are storing the maximum of ${MAX_DATASETS_PER_USER} files. Delete one to make room.`,
+      `لديك الحد الأقصى وهو ${MAX_DATASETS_PER_USER} ملفًا. احذف ملفًا لإفساح المجال.`,
+    );
+  }
+
+  const profile = profileDataset(input.data);
+  const datasetId = randomUUID();
+  const key = datasetKey({ userId: input.userId, datasetId, kind: 'ORIGINAL', extension: 'csv' });
+  const bytes = new TextEncoder().encode(toCsv(input.data));
+
+  const base = input.sourceName
+    .replace(/\.[A-Za-z0-9]+$/, '')
+    .replace(new RegExp(`^${SIMULATED_PREFIX}`, 'i'), '')
+    .slice(0, 200);
+
+  await storageProvider().put(key, bytes, 'text/csv');
+
+  try {
+    const row = await datasetsRepo.create({
+      id: datasetId,
+      userId: input.userId,
+      projectId: input.projectId ?? null,
+      conversationId: input.conversationId ?? null,
+      kind: 'ORIGINAL',
+      simulated: true,
+      originalName: `${SIMULATED_PREFIX}${base || 'dataset'}.csv`,
+      storageKey: key,
+      mimeType: 'text/csv',
+      byteSize: bytes.byteLength,
+      checksum: checksumOf(bytes),
+      rowCount: profile.rowCount,
+      columnCount: profile.columnCount,
+      profile: {
+        ...(profile as unknown as Record<string, unknown>),
+        simulation: { sourceDatasetId: input.sourceDatasetId, sourceName: input.sourceName, seed: input.seed },
+      },
+    });
+
+    logger.info('dataset.simulated', { datasetId, rows: profile.rowCount, columns: profile.columnCount });
+    return row;
+  } catch (error) {
+    await storageProvider()
+      .delete(key)
+      .catch(() => undefined);
+    throw error;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*                                  Cleaning                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -428,6 +512,8 @@ export async function saveCleanedCopy(input: {
       projectId: source.row.projectId,
       conversationId: source.row.conversationId,
       kind: 'CLEANED',
+      /* Tidying invented respondents does not make them real ones. */
+      simulated: source.row.simulated,
       parentDatasetId: source.row.id,
       originalName: source.row.originalName,
       storageKey: key,

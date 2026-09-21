@@ -1,3 +1,4 @@
+import { isSimulationMarker } from './simulate';
 import { normaliseLabel } from './profile';
 import { mean, median, mode, toNumber } from './stats-core';
 import type {
@@ -85,7 +86,15 @@ export function planCleaning(dataset: DatasetProfile): CleaningAction[] {
     });
   }
 
-  const constantColumns = dataset.columns.filter((column) => column.constant);
+  /*
+   * The simulation marker is constant by design — it is 1 on every row — and is
+   * never offered for removal. It is what lets a downloaded file be recognised
+   * as simulated when it comes back under another name; tidying it away would
+   * turn a labelled teaching file into an unlabelled one.
+   */
+  const constantColumns = dataset.columns.filter(
+    (column) => column.constant && !isSimulationMarker(column.name),
+  );
   if (constantColumns.length > 0) {
     actions.push({
       kind: 'drop-constant-columns',
@@ -275,7 +284,10 @@ export function applyCleaning(
 
       case 'drop-empty-columns':
       case 'drop-constant-columns': {
-        const doomed = new Set(action.columns.filter((name) => indexOf(name) >= 0));
+        /* Whatever asked for it, the simulation marker stays; see `planCleaning`. */
+        const doomed = new Set(
+          action.columns.filter((name) => indexOf(name) >= 0 && !isSimulationMarker(name)),
+        );
         if (doomed.size === 0) break;
         const keepIndices = columns.map((name, index) => (doomed.has(name) ? -1 : index)).filter((i) => i >= 0);
         columns = keepIndices.map((index) => columns[index] as string);

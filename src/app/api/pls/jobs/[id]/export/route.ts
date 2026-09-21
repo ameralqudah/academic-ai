@@ -5,6 +5,7 @@ import { withApi } from '@/server/http/api';
 import { AppError } from '@/server/http/errors';
 import { exportPlsToExcel, exportPlsToWord } from '@/server/services/pls-export.service';
 import { getJob } from '@/server/services/pls.service';
+import { SIMULATED_NOTICE } from '@/server/simulation/notice';
 
 type Params = { id: string };
 
@@ -59,13 +60,19 @@ export const GET = withApi<undefined, Params>(
       }
     };
 
+    const exportInput = {
+      report: job.result.report,
+      translate,
+      locale: options.locale,
+      simulatedNotice: job.simulated ? SIMULATED_NOTICE[options.locale] : null,
+    };
+
     const buffer =
-      options.format === 'xlsx'
-        ? await exportPlsToExcel({ report: job.result.report, translate, locale: options.locale })
-        : await exportPlsToWord({ report: job.result.report, translate, locale: options.locale });
+      options.format === 'xlsx' ? await exportPlsToExcel(exportInput) : await exportPlsToWord(exportInput);
 
     const extension = options.format;
-    const filename = `pls-report-${params.id.slice(0, 8)}.${extension}`;
+    /* In the name too: a report is found by its file name long after it is read. */
+    const filename = `${job.simulated ? 'SIMULATED_' : ''}pls-report-${params.id.slice(0, 8)}.${extension}`;
 
     return new Response(new Uint8Array(buffer), {
       headers: {

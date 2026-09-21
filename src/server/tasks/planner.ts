@@ -114,6 +114,7 @@ Input fields. Use these names, so the step can find what you gave it:
    - academic.search, web.search: {"query": "<search terms>"}
    - deep.research: {"question": "<what to find out>"}
    - literature.review, document.write: {"topic": "<the subject>"}
+   - data.simulate: {} (the uploaded paper is found from the context)
 
 Rules:
 
@@ -193,7 +194,9 @@ ${
     : ''
 }
 
-10. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
+10. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.
+
+11. SIMULATED PRACTICE DATA. data.simulate reads an uploaded PAPER (a document, not a table) and builds a clearly-labelled simulated dataset that reproduces the paper's published statistics, for teaching. Plan it only when the researcher asks for generated, simulated, synthetic or practice data from a paper ("ولّد بيانات من هذا البحث", "بيانات محاكاة", "generate data that reproduces this study"). It is a complete task on its own: one step, no dependencies, no document.generate after it (it produces its own Excel file), and no statistics step after it in the same plan — the researcher analyses the new file in a following request. Never plan it to supply data for the researcher's own study, thesis or results chapter: if the request is for data to report as collected, do not plan data.simulate; plan a single general.answer step explaining that data for a real study must be collected, and that simulated data can only be produced for teaching, labelled as such.`;
 
   const result = await runCompletion({
     userId: input.userId,

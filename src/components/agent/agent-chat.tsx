@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState } from 'react';
 
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
+import { ArtifactPanelProvider } from '@/components/agent/artifact-panel';
 import { TaskProgress } from '@/components/agent/task-progress';
 import { PlsModelBuilder, type PlsModelDraft } from '@/components/agent/pls-builder';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
@@ -1200,7 +1201,16 @@ export function AgentChat({
      * whole stack is centred instead and the composer sits under the greeting —
      * the first thing on the page is where you type.
      */
-    <div className={cn('relative flex min-h-0 flex-1 flex-col', empty && 'justify-center pb-[8vh]')}>
+    <ArtifactPanelProvider>
+      {(panel) => (
+    /* The conversation, and beside it the document it produced when one is open. */
+    <div className="flex min-h-0 flex-1">
+    <div
+      className={cn(
+        'relative flex min-h-0 min-w-0 flex-1 flex-col',
+        empty && 'justify-center pb-[8vh]',
+      )}
+    >
       <div
         className={cn(
           'mx-auto flex w-full max-w-3xl shrink-0 items-center gap-2 px-4 py-2.5',
@@ -1407,6 +1417,10 @@ export function AgentChat({
       )}
       </div>
     </div>
+    {panel}
+    </div>
+      )}
+    </ArtifactPanelProvider>
   );
 }
 

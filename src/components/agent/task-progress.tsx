@@ -10,10 +10,12 @@ import {
   MinusCircle,
   Pause,
   X,
+  FileText,
 } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { useEffect, useRef, useState } from 'react';
 
+import { useArtifactPanel } from '@/components/agent/artifact-panel';
 import { cn } from '@/lib/cn';
 
 /**
@@ -422,31 +424,20 @@ export function TaskProgress({
       )}
 
       {artifacts.length > 0 && (
-        <div className="flex flex-col gap-1.5 border-t border-line pt-3">
+        <div className="flex flex-col gap-2 border-t border-line pt-3">
           <span className="text-xs font-medium text-muted">{t('files')}</span>
 
           {steps
             .filter((step) => step.artifactIds.length > 0)
             .map((step) =>
               step.artifactIds.map((artifactId) => (
-                <a
+                <ArtifactCard
                   key={artifactId}
-                  href={`/api/artifacts/${artifactId}`}
-                  className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-accent hover:bg-subtle"
-                >
-                  <Download className="size-3.5 shrink-0" aria-hidden />
-                  <span className="truncate">
-                    {(step.output?.filename as string) ?? step.label}
-                  </span>
-                  {/*
-                    The validation verdict beside the file. A document that
-                    failed its quality check should say so where the person
-                    downloads it, not somewhere they have to go looking.
-                  */}
-                  {step.output?.validationStatus === 'fail' && (
-                    <AlertTriangle className="size-3 shrink-0 text-danger" aria-hidden />
-                  )}
-                </a>
+                  artifactId={artifactId}
+                  name={fileInfo(step.output).filename ?? step.label}
+                  kind={fileInfo(step.output).kind ?? ''}
+                  failed={fileInfo(step.output).validationStatus === 'fail'}
+                />
               )),
             )}
         </div>
@@ -645,3 +636,106 @@ function StepRow({ step }: { step: TaskStepView }) {
   );
 }
 
+
+/**
+ * A produced file, as something to open rather than only to download.
+ *
+ * The name opens the document beside the conversation; the arrow still
+ * downloads it. Two targets because they are two intentions — reading what was
+ * written, and taking the file away — and the old single link served only the
+ * second. Outside a chat there is no panel, and the name downloads as before.
+ */
+function ArtifactCard({
+  artifactId,
+  name,
+  kind,
+  failed,
+}: {
+  artifactId: string;
+  name: string;
+  kind: string;
+  failed: boolean;
+}) {
+  const t = useTranslations('artifactPanel');
+  const panel = useArtifactPanel();
+  const href = `/api/artifacts/${artifactId}`;
+
+  const label = (
+    <>
+      <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary">
+        <FileText className="size-4" aria-hidden />
+      </span>
+      <span className="flex min-w-0 flex-col text-start">
+        <span className="truncate text-sm text-ink">{name}</span>
+        <span className="flex items-center gap-1.5 text-xs text-muted">
+          {kind && (
+            <span className="uppercase" dir="ltr">
+              {kind}
+            </span>
+          )}
+          {/*
+            The validation verdict beside the file. A document that failed its
+            quality check should say so where the person opens it, not
+            somewhere they have to go looking.
+          */}
+          {failed && <AlertTriangle className="size-3 shrink-0 text-danger" aria-hidden />}
+          {panel && <span>· {t('open')}</span>}
+        </span>
+      </span>
+    </>
+  );
+
+  return (
+    <div className="flex items-center gap-1 rounded-xl border border-line-strong bg-surface transition-colors hover:border-primary">
+      {panel ? (
+        <button
+          type="button"
+          onClick={() => panel.open(artifactId)}
+          className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-2"
+        >
+          {label}
+        </button>
+      ) : (
+        <a href={href} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-2">
+          {label}
+        </a>
+      )}
+
+      <a
+        href={href}
+        aria-label={t('download')}
+        title={t('download')}
+        className="me-1.5 shrink-0 rounded-lg p-2 text-muted hover:bg-subtle hover:text-ink"
+      >
+        <Download className="size-4" aria-hidden />
+      </a>
+    </div>
+  );
+}
+
+/**
+ * The file a step produced, wherever the executor put it.
+ *
+ * A step's stored output is `{ outputs, legacy, observation }`, and the file's
+ * name is inside `legacy`. The link read `output.filename`, which was never
+ * set, so every file was listed under its step's label — "Generate document" —
+ * rather than its own name, and a failed quality check never showed its
+ * warning. Both shapes are read, so a row written either way is understood.
+ */
+function fileInfo(output: Record<string, unknown> | null | undefined): {
+  filename?: string;
+  kind?: string;
+  validationStatus?: string;
+} {
+  const legacy = (output?.legacy ?? {}) as Record<string, unknown>;
+  const pick = (key: string) => {
+    const value = output?.[key] ?? legacy[key];
+    return typeof value === 'string' ? value : undefined;
+  };
+
+  return {
+    filename: pick('filename'),
+    kind: pick('kind'),
+    validationStatus: pick('validationStatus'),
+  };
+}

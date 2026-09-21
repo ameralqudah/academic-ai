@@ -19,6 +19,7 @@
 
 import { logger } from '@/lib/logger';
 import { checkQuality, type QualityReport } from '@/server/quality/engine';
+import { isPreviewable, toStoredPreview, withoutPreview } from './artifact-preview';
 import type { Reference } from '@/server/quality/sources';
 import { validateArtifactBytes } from '@/server/generators/documents';
 import { AppError } from '@/server/http/errors';
@@ -66,6 +67,11 @@ export interface StoreInput {
   quality?: { text: string; references: Reference[] };
   /** The version this replaces. Absent for a first version. */
   previousArtifactId?: string;
+  /**
+   * The document as Markdown, kept so it can be read without opening the file.
+   * See `artifact-preview.ts`.
+   */
+  previewMarkdown?: string;
 }
 
 /**
@@ -158,7 +164,12 @@ export async function storeArtifact(input: StoreInput): Promise<Artifact> {
     filename: input.filename,
     storageKey,
     byteSize: input.bytes.length,
-    metadata: input.metadata ?? {},
+    metadata: {
+      ...(input.metadata ?? {}),
+      ...(input.previewMarkdown && isPreviewable(input.kind)
+        ? (toStoredPreview(input.previewMarkdown) ?? {})
+        : {}),
+    },
     qualityReport: (qualityReport as unknown as Record<string, unknown>) ?? null,
     validationStatus: qualityReport?.overallStatus ?? 'unchecked',
   };
@@ -228,11 +239,51 @@ export async function versionsOf(artifactId: string, userId: string): Promise<Ar
     throw new AppError('NOT_FOUND', 'That file was not found.', 'لم يُعثر على هذا الملف.');
   }
 
-  return artifactsRepo.lineage(artifact.lineageId, userId);
+  return (await artifactsRepo.lineage(artifact.lineageId, userId)).map(withoutPreview);
+}
+
+/**
+ * Everything the side panel shows for one artifact, in one call: the readable
+ * text when there is one, the versions to move between, and the verdict of the
+ * quality check.
+ *
+ * Older artifacts and spreadsheets have no stored text. That is reported as
+ * `markdown: null`, not as an error — the panel still has a file to offer.
+ */
+export async function previewOf(id: string, userId: string) {
+  const artifact = await artifactsRepo.findOwned(id, userId);
+
+  if (!artifact) {
+    throw new AppError('NOT_FOUND', 'That file was not found.', 'لم يُعثر على هذا الملف.');
+  }
+
+  const metadata = artifact.metadata ?? {};
+  const lineage = await artifactsRepo.lineage(artifact.lineageId, userId);
+  const report = artifact.qualityReport as { overallStatus?: string } | null;
+
+  return {
+    id: artifact.id,
+    filename: artifact.filename,
+    kind: artifact.kind,
+    version: artifact.version,
+    byteSize: artifact.byteSize,
+    createdAt: artifact.createdAt.toISOString(),
+    validationStatus: artifact.validationStatus,
+    qualityStatus: report?.overallStatus ?? null,
+    markdown: typeof metadata.preview === 'string' ? metadata.preview : null,
+    truncated: metadata.previewTruncated === true,
+    versions: lineage
+      .map((entry) => ({
+        id: entry.id,
+        version: entry.version,
+        createdAt: entry.createdAt.toISOString(),
+      }))
+      .sort((a, b) => b.version - a.version),
+  };
 }
 
 export async function listArtifacts(userId: string): Promise<Artifact[]> {
-  return artifactsRepo.listLatest(userId);
+  return (await artifactsRepo.listLatest(userId)).map(withoutPreview);
 }
 
 export async function deleteArtifact(id: string, userId: string): Promise<void> {

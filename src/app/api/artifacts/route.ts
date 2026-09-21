@@ -6,6 +6,7 @@ import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
 import { formatReferenceList, type StyleId } from '@/server/citation/styles';
 import { ok, withApi } from '@/server/http/api';
+import { withoutPreview } from '@/server/services/artifact-preview';
 import { listArtifacts, storeArtifact } from '@/server/services/artifact.service';
 
 /**
@@ -156,9 +157,12 @@ export const POST = withApi<Body>(
       ...(proseText
         ? { quality: { text: proseText, references: body.references as never } }
         : {}),
+      /* The same content the file was built from, kept readable for the panel. */
+      ...(proseText ? { previewMarkdown: new TextDecoder().decode(generateMarkdown(content)) } : {}),
     });
 
-    return ok({ artifact, ...(unsupported.length > 0 ? { unsupportedText: unsupported } : {}) });
+    /* Without the stored preview: the caller sent this text and has no use for it back. */
+    return ok({ artifact: withoutPreview(artifact), ...(unsupported.length > 0 ? { unsupportedText: unsupported } : {}) });
   },
 );
 

@@ -215,6 +215,20 @@ export async function failStep(
   return { willRetry };
 }
 
+/**
+ * Sets a step aside without failing the task.
+ *
+ * For a step the task added to itself and then could not run. It was never
+ * something the researcher asked for, so it neither fails the task nor holds
+ * up the steps they did ask for.
+ */
+export async function skipStep(stepId: string, reasonKey: string): Promise<void> {
+  await db
+    .update(taskSteps)
+    .set({ status: 'SKIPPED', errorReasonKey: reasonKey, finishedAt: new Date() })
+    .where(eq(taskSteps.id, stepId));
+}
+
 /** Marks steps that can never run because a dependency failed. */
 export async function blockSteps(stepIds: string[]): Promise<void> {
   if (stepIds.length === 0) return;

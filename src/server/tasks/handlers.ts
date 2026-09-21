@@ -311,14 +311,23 @@ export function registerAllHandlers(): void {
       findings.push({
         code: 'search.offTopic',
         severity: 'warning',
-        message: `The results for "${query}" do not appear to concern the topic`,
+        /* In the researcher's language: this line is shown under the step. */
+        message: say(
+          context,
+          `The results for "${query}" do not appear to concern the topic`,
+          `نتائج البحث عن "${query}" لا تبدو متعلقة بالموضوع`,
+        ),
         metadata: { query, returned: references.length },
       });
     } else if (thin) {
       findings.push({
         code: 'search.thin',
         severity: 'warning',
-        message: `Only ${references.length} sources found for "${query}"`,
+        message: say(
+          context,
+          `Only ${references.length} sources found for "${query}"`,
+          `لم يُعثر إلا على ${references.length} مصادر عن "${query}"`,
+        ),
         metadata: { query, found: references.length },
       });
     }
@@ -329,30 +338,34 @@ export function registerAllHandlers(): void {
      * replanner widens the search or moves on.
      */
     if (findings.length > 0) {
-      return partial([sources], report.offTopic ? [`sources actually about "${query}"`] : [], {
-        warnings: findings,
-        modelCalls: 1,
-        recommendedNextActions: [
-          {
-            capability: 'academic.search',
-            reason: report.offTopic ? 'the query found the wrong corpus' : 'too few sources',
-            /*
-             * A different query, or none.
-             *
-             * Recommending the same search with the same words would repeat the
-             * failure exactly — a second wrong corpus, a third recommendation,
-             * and a budget spent circling. When the corpus is wrong the phrasing
-             * is the problem, and only the researcher or the planner can supply
-             * a better one; when the result is merely thin, dropping the
-             * narrowest word is a correction this can make itself.
-             */
-            input: report.offTopic
-              ? {}
-              : { topic: broaden(query) },
-          },
-        ],
-        confidence: report.offTopic ? 0.2 : 0.6,
-      });
+      return partial(
+        [sources],
+        report.offTopic ? [say(context, `sources actually about "${query}"`, `مصادر تتناول فعلًا "${query}"`)] : [],
+        {
+          warnings: findings,
+          modelCalls: 1,
+          recommendedNextActions: [
+            {
+              capability: 'academic.search',
+              reason: report.offTopic ? 'the query found the wrong corpus' : 'too few sources',
+              /*
+               * A different query, or none.
+               *
+               * Recommending the same search with the same words would repeat the
+               * failure exactly — a second wrong corpus, a third recommendation,
+               * and a budget spent circling. When the corpus is wrong the phrasing
+               * is the problem, and only the researcher or the planner can supply
+               * a better one; when the result is merely thin, dropping the
+               * narrowest word is a correction this can make itself.
+               */
+              input: report.offTopic
+                ? {}
+                : { topic: broaden(query) },
+            },
+          ],
+          confidence: report.offTopic ? 0.2 : 0.6,
+        },
+      );
     }
 
     return succeeded([sources], {

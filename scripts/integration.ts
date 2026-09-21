@@ -2150,7 +2150,13 @@ async function main() {
 
   /** Builds a task with steps already planned, bypassing the model. */
   async function makeTask(
-    steps: { key: string; capability: string; dependsOn?: string[]; input?: Record<string, unknown> }[],
+    steps: {
+      key: string;
+      capability: string;
+      dependsOn?: string[];
+      input?: Record<string, unknown>;
+      dynamic?: boolean;
+    }[],
     budget: Partial<TaskBudget> = {},
   ) {
     const task = await tasksRepo.create({
@@ -2172,6 +2178,7 @@ async function main() {
         status: 'PENDING',
         dependsOn: [],
         input: step.input ?? {},
+        dynamic: step.dynamic ?? false,
       })),
     );
 
@@ -2347,6 +2354,56 @@ async function main() {
     check('the task resumes and completes', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
     assertTrue('running the step that asked', executed.includes('academic.search'));
     assertTrue('and the one that waited on it', executed.includes('document.write'));
+  }
+
+  /* ------- 7b: a step the task added to itself may not stop to ask ------- */
+
+  {
+    executed.length = 0;
+
+    /*
+     * The shape of a real failure: a search came back off-topic, a second
+     * search was added with no query, and it halted the task to ask for a topic
+     * the researcher had already given — with the work they asked for queued
+     * behind it.
+     */
+    const task = await makeTask([
+      { key: 'helper', capability: 'academic.search', input: { needsInput: true }, dynamic: true },
+      { key: 'titles', capability: 'document.write' },
+    ]);
+
+    await runTask(task.id);
+
+    const after = await tasksRepo.findAny(task.id);
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    check('the task does not stop to ask', after?.status, 'COMPLETED');
+    check('the helper is set aside', steps.find((step) => step.label === 'helper')?.status, 'SKIPPED');
+    assertTrue('and the work that was asked for still runs', executed.includes('document.write'));
+  }
+
+  {
+    executed.length = 0;
+
+    /*
+     * And whatever the set-aside step was helping is settled with it. A step
+     * waiting on one that will never run is never ready and never blocked, so
+     * the task would stop as deadlocked — a different way of going nowhere.
+     */
+    const task = await makeTask([
+      { key: 'helper', capability: 'academic.search', input: { needsInput: true }, dynamic: true },
+      { key: 'follow', capability: 'quality.check', dependsOn: ['helper'], dynamic: true },
+      { key: 'titles', capability: 'document.write' },
+    ]);
+
+    await runTask(task.id);
+
+    const after = await tasksRepo.findAny(task.id);
+    const steps = await tasksRepo.stepsOf(task.id);
+
+    check('the task still finishes', after?.status, 'COMPLETED');
+    check('what waited on it is closed too', steps.find((step) => step.label === 'follow')?.status, 'BLOCKED');
+    assertTrue('and the work that was asked for still runs', executed.includes('document.write'));
   }
 
   /* ------------------------ 9: the step ceiling ------------------------- */
@@ -3658,7 +3715,8 @@ async function main() {
 
     assertTrue(
       'an off-topic search recommends no query rather than the failed one',
-      handlerSource.includes('report.offTopic\n              ? {}'),
+      /* Matched loosely: the rule is the empty input, not its indentation. */
+      /report\.offTopic\s*\?\s*\{\}/.test(handlerSource),
     );
     assertTrue(
       'and a thin result broadens instead of repeating',

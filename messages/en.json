@@ -1571,6 +1571,7 @@
     },
     "step": {
       "blocked": "not run, because a step it needed failed",
+      "skipped": "set aside — the task went on without it",
       "failed": "failed after {attempts} attempts",
       "added": "added while running",
       "reason": {

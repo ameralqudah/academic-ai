@@ -13,6 +13,7 @@ import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { capabilityFor, DEFAULT_BUDGET, type TaskBudget } from '@/server/tasks/capabilities';
 import { runTask } from '@/server/tasks/executor';
 import { planAdditionalSteps, planTask } from '@/server/tasks/planner';
+import { isActionable } from '@/server/tasks/recommendations';
 
 /**
  * The reason behind a thrown error, where the message reveals one.
@@ -257,6 +258,8 @@ export async function planAndRun(taskId: string): Promise<void> {
        * Only when nothing is recommended does the planner reason about it.
        */
       const direct = trigger.recommendedNextActions.filter((action) => {
+        if (!isActionable(action)) return false;
+
         /* Already planned and waiting: adding it again would duplicate work. */
         if (steps.some((step) => step.capability === action.capability && step.status === 'PENDING')) {
           return false;

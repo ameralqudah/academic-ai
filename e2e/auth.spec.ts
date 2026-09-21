@@ -20,8 +20,9 @@ test.describe('authentication', () => {
 
   test('logging out returns to the marketing site and protects the dashboard', async ({ page }) => {
     await registerAndLogin(page, 'logout');
-
-    await page.getByRole('button', { name: 'Log out' }).click();
+    /* Sign out lives in the account menu at the foot of the sidebar. */
+    await page.getByRole('button', { name: 'Account menu' }).click();
+    await page.getByRole('menuitem', { name: 'Log out' }).click();
     await page.waitForURL(/\/en$/, { timeout: 30_000 });
 
     await page.goto('/en/dashboard');
@@ -38,8 +39,9 @@ test.describe('authentication', () => {
     await page.getByLabel('Confirm password').fill(PASSWORD);
     await page.getByRole('button', { name: 'Create account' }).click();
     await page.waitForURL('**/en/dashboard');
-
-    await page.getByRole('button', { name: 'Log out' }).click();
+    /* Sign out lives in the account menu at the foot of the sidebar. */
+    await page.getByRole('button', { name: 'Account menu' }).click();
+    await page.getByRole('menuitem', { name: 'Log out' }).click();
     await page.waitForURL(/\/en$/);
 
     await page.goto('/en/login');
@@ -52,7 +54,9 @@ test.describe('authentication', () => {
 
   test('registering with an existing email is refused', async ({ page }) => {
     const email = await registerAndLogin(page, 'dupe');
-    await page.getByRole('button', { name: 'Log out' }).click();
+    /* Sign out lives in the account menu at the foot of the sidebar. */
+    await page.getByRole('button', { name: 'Account menu' }).click();
+    await page.getByRole('menuitem', { name: 'Log out' }).click();
     await page.waitForURL(/\/en$/);
 
     await page.goto('/en/register');

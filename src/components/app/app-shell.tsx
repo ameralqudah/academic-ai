@@ -23,6 +23,7 @@ export function AppShell({
   children,
   userName,
   userEmail,
+  planName,
   isAdmin,
   conversations = [],
   aside,
@@ -30,6 +31,7 @@ export function AppShell({
   children: ReactNode;
   userName: string;
   userEmail: string;
+  planName?: string;
   isAdmin: boolean;
   /**
    * Recent conversations, loaded by the server layout and passed down.
@@ -70,6 +72,7 @@ export function AppShell({
       conversations={conversations}
       userName={userName}
       userEmail={userEmail}
+      planName={planName}
       isAdmin={isAdmin}
       onNavigate={() => setOpen(false)}
     />

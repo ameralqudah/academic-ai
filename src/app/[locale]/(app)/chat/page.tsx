@@ -160,6 +160,7 @@ export default async function ChatPage({
          */
         key={thread?.conversation.id ?? `new:${prompt ?? ''}`}
         locale={locale === 'en' ? 'en' : 'ar'}
+        userName={user.name ?? undefined}
         projects={projects.map((entry) => ({ id: entry.id, title: entry.title }))}
         initialProjectId={project ?? thread?.conversation.projectId ?? null}
         conversationId={thread?.conversation.id ?? null}

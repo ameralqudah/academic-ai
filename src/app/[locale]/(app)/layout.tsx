@@ -29,6 +29,7 @@ export default async function AppLayout({
     <AppShell
       userName={user.name ?? user.email}
       userEmail={user.email}
+      planName={locale === 'ar' ? summary.plan.nameAr : summary.plan.nameEn}
       isAdmin={hasAdminAccess(user)}
       conversations={conversations.map((conversation) => ({
         id: conversation.id,

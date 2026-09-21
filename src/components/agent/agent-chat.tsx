@@ -2,7 +2,7 @@
 
 import { Check, FileSpreadsheet, Loader2, X } from 'lucide-react';
 import { useTranslations } from 'next-intl';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
 import { ArtifactPanelProvider } from '@/components/agent/artifact-panel';
@@ -141,6 +141,7 @@ interface AttachedFile {
 
 export function AgentChat({
   locale,
+  userName,
   projects,
   initialProjectId,
   initialDraft,
@@ -150,6 +151,8 @@ export function AgentChat({
   initialFile,
 }: {
   locale: 'ar' | 'en';
+  /** For the greeting on a new conversation. */
+  userName?: string;
   projects: ProjectOption[];
   /**
    * Pre-selected project, read from the URL by the page.
@@ -1212,27 +1215,11 @@ export function AgentChat({
       )}
     >
       <div
-        className={cn(
-          'mx-auto flex w-full max-w-3xl shrink-0 items-center gap-2 px-4 py-2.5',
-          empty && 'absolute inset-x-0 top-0',
-        )}
-      >
-        <ProjectPicker
-          projects={projects}
-          value={projectId}
-          onChange={setProjectId}
-          locale={locale}
-          disabled={busy}
-        />
-        {projectId && <span className="text-xs text-muted">{t('projectContextOn')}</span>}
-      </div>
-
-      <div
         ref={scrollRef}
         className={cn('scrollbar-slim overflow-y-auto px-4', empty ? 'shrink-0' : 'min-h-0 flex-1')}
       >
         {empty ? (
-          <Welcome />
+          <Welcome userName={userName} />
         ) : (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 pt-2 pb-6">
             {turns.map((turn) => (
@@ -1408,6 +1395,21 @@ export function AgentChat({
         modelId={modelId}
         onModelChange={setModelId}
         showModelSelector={capabilities.showModelSelector}
+        roomy={empty}
+        /*
+         * The project picker lives in the composer. It floated alone at the top
+         * of the page, a long way from the message it applies to.
+         */
+        leading={
+          <ProjectPicker
+            projects={projects}
+            value={projectId}
+            onChange={setProjectId}
+            locale={locale}
+            disabled={busy}
+            inline
+          />
+        }
       />
 
       {empty ? (
@@ -1973,15 +1975,45 @@ function ResearchReport({ payload }: { payload: unknown }) {
   );
 }
 
-function Welcome() {
+/**
+ * The greeting on a new conversation.
+ *
+ * By name and by time of day, because a page that knows who is there reads as
+ * a place rather than a form. The hour is the reader's own, which the server
+ * cannot know, so the line is filled in once the browser's clock is the one
+ * being read — and holds its height until then, so nothing jumps.
+ */
+function Welcome({ userName }: { userName?: string }) {
   const t = useTranslations('agent');
 
+  const hydrated = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false,
+  );
+
+  /* An account with no name falls back to its email, which is not a greeting. */
+  const name = userName && !userName.includes('@') ? userName.trim() : '';
+  const hour = hydrated ? new Date().getHours() : 9;
+  const part = hour < 5 ? 'evening' : hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
+  const greeting = t(`greeting.${part}`);
+
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-2 pb-6 text-center">
-      <h2 className="font-display text-3xl leading-relaxed font-normal text-ink sm:text-4xl">
-        {t('welcome')}
+    <div className="mx-auto flex w-full max-w-3xl items-center justify-center gap-3.5 pb-7 text-center">
+      <span
+        aria-hidden
+        className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary pb-1.5 font-display text-2xl leading-none font-bold text-on-primary sm:size-11"
+      >
+        أ
+      </span>
+      <h2
+        className={cn(
+          'font-display text-3xl leading-relaxed font-normal text-ink sm:text-[2.6rem]',
+          !hydrated && 'opacity-0',
+        )}
+      >
+        {name ? t('greeting.withName', { greeting, name }) : greeting}
       </h2>
-      <p className="max-w-md text-sm text-muted">{t('welcomeSubtitle')}</p>
     </div>
   );
 }
@@ -1993,16 +2025,14 @@ function Examples({ onPick }: { onPick: (text: string) => void }) {
   const examples = ['exampleAnalyse', 'exampleReliability', 'exampleClean', 'examplePlan'] as const;
 
   return (
-    <div className="flex flex-wrap justify-center gap-2 pt-1">
+    <div className="flex flex-wrap justify-center gap-x-5 gap-y-1 pt-1">
       {examples.map((key) => (
         <button
           key={key}
           type="button"
           onClick={() => onPick(t(key))}
-          className={cn(
-            'rounded-xl border border-line bg-surface px-3.5 py-1.5 text-sm text-ink-soft',
-            'hover:border-primary hover:text-primary',
-          )}
+          /* Plain text: four bordered pills under a bordered box was a lot of boxes. */
+          className="rounded-lg px-1.5 py-1 text-sm text-muted hover:text-primary"
         >
           {t(key)}
         </button>

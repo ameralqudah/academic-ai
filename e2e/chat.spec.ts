@@ -170,12 +170,15 @@ test.describe('switching language', () => {
     await registerAndLogin(page, 'chat-locale', 'en');
     await page.goto('/en/chat');
 
+    /* Language sits in the account menu, which closes when the page changes locale. */
+    await page.getByRole('button', { name: 'Account menu' }).click();
     await page.getByRole('button', { name: /العربية|Arabic/i }).click();
 
     await expect(page).toHaveURL(/\/ar\/chat/);
     await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
 
     /* And back, so the switch is not one-way. */
+    await page.getByRole('button', { name: 'قائمة الحساب' }).click();
     await page.getByRole('button', { name: /English|الإنجليزية/i }).click();
     await expect(page).toHaveURL(/\/en\/chat/);
     await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');

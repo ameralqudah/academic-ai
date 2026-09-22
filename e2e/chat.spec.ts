@@ -361,6 +361,91 @@ test.describe('a direct answer, as it is written', () => {
     await expect(page.getByText(request.slice(0, 40), { exact: true })).toHaveCount(0);
   });
 
+  test('one mode: an analysis asked for in words is shown as its tables', async ({ page }) => {
+    await registerAndLogin(page, 'one-mode', 'en');
+    await page.goto('/en/chat');
+
+    /* One label, nothing to choose. */
+    await expect(page.getByTestId('composer-mode')).toHaveText('Academic');
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+
+    const result = {
+      test: 't.independent',
+      variables: ['score', 'gender'],
+      statistic: { name: 't (Welch)', value: 5.7798710875648025 },
+      df: 9.938452413207285,
+      pValue: 0.00018204677864943556,
+      effect: { name: 'cohensD', value: 3.3370101282868743, band: 'large' },
+      estimates: [
+        { label: 'm', n: 6, mean: 4.383, sd: 0.306 },
+        { label: 'f', n: 6, mean: 3.4, sd: 0.283 },
+      ],
+      assumptions: [],
+      warnings: [],
+      n: 12,
+      rowsSupplied: 12,
+      rowsDropped: 0,
+      missingPolicy: 'per-group',
+    };
+    const display = (kind: string, payload: object) => ({ type: 'analysis.v1', data: { display: { kind, payload } } });
+
+    await page.route('**/api/tasks/compared/stream', (route) => route.fulfill({ status: 404 }));
+    await page.route('**/api/tasks/compared', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            task: {
+              id: 'compared',
+              status: 'COMPLETED',
+              request: 'Compare score between gender groups',
+              pendingQuestion: null,
+              pauseReasonKey: null,
+              errorReasonKey: null,
+              context: {},
+            },
+            steps: [
+              {
+                id: 's0',
+                ordinal: 0,
+                capability: 'data.analyse',
+                label: 'Analysing the data',
+                status: 'COMPLETED',
+                attempts: 1,
+                errorReasonKey: null,
+                dynamic: false,
+                durationMs: 300,
+                artifactIds: [],
+                output: {
+                  outputs: [
+                    display('recommendation', {
+                      best: { test: 't.independent' },
+                      candidates: [{ test: 't.independent', confidence: 'recommended', available: true }],
+                    }),
+                    display('analysis', result),
+                  ],
+                  legacy: {},
+                  observation: { warnings: [] },
+                },
+              },
+            ],
+          },
+        }),
+      }),
+    );
+
+    await answerWith(page, [{ type: 'task', task: { id: 'compared', status: 'QUEUED' } }]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('Compare score between gender groups');
+    await composer.press('Enter');
+
+    await expect(page.getByText('Suggested tests')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('Independent-samples t-test')).toBeVisible();
+    await expect(page.getByText(/t \(Welch\) \(9\.94\) = 5\.780/)).toBeVisible();
+  });
+
   test('an Arabic result reads right to left in the English interface, under what was understood', async ({
     page,
   }) => {

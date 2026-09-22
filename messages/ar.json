@@ -1608,6 +1608,7 @@
       }
     },
     "capability": {
+      "dataAnalyse": "تحليل البيانات",
       "diagram": "رسم المخطط",
       "generalAnswer": "الإجابة",
       "webSearch": "البحث في الويب",

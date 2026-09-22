@@ -202,7 +202,12 @@ export function AgentChat({
   const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState<AttachedFile | null>(initialFile ?? null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<ModeKey>('chat');
+  /*
+   * Always the routed conversation. The modes still exist on the server —
+   * saved conversations and the API use them — but the screen offers one:
+   * the request decides which tools run, not a menu chosen beforehand.
+   */
+  const [mode] = useState<ModeKey>('chat');
   /*
    * Set when the agent asks for variable roles. Holding the question that
    * prompted it means confirming can resend the original request with the
@@ -1508,9 +1513,6 @@ export function AgentChat({
         onAttach={(selected) => void upload(selected)}
         busy={busy}
         uploading={uploading}
-        modes={capabilities.modes}
-        mode={mode}
-        onModeChange={setMode}
         models={capabilities.models}
         modelId={modelId}
         onModelChange={setModelId}
@@ -1803,7 +1805,18 @@ function ResultView({
   }
 
   if (kind === 'task' && runId) {
-    return <TaskProgress taskId={runId} />;
+    return (
+      <TaskProgress
+        taskId={runId}
+        renderResult={(display, index) => (
+          <ResultView key={`${display.kind}-${index}`} kind={display.kind} payload={display.payload} />
+        )}
+      />
+    );
+  }
+
+  if (kind === 'cleaning') {
+    return <CleaningView payload={payload} />;
   }
 
   if (kind === 'webSources') {
@@ -1886,6 +1899,50 @@ function ResultView({
   }
 
   return null;
+}
+
+/**
+ * Cleaning steps the file needs, as proposals. Nothing is applied here: the
+ * researcher applies them from the file's page, where each can be unticked.
+ */
+function CleaningView({ payload }: { payload: unknown }) {
+  const t = useTranslations('analysis.clean');
+  const proposals =
+    (payload as {
+      proposals?: {
+        kind: string;
+        columns: string[];
+        reasonKey: string;
+        reasonParams?: Record<string, string | number>;
+        destructive: boolean;
+      }[];
+    })?.proposals ?? [];
+  const tr = useTranslations();
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
+      <span className="text-xs font-medium text-muted">{t('title')}</span>
+      {proposals.length === 0 && <p className="text-sm text-ink">{t('nothingToDo')}</p>}
+      {proposals.map((proposal, index) => (
+        <div key={`${proposal.kind}-${index}`} className="flex flex-col gap-0.5 text-sm">
+          <span className="text-ink">
+            {t(`action.${proposal.kind}`)}
+            {proposal.destructive && (
+              <span className="ms-2 rounded bg-subtle px-1.5 py-0.5 text-xs text-muted">
+                {t('destructive')}
+              </span>
+            )}
+          </span>
+          <span className="text-xs text-muted">
+            {tr.has(proposal.reasonKey)
+              ? tr(proposal.reasonKey, proposal.reasonParams ?? {})
+              : proposal.columns.join(', ')}
+          </span>
+        </div>
+      ))}
+      <span className="text-xs text-muted">{t('originalSafe')}</span>
+    </div>
+  );
 }
 
 /**

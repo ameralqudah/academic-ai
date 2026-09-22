@@ -283,6 +283,10 @@ export const POST = withApi<Body>(
               },
             }
           : {}),
+        analysisHints: {
+          intent: decision.intent.intent,
+          mentioned: decision.intent.mentionedColumns,
+        },
       });
 
       /*
@@ -416,6 +420,10 @@ export const POST = withApi<Body>(
         projectId: body.projectId ?? null,
         conversationId: body.conversationId ?? null,
         datasetId,
+        analysisHints: {
+          intent: decision.intent.intent,
+          mentioned: decision.intent.mentionedColumns,
+        },
       });
 
       logger.info('chat.escalated', {

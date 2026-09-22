@@ -1497,9 +1497,10 @@ assertTrue(
 );
 
 /* Unavailable modes must not be focusable controls that imply they can be entered. */
+/* One mode on screen: the request decides the tools, not a menu chosen first. */
 assertTrue(
-  'an unavailable mode is rendered as text, not a button',
-  composerSource.includes('option.available ? (') && composerSource.includes('<span'),
+  'the composer offers no list of modes to choose from',
+  !composerSource.includes('role="listbox"') && composerSource.includes('Academic'),
 );
 assertTrue(
   'Enter sends and Shift+Enter breaks the line',
@@ -2912,10 +2913,6 @@ assertTrue(
  * do about it.
  */
 
-assertTrue(
-  'an unavailable mode explains itself with the server\'s reason',
-  composerForModes.includes('option.unavailableReason'),
-);
 assertTrue(
   'and the badge no longer claims the feature is merely coming',
   !composerForModes.includes("{t('soon')}"),
@@ -4681,6 +4678,130 @@ console.log('\nwhat a model costs');
   });
   check('a payload yields one line per result that says something', many.length, 1);
   check('with the run it came from', many[0]?.runId, 'run-1');
+}
+
+/* ------------------------------------------------------------------ */
+/* One mode: the request decides the analysis                          */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nOne mode: the request decides the analysis');
+  const { parseCsv, profileDataset } = await import('../src/analysis');
+  const { inferRoles } = await import('../src/analysis/infer-roles');
+  const { columnsNamedIn, isDataIntent } = await import('../src/server/services/data-requests');
+  const { asksToExplain, decide } = await import('../src/server/agent/routing-rules');
+  const { taskDisplays } = await import('../src/components/agent/task-result');
+
+  const rows = ['gender,age,satisfaction,q1,q2,q3,region'];
+  for (let i = 0; i < 40; i++) {
+    rows.push([i % 2 ? 'male' : 'female', 20 + (i % 17), 2 + (i % 5) * 0.7, 1 + (i % 5), 1 + ((i + 1) % 5), 1 + ((i + 2) % 5), ['north', 'south', 'east'][i % 3]].join(','));
+  }
+  const profile = profileDataset(parseCsv(rows.join('\n'), 'survey.csv'));
+  const roleOf = (result: ReturnType<typeof inferRoles>, column: string) =>
+    'roles' in result ? result.roles.find((role) => role.column === column)?.role : undefined;
+
+  check('a column named in the sentence is found', columnsNamedIn('قارن satisfaction حسب gender', profile).sort(), ['gender', 'satisfaction']);
+  check('and one not named is not', columnsNamedIn('compare satisfaction by gender', profile).includes('age'), false);
+
+  /* As the service calls it: the classifier's columns and the ones named in the words. */
+  const infer = (intent: string, message: string) =>
+    inferRoles({ intent, message, mentioned: columnsNamedIn(message, profile), profile });
+  const compare = infer('stats.compare', 'compare satisfaction by gender');
+  check('a comparison: the number is the outcome', roleOf(compare, 'satisfaction'), 'dependent');
+  check('and the category the groups', roleOf(compare, 'gender'), 'grouping');
+
+  const unclear = infer('stats.compare', 'compare them');
+  check('an unclear comparison asks rather than guesses', 'missing' in unclear, true);
+  check('offering the file’s variables', 'missing' in unclear && unclear.candidates.length > 0, true);
+
+  const reliability = infer('stats.reliability', 'reliability of the scale');
+  check('reliability finds the numbered items', 'roles' in reliability ? reliability.roles.map((role) => role.column).sort() : [], ['q1', 'q2', 'q3']);
+
+  const chi = infer('stats.relate', 'relationship between gender and region');
+  check('two categories related: both enter the table', 'roles' in chi ? chi.roles.length : 0, 2);
+
+  check('describing the data is analysis work', isDataIntent('data.describe'), true);
+  check('writing a section is not', isDataIntent('research.section'), false);
+
+  check('"explain the results" reads what is there', asksToExplain('اشرحلي النتائج', true), true);
+  check('not in an empty conversation', asksToExplain('اشرحلي النتائج', false), false);
+  check('nor when it also asks for a chapter', asksToExplain('اشرحلي النتائج واكتب فصل المناقشة', true), false);
+  check(
+    'an explanation answers directly even when the words sound like analysis',
+    decide({ intent: { intent: 'stats.compare', confidence: 0.8 }, needsTools: true, wantsFile: false, referencesPrevious: null, hasDataset: true, asksToExplain: true }).path,
+    'fast',
+  );
+
+  const displays = taskDisplays([
+    { capability: 'data.analyse', status: 'COMPLETED', artifactIds: [], output: { outputs: [
+      { type: 'analysis.v1', data: { display: { kind: 'recommendation', payload: { best: null, candidates: [] } } } },
+      { type: 'analysis.v1', data: { display: { kind: 'analysis', payload: { test: 't.independent' } } } },
+    ] } },
+    { capability: 'data.analyse', status: 'FAILED', artifactIds: [], output: { outputs: [{ type: 'analysis.v1', data: { display: { kind: 'analysis', payload: {} } } }] } },
+  ]);
+  check('a finished analysis shows its tables, in order', displays.map((display) => display.kind), ['recommendation', 'analysis']);
+
+  /* Moderation arrows: each from its own point, and none across another relation. */
+  const { parseSpec } = await import('../src/server/diagrams/spec');
+  const { layoutDiagram } = await import('../src/server/diagrams/layout');
+  type P = { x: number; y: number };
+  const cross = (p: P, q: P, r: P, t: P) => {
+    const d = (q.x - p.x) * (t.y - r.y) - (q.y - p.y) * (t.x - r.x);
+    if (d === 0) return false;
+    const u = ((r.x - p.x) * (t.y - r.y) - (r.y - p.y) * (t.x - r.x)) / d;
+    const v = ((r.x - p.x) * (q.y - p.y) - (r.y - p.y) * (q.x - p.x)) / d;
+    return u > 0.01 && u < 0.99 && v > 0.01 && v < 0.99;
+  };
+  const drawn = (raw: unknown) => {
+    const parsed = parseSpec(raw, { kind: 'conceptual', language: 'en' });
+    if (!('spec' in parsed)) return null;
+    const layout = layoutDiagram(parsed.spec);
+    const arrows = layout.edges.filter((edge) => edge.kind === 'moderation');
+    const paths = layout.edges.filter((edge) => edge.kind === 'path');
+    const crossing = arrows.flatMap((arrow) =>
+      paths.filter((path) => cross(arrow.from, arrow.to, path.from, path.to)).map((path) => `${arrow.label}×${path.label}`),
+    );
+    return { layout, arrows, crossing };
+  };
+
+  const chain = drawn({
+    constructs: [
+      { id: 'X', name: 'AI recruitment' },
+      { id: 'M', name: 'Engagement' },
+      { id: 'Y', name: 'Job performance' },
+      { id: 'W', name: 'Digital culture' },
+    ],
+    paths: [
+      { from: 'X', to: 'M', hypothesis: 'H1' },
+      { from: 'M', to: 'Y', hypothesis: 'H2' },
+    ],
+    moderations: [
+      { moderator: 'W', from: 'X', to: 'M', hypothesis: 'H3a' },
+      { moderator: 'W', from: 'M', to: 'Y', hypothesis: 'H3b' },
+    ],
+  });
+  check('each moderated relation gets its own arrow', chain?.arrows.length, 2);
+  check('from different points on the moderator', new Set(chain?.arrows.map((edge) => Math.round(edge.from.x))).size, 2);
+  check('and neither cuts across the other relation', chain?.crossing, []);
+
+  const fan = drawn({
+    constructs: [
+      { id: 'A', name: 'Service quality' },
+      { id: 'B', name: 'Price fairness' },
+      { id: 'C', name: 'Brand image' },
+      { id: 'Y', name: 'Customer loyalty' },
+      { id: 'W', name: 'Trust' },
+    ],
+    paths: [
+      { from: 'A', to: 'Y', hypothesis: 'H1' },
+      { from: 'B', to: 'Y', hypothesis: 'H2' },
+      { from: 'C', to: 'Y', hypothesis: 'H3' },
+    ],
+    moderations: [{ moderator: 'W', from: 'C', to: 'Y', hypothesis: 'H4' }],
+  });
+  const trust = fan?.layout.shapes.find((shape) => shape.id === 'W');
+  const brand = fan?.layout.shapes.find((shape) => shape.id === 'C');
+  check('a moderator of the lowest relation reaches it without crossing the others', fan?.crossing, []);
+  check('by sitting below the model', Boolean(trust && brand && trust.y > brand.y), true);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

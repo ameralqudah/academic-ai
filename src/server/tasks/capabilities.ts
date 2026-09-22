@@ -31,7 +31,8 @@ export type CapabilityId =
   | 'document.generate'
   | 'quality.check'
   | 'citation.verify'
-  | 'diagram.draw';
+  | 'diagram.draw'
+  | 'data.analyse';
 
 export interface CapabilityDefinition {
   id: CapabilityId;
@@ -180,6 +181,17 @@ const CAPABILITIES: Record<CapabilityId, CapabilityDefinition> = {
     estimatedModelCalls: 2,
     retryable: true,
     maxAttempts: 2,
+    requiresDataset: false,
+    parallelSafe: true,
+  },
+  'data.analyse': {
+    id: 'data.analyse',
+    labelKey: 'task.capability.dataAnalyse',
+    /* Arithmetic on at most a few thousand rows; no model call. */
+    timeoutMs: 60_000,
+    estimatedModelCalls: 0,
+    retryable: false,
+    maxAttempts: 1,
     requiresDataset: false,
     parallelSafe: true,
   },

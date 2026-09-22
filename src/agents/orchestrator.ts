@@ -47,6 +47,7 @@ import { encodeEvent, type AgentEvent, type PlanStep } from './events';
 import { classifyIntent } from './intent';
 import { capabilityFor, type IntentKey } from './registry';
 import { datasetForTurn } from '@/server/services/dataset.service';
+import { chooseTestFor, columnsFor } from '@/server/services/analysis-choice';
 
 /** A task may never exceed this, whatever happens inside it. */
 const MAX_UNITS_PER_TASK = 20;
@@ -904,7 +905,8 @@ async function executeStep(input: {
 }
 
 /**
- * Which test to run, from the recommender rather than the model.
+ * Which test to run, from the recommender rather than the model. Shared with
+ * the task system's analysis step; see `analysis-choice.ts`.
  *
  * Returns null when the recommender has nothing available, so the caller asks
  * instead of substituting.
@@ -914,54 +916,8 @@ async function chooseTest(
   intent: IntentKey,
 ): Promise<AnalysisTestKey | null> {
   if (!request.roles || request.roles.length === 0) return null;
-
   const loaded = await loadForAnalysis(request.datasetId as string, request.userId);
-  const recommendation = recommendTest(loaded.profile, request.roles);
-
-  if (!recommendation.best) return null;
-
-  const capability = capabilityFor(intent);
-  const chosen = recommendation.best.test as AnalysisTestKey;
-
-  /*
-   * The recommender answers "which test fits these variables", and the intent
-   * answers "what did the user ask for". When they disagree — a comparison
-   * request whose variables suit a regression — the intent wins, because the
-   * user's question is not the agent's to reinterpret.
-   */
-  if (capability.tests && !capability.tests.includes(chosen)) {
-    return capability.tests[0] ?? null;
-  }
-
-  return chosen;
-}
-
-/** Maps confirmed roles onto the column shape each engine expects. */
-function columnsFor(
-  test: AnalysisTestKey,
-  roles: RoleAssignment[],
-): Parameters<typeof runAnalysis>[0]['columns'] {
-  const dependent = roles.find((role) => role.role === 'dependent')?.column;
-  const grouping = roles.find((role) => role.role === 'grouping')?.column;
-  const independents = roles
-    .filter((role) => role.role === 'independent' || role.role === 'covariate')
-    .map((role) => role.column);
-  const paired = roles.filter((role) => role.role === 'paired').map((role) => role.column);
-
-  switch (test) {
-    case 't.paired':
-      return { paired: [paired[0] as string, paired[1] as string] };
-    case 'correlation.pearson':
-    case 'correlation.spearman':
-    case 'correlation.matrix':
-      return { independents: independents.length >= 2 ? independents : [dependent, ...independents].filter(Boolean) as string[] };
-    case 'chiSquare.independence':
-      return { dependent, grouping };
-    case 'reliability.cronbachAlpha':
-      return { items: [dependent, ...independents].filter(Boolean) as string[] };
-    default:
-      return { dependent, grouping, independents };
-  }
+  return chooseTestFor(loaded.profile, request.roles, intent).test;
 }
 
 /* -------------------------------------------------------------------------- */

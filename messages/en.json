@@ -1608,6 +1608,7 @@
       }
     },
     "capability": {
+      "dataAnalyse": "Analysing the data",
       "diagram": "Drawing the diagram",
       "generalAnswer": "Answering",
       "webSearch": "Web search",

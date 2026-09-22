@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUp, ChevronDown, Loader2, Paperclip, Square, Upload } from 'lucide-react';
+import { ArrowUp, Loader2, Paperclip, Square, Upload } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import {
   useEffect,
@@ -73,10 +73,6 @@ interface Props {
   busy: boolean;
   uploading: boolean;
 
-  modes: ModeOption[];
-  mode: ModeKey;
-  onModeChange: (mode: ModeKey) => void;
-
   /** Empty when the user's plan offers no choice — the selector then hides itself. */
   models: ModelOption[];
   modelId: string | null;
@@ -97,9 +93,6 @@ export function Composer({
   onAttach,
   busy,
   uploading,
-  modes,
-  mode,
-  onModeChange,
   models,
   modelId,
   onModelChange,
@@ -108,14 +101,10 @@ export function Composer({
   roomy,
 }: Props) {
   const t = useTranslations('agent');
-  const tm = useTranslations('mode');
-  /* Root namespace: the reason keys are fully qualified by the server. */
-  const tu = useTranslations();
 
   const fileRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [dragging, setDragging] = useState(false);
-  const [modeOpen, setModeOpen] = useState(false);
 
   /*
    * The box grows with the text up to a ceiling, then scrolls. A fixed single
@@ -173,17 +162,6 @@ export function Composer({
     if (file) onAttach(file);
   }
 
-  const activeMode = modes.find((option) => option.key === mode);
-
-  /*
-   * Plain conversation on one side, everything else on the other.
-   *
-   * Six modes do not fit in a row on a phone, and a bare dropdown hid the fact
-   * that there is a choice at all. Two segments show the choice; the second
-   * opens the list of the specialised modes and carries the name of whichever
-   * one is active.
-   */
-  const otherModes = modes.filter((option) => option.key !== 'chat');
   const modelName = (modelId ?? models.find((model) => model.isDefault)?.id ?? '').split(':')[1];
 
   return (
@@ -249,97 +227,19 @@ export function Composer({
 
         {leading}
 
-        {/* Mode */}
-        <div className="relative flex items-center rounded-xl bg-subtle p-0.5">
-          <button
-            type="button"
-            onClick={() => {
-              onModeChange('chat');
-              setModeOpen(false);
-            }}
-            disabled={busy}
-            aria-pressed={mode === 'chat'}
-            className={cn(
-              'rounded-[10px] px-2.5 py-1 text-xs whitespace-nowrap disabled:opacity-50',
-              mode === 'chat' ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink',
-            )}
-          >
-            {tm('chat')}
-          </button>
-          <button
-            type="button"
-            onClick={() => setModeOpen((open) => !open)}
-            disabled={busy}
-            aria-haspopup="listbox"
-            aria-expanded={modeOpen}
-            className={cn(
-              'flex items-center gap-1 rounded-[10px] px-2.5 py-1 text-xs whitespace-nowrap disabled:opacity-50',
-              mode !== 'chat' ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink',
-            )}
-          >
-            {mode !== 'chat' ? tm(mode) : t('otherModes')}
-            <ChevronDown className="size-3" aria-hidden />
-          </button>
-
-          {modeOpen && (
-            <div
-              role="listbox"
-              /*
-               * Downwards on a new conversation, where the composer sits in the
-               * middle of the page and a list above it lands on the greeting.
-               */
-              className={cn(
-                'absolute start-0 z-20 w-56 rounded-lg border border-line bg-surface p-1 shadow-lg',
-                roomy ? 'top-full mt-1' : 'bottom-full mb-1',
-              )}
-            >
-              {otherModes.map((option) =>
-                option.available ? (
-                  <button
-                    key={option.key}
-                    type="button"
-                    role="option"
-                    aria-selected={option.key === mode}
-                    onClick={() => {
-                      onModeChange(option.key);
-                      setModeOpen(false);
-                    }}
-                    className={cn(
-                      'flex w-full items-center justify-between rounded px-2.5 py-1.5 text-start text-sm hover:bg-subtle',
-                      option.key === mode ? 'text-accent' : 'text-ink',
-                    )}
-                  >
-                    {tm(option.key)}
-                    {option.requiresDataset && (
-                      <span className="text-[10px] text-muted">{t('needsFile')}</span>
-                    )}
-                  </button>
-                ) : (
-                  /*
-                   * Not a button. A disabled one still takes focus and still
-                   * reads as an action to a screen reader, which implies a mode
-                   * that can be entered. It cannot.
-                   */
-                  <span
-                    key={option.key}
-                    className="flex w-full items-center justify-between rounded px-2.5 py-1.5 text-sm text-muted/60"
-                    /*
-                     * The server's own reason, not one derived from the key.
-                     * "Needs a search provider key" is actionable; "coming
-                     * soon" is not, and is false once the feature is built.
-                     */
-                    title={option.unavailableReason ? tu(option.unavailableReason) : undefined}
-                  >
-                    {tm(option.key)}
-                    <span className="rounded bg-subtle px-1.5 py-0.5 text-[10px]">
-                      {t('needsSetup')}
-                    </span>
-                  </span>
-                ),
-              )}
-            </div>
-          )}
-        </div>
+        {/*
+          One mode. The researcher writes what they want and the request is
+          routed by what it asks — a list of modes made them decide first
+          which kind of question they had, and pick "data analysis" to ask one
+          about their data. The label says what this is; there is nothing to
+          choose.
+        */}
+        <span
+          data-testid="composer-mode"
+          className="rounded-xl bg-subtle px-2.5 py-1.5 text-xs font-medium whitespace-nowrap text-ink"
+        >
+          Academic
+        </span>
 
         {/*
           The model selector appears only where there is a genuine choice. With
@@ -369,9 +269,6 @@ export function Composer({
             <span className="hidden text-xs text-muted sm:inline" dir="ltr">
               {modelName}
             </span>
-          )}
-          {activeMode?.requiresDataset && (
-            <span className="hidden text-[11px] text-muted sm:inline">{t('needsFile')}</span>
           )}
 
           {/*

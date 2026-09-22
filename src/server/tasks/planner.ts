@@ -29,6 +29,7 @@ import { selectModel } from '@/server/ai/model-router';
 import { allCapabilities, capabilityFor, isKnownCapability } from './capabilities';
 import { repairPrerequisites } from './prerequisites';
 import { asksForDiagram, diagramKindOf } from '@/server/diagrams/requests';
+import { isDataIntent } from '@/server/services/data-requests';
 
 export interface PlannedStep {
   /** A key the plan uses to express dependencies before ids exist. */
@@ -106,6 +107,37 @@ export async function planTask(input: {
     };
   }
 
+  /*
+   * A question about the attached data: describe it, clean it, compare,
+   * relate, predict, test reliability. One step, which reads the columns,
+   * works out their roles from the request and runs the engine — or asks
+   * which variables are meant. Planning it with a model added a call and,
+   * once, a literature search nobody asked for.
+   *
+   * Not when a file or a drawing was asked for: those are more than one step.
+   */
+  const hints = input.context.analysisHints as { intent?: string; mentioned?: string[] } | undefined;
+  if (
+    hints?.intent &&
+    isDataIntent(hints.intent) &&
+    !asksForDiagram(input.request) &&
+    !input.context.references
+  ) {
+    return {
+      steps: [
+        {
+          key: 'analyse',
+          capability: 'data.analyse',
+          label: input.locale === 'ar' ? 'تحليل البيانات' : 'Analysing the data',
+          dependsOn: [],
+          input: { intent: hints.intent, columns: hints.mentioned ?? [] },
+        },
+      ],
+      missingInformation: [],
+      summary: '',
+    };
+  }
+
   const capabilities = allCapabilities()
     .map(
       (capability) =>
@@ -141,6 +173,7 @@ Input fields. Use these names, so the step can find what you gave it:
    - academic.search, web.search: {"query": "<search terms>"}
    - deep.research: {"question": "<what to find out>"}
    - literature.review, document.write: {"topic": "<the subject>"}
+   - data.analyse: {"intent": "data.describe" | "data.clean" | "stats.compare" | "stats.relate" | "stats.predict" | "stats.reliability" | "stats.categorical" | "stats.recommend", "columns": ["<column names the request mentions>"]} — describes, cleans or runs the statistical test on the attached dataset. Prefer it over statistics.run.
    - diagram.draw: {"kind": "conceptual" | "measurement" | "structural", "instruction": "<what to draw>"} — draws the research model from the conversation, or from a statistics.pls step it depends on (then with that analysis's real coefficients). One step; it needs nothing written first.
 
 Rules:

@@ -83,7 +83,17 @@ function boxFor(construct: DiagramConstruct): Shape {
   const h =
     BOX_PAD * 2 + title.length * (TYPE.name + 6) + (lines.length > 0 ? 8 + lines.length * (TYPE.line + 6) : 0);
 
-  return { id: construct.id, kind: 'box', x: 0, y: 0, w: BOX_WIDTH, h, title, lines: lines, role: construct.role };
+  return {
+    id: construct.id,
+    kind: 'box',
+    x: 0,
+    y: 0,
+    w: BOX_WIDTH,
+    h,
+    title,
+    lines: lines,
+    role: construct.role,
+  };
 }
 
 function ellipseFor(construct: DiagramConstruct, caption?: string): Shape {
@@ -124,31 +134,68 @@ function blockFor(construct: DiagramConstruct, spec: DiagramSpec): Block {
 
   if (spec.kind === 'conceptual') {
     const shape = boxFor(construct);
-    return { construct, shape, items: [], side: 'start', w: shape.w, h: shape.h };
+    return {
+      construct,
+      shape,
+      items: [],
+      side: 'start',
+      w: shape.w,
+      h: shape.h,
+    };
   }
 
   const shape = ellipseFor(construct, caption);
 
   if (spec.kind === 'structural') {
-    return { construct, shape, items: [], side: 'start', w: shape.w, h: shape.h };
+    return {
+      construct,
+      shape,
+      items: [],
+      side: 'start',
+      w: shape.w,
+      h: shape.h,
+    };
   }
 
   const side = itemSide(construct.role);
   const items = construct.indicators.map((indicator, index) => {
     const title = wrap(indicator, ITEM.w * 1.9, TYPE.item, 1);
     const w = Math.max(ITEM.w, textWidth(title[0] ?? '', TYPE.item) + 18);
-    return { id: `${construct.id}::${index}`, kind: 'item' as const, x: 0, y: 0, w, h: ITEM.h, title, lines: [] };
+    return {
+      id: `${construct.id}::${index}`,
+      kind: 'item' as const,
+      x: 0,
+      y: 0,
+      w,
+      h: ITEM.h,
+      title,
+      lines: [],
+    };
   });
 
   const itemW = Math.max(ITEM.w, ...items.map((item) => item.w));
 
   if (side === 'top' || side === 'bottom') {
     const row = items.reduce((sum, item) => sum + item.w, 0) + ITEM.gap * Math.max(0, items.length - 1);
-    return { construct, shape, items, side, w: Math.max(shape.w, row), h: shape.h + ITEM.reach + ITEM.h };
+    return {
+      construct,
+      shape,
+      items,
+      side,
+      w: Math.max(shape.w, row),
+      h: shape.h + ITEM.reach + ITEM.h,
+    };
   }
 
   const stack = items.length * ITEM.h + Math.max(0, items.length - 1) * ITEM.gap;
-  return { construct, shape, items, side, w: shape.w + ITEM.reach + itemW, h: Math.max(shape.h, stack) };
+  return {
+    construct,
+    shape,
+    items,
+    side,
+    w: shape.w + ITEM.reach + itemW,
+    h: Math.max(shape.h, stack),
+  };
 }
 
 /** Places a block's construct and items once the block itself has a position. */
@@ -208,6 +255,32 @@ export function boundary(shape: Shape, toward: Point): Point {
   const ty = dy === 0 ? Infinity : shape.h / 2 / Math.abs(dy);
   const t = Math.min(tx, ty);
   return { x: c.x + dx * t, y: c.y + dy * t };
+}
+
+/** Whether two segments cross at a point inside both. */
+function segmentsCross(p: Point, q: Point, r: Point, t: Point): boolean {
+  const d = (q.x - p.x) * (t.y - r.y) - (q.y - p.y) * (t.x - r.x);
+  if (d === 0) return false;
+  const u = ((r.x - p.x) * (t.y - r.y) - (r.y - p.y) * (t.x - r.x)) / d;
+  const v = ((r.x - p.x) * (q.y - p.y) - (r.y - p.y) * (q.x - p.x)) / d;
+  return u > 0.001 && u < 0.999 && v > 0.001 && v < 0.999;
+}
+
+function distanceToSegment(point: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length));
+  return Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy));
+}
+
+/** The point on a shape's lower (or upper) edge at a given x. */
+function edgeAt(shape: Shape, x: number, upper = false): Point {
+  const sign = upper ? -1 : 1;
+  if (shape.kind !== 'ellipse') return { x, y: upper ? shape.y : shape.y + shape.h };
+  const c = centre(shape);
+  const u = (x - c.x) / (shape.w / 2);
+  return { x, y: c.y + sign * (shape.h / 2) * Math.sqrt(Math.max(0, 1 - u * u)) };
 }
 
 function midpoint(a: Point, b: Point, at = 0.5): Point {
@@ -332,6 +405,7 @@ export function layoutDiagram(spec: DiagramSpec): Layout {
     spec.values?.paths.find((path) => path.from === from && path.to === to)?.beta;
 
   const pathLines = new Map<string, { a: Point; b: Point }>();
+  const pathEdges = new Map<string, Edge>();
 
   for (const path of spec.paths) {
     const source = blocks.get(path.from)?.shape;
@@ -353,17 +427,20 @@ export function layoutDiagram(spec: DiagramSpec): Layout {
      * where a moderator's arrow lands, and a label there sat under it.
      */
     const moderated = spec.moderations.some((m) => m.from === path.from && m.to === path.to);
-    edges.push({
+    const edge: Edge = {
       from: a,
       to: b,
       kind: 'path',
       ...(label ? { label, labelAt: beside(a, b, moderated ? 0.28 : 0.45) } : {}),
-    });
+    };
+    edges.push(edge);
+    pathEdges.set(`${path.from}→${path.to}`, edge);
   }
 
   /* Each moderator above the midpoint of what it moderates. */
   const moderatorTop = MARGIN + titleBand;
   const placed: Shape[] = [];
+  const placedAt = new Map<string, number>();
 
   for (const moderator of moderators) {
     const block = blocks.get(moderator.id) as Block;
@@ -383,22 +460,151 @@ export function layoutDiagram(spec: DiagramSpec): Layout {
     }
 
     placeBlock(block, bx, moderatorTop);
+    placedAt.set(moderator.id, bx);
     placed.push(block.shape);
   }
 
-  for (const moderation of spec.moderations) {
-    const shape = blocks.get(moderation.moderator)?.shape;
-    const line = pathLines.get(`${moderation.from}→${moderation.to}`);
-    if (!shape || !line) continue;
+  /*
+   * A moderator of one relation points at its middle. A moderator of several
+   * sends each arrow from its own point along its edge — ordered as the
+   * relations are, left to right — to the part of that relation that keeps it
+   * clear of the others. From one point, the arrow to a distant relation (H3b)
+   * cut across the relation in between (H1), and read as moderating that.
+   *
+   * A moderator of a relation at the bottom of the model moves below it when
+   * that is the only way to reach the relation without crossing another.
+   */
+  type Arrow = {
+    moderation: (typeof spec.moderations)[number];
+    line: { a: Point; b: Point };
+    start: Point;
+    landing: Point;
+    others: { a: Point; b: Point }[];
+  };
 
-    const landing = midpoint(line.a, line.b);
-    const start = boundary(shape, landing);
-    edges.push({
-      from: start,
-      to: landing,
-      kind: 'moderation',
-      ...(moderation.hypothesis ? { label: moderation.hypothesis, labelAt: beside(start, landing, 0.55) } : {}),
-    });
+  const arrowsOf = (shape: Shape, moderatorId: string, fromBelow: boolean) => {
+    const own = spec.moderations
+      .filter((moderation) => moderation.moderator === moderatorId)
+      .flatMap((moderation) => {
+        const line = pathLines.get(`${moderation.from}→${moderation.to}`);
+        return line ? [{ moderation, line }] : [];
+      })
+      .sort((p, q) => midpoint(p.line.a, p.line.b).x - midpoint(q.line.a, q.line.b).x);
+
+    const arrows: Arrow[] = [];
+    let crossings = 0;
+
+    for (const [index, { moderation, line }] of own.entries()) {
+      /* The other relations, which the arrow must neither cross nor land on. */
+      const others = [...pathLines.entries()]
+        .filter(([key]) => key !== `${moderation.from}→${moderation.to}`)
+        .map(([, other]) => other);
+
+      const inset = shape.kind === 'ellipse' ? 0.2 : 0.1;
+      const slotAt = (at: number) => shape.x + shape.w * (inset + (1 - 2 * inset) * at);
+      const startX = own.length === 1 ? undefined : slotAt((index + 0.5) / own.length);
+      const span = line.b.x - line.a.x;
+      const preferred =
+        startX === undefined || span === 0 ? 0.5 : Math.min(0.65, Math.max(0.35, (startX - line.a.x) / span));
+      const ownLabel = beside(line.a, line.b, 0.28);
+
+      /* Its own slot first; elsewhere along the edge only if that avoids a crossing. */
+      const slots = startX === undefined ? [undefined] : [startX, ...[0.5, 0.3, 0.7, 0.2, 0.8].map(slotAt)];
+      let best: { start: Point; landing: Point; score: number; crossings: number } | null = null;
+      for (const slot of slots) {
+        for (const along of [preferred, 0.5, 0.42, 0.58, 0.35, 0.65, 0.28, 0.72]) {
+          const land = midpoint(line.a, line.b, along);
+          const from = slot === undefined ? boundary(shape, land) : edgeAt(shape, slot, fromBelow);
+          const crossed = others.filter((other) => segmentsCross(from, land, other.a, other.b)).length;
+          const crowded = others.some((other) => distanceToSegment(land, other.a, other.b) < 24) ? 1 : 0;
+          /* The relation's own label sits a third of the way along; land clear of it. */
+          const onLabel = Math.hypot(land.x - ownLabel.x, land.y - ownLabel.y) < 36 ? 1 : 0;
+          const moved = slot === undefined || startX === undefined ? 0 : Math.abs(slot - startX) / shape.w;
+          const score = crossed * 10 + crowded * 5 + onLabel * 3 + Math.abs(along - preferred) + moved * 2;
+          if (!best || score < best.score) best = { start: from, landing: land, score, crossings: crossed };
+        }
+      }
+      if (!best) continue;
+      crossings += best.crossings;
+      arrows.push({ moderation, line, start: best.start, landing: best.landing, others });
+    }
+
+    return { arrows, crossings };
+  };
+
+  const mainBottom = Math.max(
+    ...main.flatMap((construct) => {
+      const block = blocks.get(construct.id) as Block;
+      return [block.shape, ...block.items].map((shape) => shape.y + shape.h);
+    }),
+  );
+  const below = new Set<string>();
+
+  for (const moderator of moderators) {
+    const block = blocks.get(moderator.id) as Block;
+    let chosen = arrowsOf(block.shape, moderator.id, false);
+
+    if (chosen.crossings > 0) {
+      const bx = placedAt.get(moderator.id) ?? block.shape.x;
+      placeBlock(block, bx, mainBottom + 70);
+      const lower = arrowsOf(block.shape, moderator.id, true);
+      if (lower.crossings < chosen.crossings) {
+        chosen = lower;
+        below.add(moderator.id);
+      } else {
+        placeBlock(block, bx, moderatorTop);
+      }
+    }
+
+    for (const { moderation, line, start, landing, others } of chosen.arrows) {
+      /*
+       * A short relation leaves little room: where the arrow had to land on
+       * the relation's own label, the label moves along the line instead.
+       */
+      const pathEdge = pathEdges.get(`${moderation.from}→${moderation.to}`);
+      if (pathEdge?.labelAt && Math.hypot(pathEdge.labelAt.x - landing.x, pathEdge.labelAt.y - landing.y) < 36) {
+        const near = (at: number) => beside(line.a, line.b, at);
+        const far = (at: number) => {
+          const m = midpoint(line.a, line.b, at);
+          const n = near(at);
+          return { x: 2 * m.x - n.x, y: 2 * m.y - n.y };
+        };
+        /* The side of the line the arrow does not come from, first. */
+        const [away, toward] = below.has(moderation.moderator) ? [near, far] : [far, near];
+        const inside = (spot: Point) =>
+          [...blocks.values()].some(
+            ({ shape: box }) =>
+              spot.x > box.x - 12 && spot.x < box.x + box.w + 12 && spot.y > box.y - 10 && spot.y < box.y + box.h + 10,
+          );
+        const clear = [away(0.28), away(0.4), away(0.2), toward(0.6), toward(0.72), away(0.6)].find(
+          (spot) =>
+            Math.hypot(spot.x - landing.x, spot.y - landing.y) >= 30 &&
+            !inside(spot) &&
+            others.every((other) => distanceToSegment(spot, other.a, other.b) >= 16),
+        );
+        if (clear) pathEdge.labelAt = clear;
+      }
+
+      edges.push({
+        from: start,
+        to: landing,
+        kind: 'moderation',
+        ...(moderation.hypothesis ? { label: moderation.hypothesis, labelAt: beside(start, landing, 0.55) } : {}),
+      });
+    }
+  }
+
+  /* Every moderator went below: the band kept for them above is empty. */
+  if (moderators.length > 0 && below.size === moderators.length) {
+    const lift = moderatorBand;
+    for (const block of blocks.values()) {
+      for (const shape of [block.shape, ...block.items]) shape.y -= lift;
+    }
+    for (const edge of edges) {
+      edge.from = { x: edge.from.x, y: edge.from.y - lift };
+      edge.to = { x: edge.to.x, y: edge.to.y - lift };
+      if (edge.labelAt) edge.labelAt = { x: edge.labelAt.x, y: edge.labelAt.y - lift };
+    }
   }
 
   /* Items: reflective arrows point out to the item, formative ones in. */
@@ -429,7 +635,11 @@ export function layoutDiagram(spec: DiagramSpec): Layout {
 
   const noteTexts = [...spec.notes, ...(spec.values ? [spec.values.source] : [])];
   const width = right + MARGIN;
-  const notes = noteTexts.map((text, index) => ({ text, x: width / 2, y: bottom + 34 + index * 18 }));
+  const notes = noteTexts.map((text, index) => ({
+    text,
+    x: width / 2,
+    y: bottom + 34 + index * 18,
+  }));
   const height = bottom + MARGIN + (notes.length ? notes.length * 18 + 10 : 0);
 
   const layout: Layout = {
@@ -447,11 +657,17 @@ export function layoutDiagram(spec: DiagramSpec): Layout {
 
 /** The same layout read right to left. Text is not mirrored — only positions. */
 function mirror(layout: Layout): Layout {
-  const flip = (point: Point): Point => ({ x: layout.width - point.x, y: point.y });
+  const flip = (point: Point): Point => ({
+    x: layout.width - point.x,
+    y: point.y,
+  });
 
   return {
     ...layout,
-    shapes: layout.shapes.map((shape) => ({ ...shape, x: layout.width - shape.x - shape.w })),
+    shapes: layout.shapes.map((shape) => ({
+      ...shape,
+      x: layout.width - shape.x - shape.w,
+    })),
     edges: layout.edges.map((edge) => ({
       ...edge,
       from: flip(edge.from),

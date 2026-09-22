@@ -25,6 +25,7 @@ import { logger } from '@/lib/logger';
 import { classifyIntent, type IntentResult } from '@/agents/intent';
 import { asksAboutEarlierWork, decide, detectReference } from './routing-rules';
 import type { DatasetProfile } from '@/analysis/types';
+import { asksForDiagram } from '@/server/diagrams/requests';
 
 export type RoutePath = 'fast' | 'agent';
 
@@ -176,8 +177,10 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
   const wantsFile = FORMAT_WORDS.some((pattern) => pattern.test(input.message));
   const needsTools = NEEDS_TOOLS.has(intent.intent);
 
-  const suggested = new Set(CAPABILITY_FOR[intent.intent] ?? []);
-  if (wantsFile) suggested.add('document.generate');
+  const wantsDiagram = asksForDiagram(input.message);
+  const suggested = new Set(wantsDiagram ? [] : (CAPABILITY_FOR[intent.intent] ?? []));
+  if (wantsFile && !wantsDiagram) suggested.add('document.generate');
+  if (wantsDiagram) suggested.add('diagram.draw');
 
   /*
    * A dataset in the conversation and a request that mentions it. The intent
@@ -194,6 +197,7 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
     wantsFile,
     referencesPrevious,
     hasDataset: input.hasDataset ?? false,
+    wantsDiagram,
     asksAboutEarlierWork:
       referencesPrevious === null && asksAboutEarlierWork(input.message, input.hasPriorWork ?? false),
   });

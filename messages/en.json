@@ -1545,6 +1545,7 @@
     }
   },
   "task": {
+    "diagram": {"png": "PNG image", "svg": "SVG"},
     "result": "Result",
     "copy": "Copy",
     "copied": "Copied",
@@ -1607,6 +1608,7 @@
       }
     },
     "capability": {
+      "diagram": "Drawing the diagram",
       "generalAnswer": "Answering",
       "webSearch": "Web search",
       "academicSearch": "Academic search",

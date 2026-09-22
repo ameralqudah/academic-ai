@@ -21,6 +21,14 @@ export const GET = withApi<undefined, Params>(
           `${artifact.filename.replace(/\.[^.]+$/, '')}-v${artifact.version}.${artifact.kind}`,
         )}"`,
         'content-length': String(bytes.length),
+        /*
+         * A drawing is shown inline in the chat, from this same origin. It is
+         * generated and validated to hold no script, and this makes sure: an SVG
+         * opened directly cannot run anything or reach anything.
+         */
+        ...(artifact.kind === 'svg'
+          ? { 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; font-src data:; sandbox" }
+          : {}),
       },
     });
   },

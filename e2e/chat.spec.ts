@@ -397,6 +397,87 @@ test.describe('a direct answer, as it is written', () => {
     expect(panel!.y).toBeLessThan((await answer.boundingBox())!.y);
   });
 
+  test('a drawn model is shown in the thread and downloads as PNG', async ({ page }) => {
+    await registerAndLogin(page, 'task-diagram', 'en');
+    await page.goto('/en/chat');
+
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200">' +
+      '<rect width="100%" height="100%" fill="#fff"/><ellipse cx="100" cy="100" rx="80" ry="40" fill="#eef5f2" stroke="#0b4a3b"/>' +
+      '<text x="100" y="105" text-anchor="middle">Digital Transformation</text></svg>';
+
+    await page.route('**/api/artifacts/figure-svg', (route) =>
+      route.fulfill({ contentType: 'image/svg+xml', body: svg }),
+    );
+    await page.route('**/api/tasks/drawn-model/stream', (route) => route.fulfill({ status: 404 }));
+    await page.route('**/api/tasks/drawn-model', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            task: {
+              id: 'drawn-model',
+              status: 'COMPLETED',
+              request: 'draw the research model',
+              pendingQuestion: null,
+              pauseReasonKey: null,
+              errorReasonKey: null,
+              context: {},
+            },
+            steps: [
+              {
+                id: 's0',
+                ordinal: 0,
+                capability: 'diagram.draw',
+                label: 'Drawing the model',
+                status: 'COMPLETED',
+                attempts: 1,
+                errorReasonKey: null,
+                dynamic: false,
+                durationMs: 1800,
+                artifactIds: ['figure-svg', 'figure-pptx'],
+                output: {
+                  outputs: [
+                    { type: 'artifact.v1', data: { artifactId: 'figure-svg', filename: 'Research Model.svg', kind: 'svg' } },
+                    { type: 'artifact.v1', data: { artifactId: 'figure-pptx', filename: 'Research Model.pptx', kind: 'pptx' } },
+                  ],
+                  legacy: { filename: 'Research Model.pptx', kind: 'pptx' },
+                },
+              },
+            ],
+          },
+        }),
+      }),
+    );
+
+    await answerWith(page, [{ type: 'task', task: { id: 'drawn-model', status: 'QUEUED' } }]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('draw the research model');
+    await composer.press('Enter');
+
+    /* The figure itself, not a file row: it is the answer. */
+    const figure = page.getByRole('img', { name: 'Research Model.svg' });
+    await expect(figure).toBeVisible({ timeout: 20_000 });
+    expect(await figure.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+
+    /* Each file under its own name — the step made two, and both were once listed as the second. */
+    await expect(page.getByText('Research Model.pptx')).toBeVisible();
+
+    const download = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'PNG image' }).click();
+    const file = await download;
+    expect(file.suggestedFilename()).toBe('Research Model.png');
+
+    const path = await file.path();
+    const { readFileSync } = await import('node:fs');
+    const bytes = readFileSync(path);
+    /* A PNG signature, drawn at three times the figure's size for print. */
+    expect(bytes.subarray(1, 4).toString()).toBe('PNG');
+    expect(bytes.readUInt32BE(16)).toBe(1200);
+  });
+
   test('an abandoned question can be dismissed from the top of the chat', async ({ page }) => {
     await registerAndLogin(page, 'dismiss-task', 'en');
 

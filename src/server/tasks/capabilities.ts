@@ -30,7 +30,8 @@ export type CapabilityId =
   | 'document.write'
   | 'document.generate'
   | 'quality.check'
-  | 'citation.verify';
+  | 'citation.verify'
+  | 'diagram.draw';
 
 export interface CapabilityDefinition {
   id: CapabilityId;
@@ -177,6 +178,17 @@ const CAPABILITIES: Record<CapabilityId, CapabilityDefinition> = {
     /* Writing a chapter, which is the longest single model call here. */
     timeoutMs: 240_000,
     estimatedModelCalls: 2,
+    retryable: true,
+    maxAttempts: 2,
+    requiresDataset: false,
+    parallelSafe: true,
+  },
+  'diagram.draw': {
+    id: 'diagram.draw',
+    labelKey: 'task.capability.diagram',
+    /* One model call to read the structure, then drawing, which is arithmetic. */
+    timeoutMs: 90_000,
+    estimatedModelCalls: 1,
     retryable: true,
     maxAttempts: 2,
     requiresDataset: false,

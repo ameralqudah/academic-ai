@@ -28,7 +28,7 @@ import { storageProvider } from '@/server/storage';
 import type { Artifact } from '@/server/db/schema';
 
 export type ArtifactKind =
-  | 'docx' | 'pdf' | 'pptx' | 'xlsx' | 'csv' | 'md' | 'txt' | 'bib' | 'ris';
+  | 'docx' | 'pdf' | 'pptx' | 'xlsx' | 'csv' | 'md' | 'txt' | 'bib' | 'ris' | 'svg';
 
 const CONTENT_TYPES: Record<ArtifactKind, string> = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -40,6 +40,7 @@ const CONTENT_TYPES: Record<ArtifactKind, string> = {
   md: 'text/markdown; charset=utf-8',
   bib: 'application/x-bibtex; charset=utf-8',
   ris: 'application/x-research-info-systems; charset=utf-8',
+  svg: 'image/svg+xml',
 };
 
 export interface StoreInput {

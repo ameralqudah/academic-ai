@@ -4289,6 +4289,85 @@ async function main() {
     await stop(follow.id, asker);
   }
 
+  /* --- an estimated model is drawn with its own numbers ----------------- */
+
+  {
+    const drawer = await newUser('diagram-owner');
+
+    /* A stand-in for the PLS step: the estimates it now carries, nothing else. */
+    registerHandler('statistics.pls', async (context) =>
+      succeeded([
+        makeOutput({ taskId: context.taskId, stepId: context.stepId, capability: 'statistics.pls', projectId: null }, 'pls-results.v1', {
+          verdict: 'acceptable',
+          sections: [],
+          n: 212,
+          estimates: {
+            constructs: [
+              { name: 'التحول الرقمي', indicators: ['DT1', 'DT2', 'DT3'], mode: 'reflective' },
+              { name: 'جودة الخدمة', indicators: ['SQ1', 'SQ2'], mode: 'reflective' },
+            ],
+            paths: [{ from: 'التحول الرقمي', to: 'جودة الخدمة', coefficient: 0.4213 }],
+            rSquared: [{ construct: 'جودة الخدمة', rSquared: 0.1776 }],
+            loadings: [{ construct: 'التحول الرقمي', indicator: 'DT1', loading: 0.812 }],
+            n: 212,
+          },
+        }),
+      ]),
+    );
+
+    const task = await tasksRepo.create({
+      userId: drawer,
+      request: 'ارسم النموذج الهيكلي',
+      locale: 'ar',
+      status: 'QUEUED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+    const [pls, draw] = await tasksRepo.addSteps([
+      { taskId: task.id, ordinal: 0, capability: 'statistics.pls', label: 'pls', status: 'PENDING', dependsOn: [], input: {} },
+      { taskId: task.id, ordinal: 1, capability: 'diagram.draw', label: 'draw', status: 'PENDING', dependsOn: [], input: { kind: 'measurement' } },
+    ]);
+    await tasksRepo.updateDependencies(draw!.id, [pls!.id]);
+
+    await runTask(task.id);
+
+    const drawn = (await tasksRepo.stepsOf(task.id)).find((step) => step.capability === 'diagram.draw');
+    check('the diagram step completes', drawn?.status, 'COMPLETED');
+    check('with a drawing and an editable copy', drawn?.artifactIds.length, 2);
+
+    const files = await Promise.all((drawn?.artifactIds ?? []).map((id) => readArtifact(id, drawer)));
+    const svgFile = files.find((file) => file.artifact.kind === 'svg');
+    const slideFile = files.find((file) => file.artifact.kind === 'pptx');
+
+    check('one is an SVG', Boolean(svgFile), true);
+    check('served as an image', svgFile?.contentType, 'image/svg+xml');
+    check('the other a PowerPoint', Boolean(slideFile), true);
+
+    const svgText = new TextDecoder().decode(svgFile?.bytes ?? new Uint8Array());
+    assertTrue('the estimated coefficient is on the figure', svgText.includes('β = 0.421'));
+    assertTrue('with R² inside the outcome', svgText.includes('R² = 0.178'));
+    assertTrue('and a loading on its item', svgText.includes('0.812'));
+    assertTrue('and says where the numbers came from', svgText.includes('ن = 212'));
+    assertTrue('named in Arabic, as the model is', svgText.includes('التحول الرقمي'));
+
+    const zip = await JSZip.loadAsync(slideFile?.bytes ?? new Uint8Array());
+    const slideXml = (await zip.file('ppt/slides/slide1.xml')?.async('string')) ?? '';
+    assertTrue('the PowerPoint copy is made of editable shapes', slideXml.includes('prstGeom prst="ellipse"'));
+    assertTrue('with the same names in them', slideXml.includes('جودة الخدمة'));
+
+    /* A request to draw, with no data, is one step and asks nothing. */
+    const { planTask } = await import('@/server/tasks/planner');
+    const plan = await planTask({
+      userId: drawer,
+      request: 'بدي رسمه حقيقيه وواقعيه قابله للتحميل',
+      locale: 'ar',
+      context: {},
+    });
+    check('a drawing request is planned as one drawing step', plan.steps.map((step) => step.capability), ['diagram.draw']);
+    check('without a question', plan.missingInformation.length, 0);
+  }
+
 
   /* ------------------------------------------ live progress and resumption */
 

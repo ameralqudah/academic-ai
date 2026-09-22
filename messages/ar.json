@@ -1545,6 +1545,7 @@
     }
   },
   "task": {
+    "diagram": {"png": "صورة PNG", "svg": "SVG"},
     "result": "النتيجة",
     "copy": "نسخ",
     "copied": "تم النسخ",
@@ -1607,6 +1608,7 @@
       }
     },
     "capability": {
+      "diagram": "رسم المخطط",
       "generalAnswer": "الإجابة",
       "webSearch": "البحث في الويب",
       "academicSearch": "البحث الأكاديمي",

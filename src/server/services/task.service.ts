@@ -15,6 +15,7 @@ import { runTask } from '@/server/tasks/executor';
 import { planAdditionalSteps, planTask } from '@/server/tasks/planner';
 import { isActionable } from '@/server/tasks/recommendations';
 import { latestEarlierWork } from '@/server/agent/earlier-work';
+import * as conversationsRepo from '@/server/repositories/conversations.repository';
 
 /**
  * The reason behind a thrown error, where the message reveals one.
@@ -110,6 +111,24 @@ export async function startTask(input: {
       )
     : null;
 
+  /*
+   * The last few turns, for the planner.
+   *
+   * Earlier work covers what tasks wrote; most of a conversation is direct
+   * answers, which tasks never saw. A request to draw "a real, downloadable
+   * drawing", escalated after the assistant had spent three answers setting
+   * out a research model, reached the planner with nothing but those words —
+   * and the planner asked whether a portrait or a landscape was wanted.
+   */
+  const recentConversation = input.conversationId
+    ? (await conversationsRepo.listMessages(input.conversationId, 8).catch(() => []))
+        .filter((message) => typeof message.content === 'string' && message.content.trim())
+        .map((message) => ({
+          role: message.role === 'USER' ? 'user' : 'assistant',
+          text: message.content.slice(0, 500),
+        }))
+    : [];
+
   const task = await tasksRepo.create({
     userId: input.userId,
     projectId: input.projectId ?? null,
@@ -124,6 +143,7 @@ export async function startTask(input: {
       request: input.request,
       /* Where it was asked, so a step can read what the conversation already holds. */
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      ...(recentConversation.length > 0 ? { recentConversation } : {}),
       ...(earlier?.research
         ? {
             earlierWork: {

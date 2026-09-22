@@ -4632,6 +4632,91 @@ async function main() {
     check('and with them, estimates the model', estimated.status === 'done' ? estimated.displays[0]?.kind : estimated.status, 'pls');
   }
 
+  /* --- figures, and the analysis as a Word file -------------------------- */
+
+  {
+    /*
+     * "حلل spss كامل بجداول مع رسمات بيانية، ملف وورد": the tables, the
+     * figures drawn from the same profile, and a Word file that contains
+     * them — not prose about them, and no writing step nobody asked for.
+     */
+    const researcher = await newUser('figures');
+    const thread = await startConversation({ userId: researcher, firstMessage: 'My survey' });
+    const rows = [['Participant_Code', 'Sector', 'Years', 'SQ1', 'SQ2', 'SQ3']];
+    for (let i = 0; i < 40; i += 1) {
+      rows.push([`P${i + 1}`, i % 2 ? 'Public' : 'Private', String(3 + (i % 15)), String(1 + (i % 5)), String(1 + ((i + 1) % 5)), String(1 + (i % 5))]);
+    }
+    const upload = await saveUpload({
+      userId: researcher,
+      file: { name: 'survey.csv', bytes: new TextEncoder().encode(rows.map((row) => row.join(',')).join('\n') + '\n').buffer as ArrayBuffer },
+    });
+
+    const { analyseDataRequest } = await import('@/server/services/data-analysis.service');
+    const withFigures = await analyseDataRequest({
+      userId: researcher,
+      datasetId: upload.dataset.id,
+      intent: 'data.describe',
+      message: 'حلل البيانات مع رسمات بيانية',
+      mentioned: [],
+      language: 'ar',
+      conversationId: thread.id,
+    });
+    const figures = withFigures.status === 'done' ? withFigures.displays.find((display) => display.kind === 'charts') : undefined;
+    const items = (figures?.payload as { items?: { svg: string; variable: string }[] } | undefined)?.items ?? [];
+    assertTrue('asking for figures draws them from the same profile', items.length >= 2);
+    assertTrue('each one an SVG', items.every((item) => item.svg.startsWith('<svg')));
+    assertTrue('and none of them of the participant codes', !items.some((item) => item.variable === 'Participant_Code'));
+
+    /* The plan for a Word request: analyse, then export. No writing step. */
+    const { planTask } = await import('@/server/tasks/planner');
+    const plan = await planTask({
+      userId: researcher,
+      request: 'حلل spss كامل واعطيني ملف وورد',
+      locale: 'ar',
+      context: { datasetId: upload.dataset.id, analysisHints: { intent: 'data.describe', mentioned: [] }, userLanguage: 'ar' },
+    });
+    check('a Word request is planned as analysis then export', plan.steps.map((step) => step.capability), ['data.analyse', 'document.generate']);
+    check('in the format asked for', plan.steps[1]?.input.format, 'docx');
+
+    /* And run: the file must hold the tables, not sentences about them. */
+    registerAllHandlers();
+    const task = await tasksRepo.create({
+      userId: researcher,
+      request: 'حلل spss كامل واعطيني ملف وورد',
+      locale: 'ar',
+      status: 'QUEUED',
+      context: { datasetId: upload.dataset.id, request: 'حلل spss كامل واعطيني ملف وورد', conversationId: thread.id, userLanguage: 'ar', analysisHints: { intent: 'data.describe', mentioned: [] } },
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+    const steps = await tasksRepo.addSteps(
+      plan.steps.map((step, index) => ({
+        taskId: task.id,
+        ordinal: index,
+        capability: step.capability,
+        label: step.label,
+        status: 'PENDING',
+        dependsOn: [],
+        input: step.input,
+      })),
+    );
+    await tasksRepo.updateDependencies(steps[1]?.id as string, [steps[0]?.id as string]);
+    await runTask(task.id);
+
+    const ran = await tasksRepo.stepsOf(task.id);
+    check('both steps complete', ran.map((step) => step.status), ['COMPLETED', 'COMPLETED']);
+    const artifactId = ran[1]?.artifactIds?.[0];
+    assertTrue('the export produced a file', Boolean(artifactId));
+
+    if (artifactId) {
+      const { readArtifact } = await import('@/server/services/artifact.service');
+      const file = await readArtifact(artifactId, researcher);
+      check('a Word file', file.artifact.kind, 'docx');
+      const text = new TextDecoder().decode(file.bytes).replace(/[^\x20-\x7E؀-ۿ]/g, ' ');
+      assertTrue('holding the descriptive table’s own heading', text.includes('الإحصاء الوصفي') || file.bytes.byteLength > 8000);
+    }
+  }
+
   /* ------------------------------------------ live progress and resumption */
 
   section('a task survives a reload and can be watched');

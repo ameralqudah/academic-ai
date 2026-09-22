@@ -7,6 +7,8 @@
  * call spent on nothing.
  */
 
+import { asksForCharts } from '@/server/charts/requests';
+
 import type { DiagramKind, DiagramSpec } from './spec';
 
 const DRAW = new RegExp(
@@ -29,7 +31,7 @@ const NOT_A_MODEL = new RegExp(
 
 /** Whether a message asks for a research-model diagram. */
 export function asksForDiagram(message: string): boolean {
-  return DRAW.test(message) && !NOT_A_MODEL.test(message);
+  return DRAW.test(message) && !NOT_A_MODEL.test(message) && !asksForCharts(message);
 }
 
 /** Which of the three diagrams is meant, from the words used. */

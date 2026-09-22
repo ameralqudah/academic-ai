@@ -496,7 +496,7 @@ function TaskPanel({
                 /* A drawing is shown, not listed: it is the answer, and it is small. */
                 if (info.kind === 'svg') {
                   return (
-                    <DiagramPreview
+                    <FigurePreview
                       key={artifactId}
                       artifactId={artifactId}
                       name={info.filename ?? step.label}
@@ -909,7 +909,7 @@ function WrittenResult({ text }: { text: string }) {
  * size for print. The server never rasterises, which is why the figure looks
  * the same on the page, in the download and in a thesis.
  */
-function DiagramPreview({ artifactId, name }: { artifactId: string; name: string }) {
+export function FigurePreview({ artifactId, name }: { artifactId: string; name: string }) {
   const t = useTranslations('task');
   const href = `/api/artifacts/${artifactId}`;
   const [busy, setBusy] = useState(false);

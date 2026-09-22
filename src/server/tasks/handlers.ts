@@ -29,6 +29,7 @@ import {
   generatePptx,
 } from '@/server/generators/documents';
 import { generateDocx } from '@/server/generators/docx';
+import { analysisSections } from '@/server/generators/analysis-sections';
 import { sectionsFromMarkdown } from '@/server/generators/markdown-sections';
 import { generateTxt, generateXlsx } from '@/server/generators/spreadsheet';
 import { toBibTeX, toRIS } from '@/server/generators/bibliography';
@@ -67,7 +68,7 @@ import { renderPptx } from '@/server/diagrams/pptx';
 import { defaultTitle, diagramKindOf, specFromPls } from '@/server/diagrams/requests';
 import { ensureIndicators, type DiagramKind, type DiagramSpec } from '@/server/diagrams/spec';
 import { renderSvg } from '@/server/diagrams/svg';
-import { analyseDataRequest } from '@/server/services/data-analysis.service';
+import { analyseDataRequest, type AnalysisDisplay } from '@/server/services/data-analysis.service';
 import { isArabic } from '@/server/diagrams/text';
 
 
@@ -1148,6 +1149,20 @@ export function registerAllHandlers(): void {
      */
     const title = namedTitle || carriedTitle || 'Document';
 
+    /*
+     * Tables from the analysis this export depends on.
+     *
+     * A researcher who asked for "the analysis as Word" received sentences
+     * about tables the file did not contain. These are the computed results
+     * themselves, laid out as the chat draws them.
+     */
+    const computed = analysisSections(
+      readAllOutputs<{ display?: { kind?: string; payload?: unknown } }>(context.available, 'analysis.v1')
+        .map((output) => output.display)
+        .filter((display): display is { kind: string; payload: unknown } => Boolean(display?.kind)),
+      (context.context.userLanguage as 'ar' | 'en' | undefined) ?? context.locale,
+    );
+
     const sections = [
       ...carried,
       ...sectionsFrom(context).map((section, index) => ({
@@ -1155,6 +1170,7 @@ export function registerAllHandlers(): void {
         level: 1,
         paragraphs: section.text.split(/\n{2,}/).filter(Boolean),
       })),
+      ...computed,
     ];
 
     /*
@@ -1237,8 +1253,8 @@ export function registerAllHandlers(): void {
       bytes = await generatePptx(
         title,
         sections.map((section) => ({
-          title: section.heading,
-          bullets: section.paragraphs.slice(0, 5),
+          title: section.heading || title,
+          bullets: (section.paragraphs ?? []).slice(0, 5),
         })),
         { rtl: context.locale === 'ar' },
       );
@@ -1782,15 +1798,61 @@ export function registerAllHandlers(): void {
 
     const stamp = producer(context, 'data.analyse');
 
+    /*
+     * A figure becomes a file. The SVG itself would travel in every later
+     * prompt and in the conversation's payload — kilobytes of path data that
+     * says nothing a model can read — so it is stored once and referred to.
+     */
+    const figures: { id: string; kind: string; filename: string; validationStatus: string }[] = [];
+    const displays: AnalysisDisplay[] = [];
+
+    for (const display of outcome.displays) {
+      if (display.kind !== 'charts') {
+        displays.push(display);
+        continue;
+      }
+
+      const charts = ((display.payload as { items?: { title: string; svg: string; kind: string; variable: string }[] }).items ?? []);
+      const items: { title: string; kind: string; variable: string; artifactId: string }[] = [];
+
+      for (const chart of charts) {
+        const name = `${chart.variable.replace(/[^\p{L}\p{N}_-]/gu, '') || 'chart'}-${chart.kind}.svg`;
+        const stored = await storeArtifact({
+          userId: context.userId,
+          projectId: (context.context.projectId as string) ?? null,
+          metadata: { taskId: context.taskId, chart: chart.kind },
+          kind: 'svg',
+          filename: name,
+          bytes: new TextEncoder().encode(chart.svg),
+        });
+        figures.push(stored);
+        items.push({ title: chart.title, kind: chart.kind, variable: chart.variable, artifactId: stored.id });
+      }
+
+      displays.push({ kind: 'charts', payload: { items } });
+    }
+
     return succeeded(
-      outcome.displays.map((display) =>
+      displays.map((display) =>
         makeOutput(stamp, 'analysis.v1', {
           display,
           ...(outcome.test ? { test: outcome.test } : {}),
           ...(outcome.roles ? { roles: outcome.roles } : {}),
         }),
       ),
-      { modelCalls: 0 },
+      {
+        modelCalls: 0,
+        ...(figures.length
+          ? {
+              artifacts: figures.map((file) => ({
+                id: file.id,
+                kind: file.kind as ArtifactKind,
+                filename: file.filename,
+                validationStatus: file.validationStatus,
+              })),
+            }
+          : {}),
+      },
     );
   };
 

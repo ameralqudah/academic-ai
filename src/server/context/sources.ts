@@ -244,10 +244,16 @@ async function taskResultFragments(scope: SourceScope): Promise<ContextFragment[
         if (!kind) continue;
 
         const data = (output.data ?? {}) as Record<string, unknown>;
-        const text = summariseResult(
-          kind,
-          kind === 'pls' ? { estimates: data.estimates, report: data } : kind === 'literature' ? { sources: data.references } : data,
-        );
+        /* A data.analyse output carries the same display the chat renders. */
+        const display = data.display as { kind?: string; payload?: unknown; runId?: string } | undefined;
+        /* A computed test is stored as an analysis run, which is read above. */
+        if (display?.runId) continue;
+        const text = display?.kind
+          ? summariseResult(display.kind, display.payload)
+          : summariseResult(
+              kind,
+              kind === 'pls' ? { estimates: data.estimates, report: data } : kind === 'literature' ? { sources: data.references } : data,
+            );
         if (!text) continue;
 
         fragments.push(

@@ -23,7 +23,7 @@
 
 import { logger } from '@/lib/logger';
 import { classifyIntent, type IntentResult } from '@/agents/intent';
-import { asksAboutEarlierWork, decide, detectReference } from './routing-rules';
+import { asksAboutEarlierWork, asksToExplain, decide, detectReference } from './routing-rules';
 import type { DatasetProfile } from '@/analysis/types';
 import { asksForDiagram } from '@/server/diagrams/requests';
 
@@ -106,20 +106,20 @@ const CAPABILITY_FOR: Record<string, string[]> = {
   'research.results': ['document.write'],
   'research.survey': ['survey.generate'],
 
-  'stats.reliability': ['statistics.run'],
-  'stats.compare': ['statistics.run'],
-  'stats.relate': ['statistics.run'],
-  'stats.predict': ['statistics.run'],
-  'stats.categorical': ['statistics.run'],
-  'stats.nonparametric': ['statistics.run'],
-  'stats.logistic': ['statistics.run'],
-  'stats.recommend': ['file.analyse'],
+  'stats.reliability': ['data.analyse'],
+  'stats.compare': ['data.analyse'],
+  'stats.relate': ['data.analyse'],
+  'stats.predict': ['data.analyse'],
+  'stats.categorical': ['data.analyse'],
+  'stats.nonparametric': ['data.analyse'],
+  'stats.logistic': ['data.analyse'],
+  'stats.recommend': ['data.analyse'],
   'stats.plsSem': ['statistics.pls'],
   'stats.cbSem': ['statistics.cbsem'],
 
-  'data.clean': ['file.analyse'],
-  'data.describe': ['statistics.run'],
-  'data.inspect': ['file.analyse'],
+  'data.clean': ['data.analyse'],
+  'data.describe': ['data.analyse'],
+  'data.inspect': ['data.analyse'],
 };
 
 /*
@@ -187,7 +187,7 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
    * classifier sees the column names, so it has already decided whether the
    * message is about them — this only adds the capability.
    */
-  if (input.hasDataset && intent.mentionedColumns.length > 0) {
+  if (input.hasDataset && intent.mentionedColumns.length > 0 && !suggested.has('data.analyse')) {
     suggested.add('file.analyse');
   }
 
@@ -200,6 +200,7 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
     wantsDiagram,
     asksAboutEarlierWork:
       referencesPrevious === null && asksAboutEarlierWork(input.message, input.hasPriorWork ?? false),
+    asksToExplain: asksToExplain(input.message, input.hasPriorWork ?? false),
   });
 
   logger.info('route.decided', {

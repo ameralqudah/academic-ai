@@ -4504,6 +4504,76 @@ async function main() {
   }
 
 
+  /* --- one mode: an analysis asked for in words -------------------------- */
+
+  {
+    /*
+     * "Compare the scores of men and women", typed into the only mode there
+     * is. The variables come from the sentence and the file; the numbers from
+     * the engine; and when the sentence does not say which variables, the
+     * researcher is asked — with the file's variables listed — rather than
+     * given a test on columns the system chose.
+     */
+    const analyst = await newUser('one-mode');
+    const thread = await startConversation({ userId: analyst, firstMessage: 'My survey' });
+    const rows = [['score', 'gender', 'q1', 'q2', 'q3']];
+    for (let i = 0; i < 60; i += 1) {
+      const male = i % 2 === 0;
+      rows.push([String((male ? 4 : 3) + ((i * 7) % 10) / 10), male ? 'm' : 'f', String(3 + (i % 3)), String(3 + ((i + 1) % 3)), String(3 + (i % 3))]);
+    }
+    const upload = await saveUpload({
+      userId: analyst,
+      file: { name: 'survey.csv', bytes: new TextEncoder().encode(rows.map((row) => row.join(',')).join('\n') + '\n').buffer as ArrayBuffer },
+    });
+    const { analyseDataRequest } = await import('@/server/services/data-analysis.service');
+    const ask = (intent: string, message: string, datasetId: string | null = upload.dataset.id) =>
+      analyseDataRequest({ userId: analyst, datasetId, intent, message, mentioned: [], language: 'en', conversationId: thread.id });
+
+    const described = await ask('data.describe', 'Describe my data');
+    check('describing the data shows its profile', described.status === 'done' ? described.displays.map((d) => d.kind) : [], ['profile']);
+
+    const compared = await ask('stats.compare', 'Compare score between gender groups');
+    check('a comparison named in words runs the right test', compared.status === 'done' ? compared.test : null, 't.independent');
+    const table = compared.status === 'done' ? compared.displays.find((d) => d.kind === 'analysis') : undefined;
+    check('and is shown as the analysis table', Boolean(table?.runId), true);
+    check('with the engine’s own statistic', typeof (table?.payload as { statistic?: { value?: number } } | undefined)?.statistic?.value, 'number');
+
+    const unclear = await ask('stats.compare', 'Compare them');
+    check('an unclear request is a question, not a guess', unclear.status, 'question');
+    assertTrue(
+      'which lists the file’s variables and their kinds',
+      unclear.status === 'question' && unclear.question.includes('score') && unclear.question.includes('gender'),
+    );
+
+    const answered = await ask('stats.compare', 'Compare them\nscore by gender');
+    check('the answer to that question is enough to run it', answered.status === 'done' ? answered.test : null, 't.independent');
+
+    const reliable = await ask('stats.reliability', 'Is my scale reliable?');
+    const alpha = reliable.status === 'done' ? reliable.displays.find((d) => d.kind === 'reliability') : undefined;
+    check('reliability finds the numbered items by itself', typeof (alpha?.payload as { alpha?: number } | undefined)?.alpha, 'number');
+
+    const nothing = await ask('stats.compare', 'Compare score by gender', null);
+    check('with no file, it asks for one', nothing.status, 'question');
+
+    /* The router's reading of the message becomes one step, with no planning call. */
+    const { planTask } = await import('@/server/tasks/planner');
+    const plan = await planTask({
+      userId: analyst,
+      request: 'Compare score between gender groups',
+      locale: 'en',
+      context: { datasetId: upload.dataset.id, analysisHints: { intent: 'stats.compare', mentioned: ['score', 'gender'] } },
+    });
+    check('an analysis request is planned as one analysis step', plan.steps.map((step) => step.capability), ['data.analyse']);
+
+    /* And the next turn — "explain the results" — is given the numbers. */
+    const { buildContextPrompt } = await import('@/server/context/manager');
+    const explained = (
+      await buildContextPrompt({ purpose: 'answer', request: 'Explain the results', userId: analyst, conversationId: thread.id, locale: 'en' })
+    ).prompt;
+    const t = (table?.payload as { statistic: { value: number } }).statistic.value.toFixed(3);
+    assertTrue('"explain the results" sees the statistic the analysis computed', explained.includes(`(Welch) = ${t}`));
+  }
+
   /* ------------------------------------------ live progress and resumption */
 
   section('a task survives a reload and can be watched');

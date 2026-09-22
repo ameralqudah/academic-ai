@@ -88,6 +88,12 @@ function fmtP(p: number): string {
   return p.toFixed(3);
 }
 
+/** "p = .042" or "p < .001" — never "p = < .001". */
+function pText(p: number): string {
+  const value = fmtP(p);
+  return value.startsWith('<') ? `p ${value}` : `p = ${value}`;
+}
+
 function fmtDf(df: number | [number, number]): string {
   return Array.isArray(df) ? `${fmt(df[0], 0)}, ${fmt(df[1], 2)}` : fmt(df, 2);
 }
@@ -110,7 +116,7 @@ export function ResultCard({ result }: { result: StatisticalResult }) {
             significant ? 'text-ink' : 'text-muted',
           )}
         >
-          p = {fmtP(result.pValue)}
+          {pText(result.pValue)}
         </span>
         {result.effect && (
           <span className="font-mono text-sm text-muted">
@@ -135,7 +141,7 @@ export function ResultCard({ result }: { result: StatisticalResult }) {
             {result.secondary.statistic.name} ({fmtDf(result.secondary.df)}) ={' '}
             {fmt(result.secondary.statistic.value)}
           </span>
-          <span className="font-mono">p = {fmtP(result.secondary.pValue)}</span>
+          <span className="font-mono">{pText(result.secondary.pValue)}</span>
         </div>
       )}
 
@@ -173,7 +179,7 @@ export function ResultCard({ result }: { result: StatisticalResult }) {
               <span className="text-ink">{t(`assumption.${assumption.key}`)}</span>
               <span className="text-muted">{t(`status.${assumption.status}`)}</span>
               {assumption.pValue !== undefined && (
-                <span className="font-mono text-muted">p = {fmtP(assumption.pValue)}</span>
+                <span className="font-mono text-muted">{pText(assumption.pValue)}</span>
               )}
             </div>
           ))}

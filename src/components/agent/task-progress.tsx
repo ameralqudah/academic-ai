@@ -14,10 +14,10 @@ import {
   FileText,
 } from 'lucide-react';
 import { useTranslations } from 'next-intl';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { useArtifactPanel } from '@/components/agent/artifact-panel';
-import { deliverableText, findingKey } from '@/components/agent/task-result';
+import { deliverableText, findingKey, taskDisplays, type TaskDisplay } from '@/components/agent/task-result';
 import { Markdown } from '@/components/chat/markdown';
 import { cn } from '@/lib/cn';
 
@@ -78,15 +78,28 @@ export interface TaskView {
 export function TaskProgress({
   taskId,
   onFinished,
+  renderResult,
 }: {
   taskId: string;
   onFinished?: (task: TaskView, steps: TaskStepView[]) => void;
+  /**
+   * Draws a computed table. Passed in, so the chat's own result views are used
+   * and an analysis looks the same however it was asked for.
+   */
+  renderResult?: (display: TaskDisplay, index: number) => ReactNode;
 }) {
   const [written, setWritten] = useState<string | null>(null);
+  const [displays, setDisplays] = useState<TaskDisplay[]>([]);
 
   return (
     <div className="flex flex-col gap-4">
-      <TaskPanel taskId={taskId} onFinished={onFinished} onWritten={setWritten} />
+      <TaskPanel
+        taskId={taskId}
+        onFinished={onFinished}
+        onWritten={setWritten}
+        onDisplays={setDisplays}
+      />
+      {renderResult && displays.map((display, index) => renderResult(display, index))}
       {written && <WrittenResult text={written} />}
     </div>
   );
@@ -96,11 +109,14 @@ function TaskPanel({
   taskId,
   onFinished,
   onWritten,
+  onDisplays,
 }: {
   taskId: string;
   onFinished?: (task: TaskView, steps: TaskStepView[]) => void;
   /** Told what the finished task wrote — read from the steps, so a reload finds it again. */
   onWritten: (text: string | null) => void;
+  /** Told which tables the task computed. */
+  onDisplays: (displays: TaskDisplay[]) => void;
 }) {
   const t = useTranslations('task');
 
@@ -292,6 +308,14 @@ function TaskPanel({
   useEffect(() => {
     onWritten(written);
   }, [written, onWritten]);
+
+  /* Keyed by content, so a poll that returns the same steps does not redraw. */
+  const displays = useMemo(() => taskDisplays(steps), [steps]);
+  const displaysKey = JSON.stringify(displays.map((display) => display.kind)) + displays.length;
+  useEffect(() => {
+    onDisplays(displays);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displaysKey, onDisplays]);
 
   async function cancel() {
     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });

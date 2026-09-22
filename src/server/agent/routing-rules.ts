@@ -105,6 +105,7 @@ export function decide(input: {
   referencesPrevious: RouteDecision['referencesPrevious'];
   hasDataset: boolean;
   asksAboutEarlierWork?: boolean;
+  asksToExplain?: boolean;
   wantsDiagram?: boolean;
 }): { path: RoutePath; reason: string; confidence: number } {
   /*
@@ -132,6 +133,15 @@ export function decide(input: {
    */
   if (input.asksAboutEarlierWork && ABOUT_THE_WRITING.has(input.intent.intent)) {
     return { path: 'fast', reason: 'a question about earlier work', confidence: 0.8 };
+  }
+
+  /*
+   * "Explain the results" under results already computed. The classifier
+   * reads the word "results" as analysis and would start a new run; the
+   * numbers are in the conversation and the answer only has to read them.
+   */
+  if (input.asksToExplain) {
+    return { path: 'fast', reason: 'an explanation of earlier results', confidence: 0.8 };
   }
 
   /* The intent names work that needs a tool: a search, a computation, a file. */
@@ -253,6 +263,31 @@ const ABOUT_THE_WRITING = new Set(['research.section', 'research.plan', 'researc
  * for it to be about. "Write the methodology" is not this — it asks for a
  * chapter, which is a task, and the task is now told what it continues.
  */
+const ASKS_TO_EXPLAIN = new RegExp(
+  [
+    String.raw`\b(?:explain|interpret|what\s+does\s+(?:this|it|that)\s+mean|what\s+do\s+(?:these|the)\s+(?:results|numbers)\s+mean)\b`,
+    `${WORD_START}(?:[إا]شرح|اشرحل|اشرحي|فس[ّ]?ر|وض[ّ]?ح|شو\\s+(?:يعني|معنى|معناه?)|[إا]يش\\s+(?:يعني|معنى)|ماذا\\s+تعني|ما\\s+معنى)`,
+  ].join('|'),
+  'iu',
+);
+
+/**
+ * Whether a message asks for an explanation of what is already on screen.
+ *
+ * "اشرحلي النتائج" after an analysis: short, asks to explain, and makes
+ * nothing. "Explain and write the discussion" asks for a chapter as well, so
+ * it stays a task.
+ */
+export function asksToExplain(message: string, hasPriorWork: boolean): boolean {
+  if (!hasPriorWork) return false;
+  const words = message.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 20) return false;
+  if (!ASKS_TO_EXPLAIN.test(message)) return false;
+  /* "واكتب" is "and write": the conjunction is attached to the verb. */
+  const unjoined = message.replace(/(^|\s)و(?=\p{L}{3,})/gu, '$1');
+  return !ASKS_TO_MAKE.test(unjoined) && !NAMES_FORMAT.test(message);
+}
+
 export function asksAboutEarlierWork(message: string, hasPriorWork: boolean): boolean {
   if (!hasPriorWork) return false;
 

@@ -67,6 +67,7 @@ import { renderPptx } from '@/server/diagrams/pptx';
 import { defaultTitle, diagramKindOf, specFromPls } from '@/server/diagrams/requests';
 import { ensureIndicators, type DiagramKind, type DiagramSpec } from '@/server/diagrams/spec';
 import { renderSvg } from '@/server/diagrams/svg';
+import { analyseDataRequest } from '@/server/services/data-analysis.service';
 import { isArabic } from '@/server/diagrams/text';
 
 
@@ -1754,23 +1755,47 @@ export function registerAllHandlers(): void {
     ]);
   });
 
-  registerHandler('statistics.run', async (context): Promise<Observation> => {
-    const datasetId = textInput(context, 'datasetId');
+  /*
+   * An analysis asked for in words: describe, clean, recommend, reliability,
+   * compare, relate, predict. The same service the analysis agent uses, so a
+   * request gets the same test whichever way it arrived. `statistics.run` is
+   * the older name for it and does the same thing — it used to only ask.
+   */
+  const dataAnalyse = async (context: StepContext): Promise<Observation> => {
+    const hints = (context.context.analysisHints ?? {}) as { intent?: string; mentioned?: string[] };
+    const answers = ((context.context.userAnswers as string[] | undefined) ?? []).join('\n');
+    const request = String(context.context.request ?? '');
+    const language = (context.context.userLanguage as 'ar' | 'en' | undefined) ?? context.locale;
 
-    if (!datasetId) return needsInput(say(context, 'Which dataset should I analyse?', 'أيّ ملف بيانات تريد أن أحلّله؟'), 'datasetId');
+    const outcome = await analyseDataRequest({
+      userId: context.userId,
+      datasetId: textInput(context, 'datasetId') || ((context.context.datasetId as string | undefined) ?? null),
+      intent: textInput(context, 'intent') || hints.intent || 'stats.recommend',
+      message: [request, answers].filter(Boolean).join('\n'),
+      mentioned: Array.isArray(context.input.columns) ? (context.input.columns as string[]) : (hints.mentioned ?? []),
+      language,
+      conversationId: (context.context.conversationId as string | undefined) ?? null,
+      projectId: (context.context.projectId as string | undefined) ?? null,
+    });
 
-    /*
-     * The specific test is chosen by the recommender, which needs the
-     * researcher's question and their variables. Rather than guess, this step
-     * asks — a wrong test produces numbers that look right.
-     */
-    return needsInput(
-      context.locale === 'ar'
-        ? 'أي تحليل إحصائي تريد، وعلى أي متغيّرات؟'
-        : 'Which analysis, and on which variables?',
-      'analysis',
+    if (outcome.status === 'question') return needsInput(outcome.question, 'variables');
+
+    const stamp = producer(context, 'data.analyse');
+
+    return succeeded(
+      outcome.displays.map((display) =>
+        makeOutput(stamp, 'analysis.v1', {
+          display,
+          ...(outcome.test ? { test: outcome.test } : {}),
+          ...(outcome.roles ? { roles: outcome.roles } : {}),
+        }),
+      ),
+      { modelCalls: 0 },
     );
-  });
+  };
+
+  registerHandler('data.analyse', dataAnalyse);
+  registerHandler('statistics.run', dataAnalyse);
 
   logger.info('task.handlersRegistered', { count: 12 });
 }

@@ -61,6 +61,14 @@ export async function startTask(input: {
   projectId?: string | null;
   conversationId?: string | null;
   datasetId?: string | null;
+  /**
+   * What the router read in the message: its intent and the columns it named.
+   *
+   * The planner and the analysis step read these as hints. Without them a
+   * request to compare two columns reached the analysis with the words alone
+   * and had to classify it again.
+   */
+  analysisHints?: { intent: string; mentioned: string[] };
   budget?: Partial<TaskBudget>;
   /**
    * What the request referred to without naming.
@@ -154,6 +162,7 @@ export async function startTask(input: {
           }
         : {}),
       ...(input.userLanguage ? { userLanguage: input.userLanguage } : {}),
+      ...(input.analysisHints ? { analysisHints: input.analysisHints } : {}),
     },
     budget: budget as unknown as Record<string, number>,
     spent: { modelCalls: 0, retries: 0 },

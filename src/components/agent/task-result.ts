@@ -77,3 +77,39 @@ export function deliverableText(steps: StepLike[]): string | null {
 export function findingKey(message: string): string | null {
   return /^[a-z]+\.[A-Za-z]+$/.test(message) ? message.replace(".", "_") : null;
 }
+
+/** A result the chat draws as a table, carried by a data analysis step. */
+export interface TaskDisplay {
+  kind: string;
+  payload: unknown;
+}
+
+/**
+ * The tables a finished task computed, in the order it computed them.
+ *
+ * An analysis run as a task stored its numbers and showed nothing but a tick:
+ * the panel knew how to draw prose and files, and a table is neither. Each
+ * display carries the same kind the chat already renders, so the result looks
+ * the same whichever way it was asked for.
+ */
+export function taskDisplays(steps: StepLike[]): TaskDisplay[] {
+  const displays: TaskDisplay[] = [];
+
+  for (const step of steps) {
+    if (step.status !== "COMPLETED") continue;
+    const outputs = (step.output?.outputs ?? []) as {
+      type?: string;
+      data?: { display?: { kind?: unknown; payload?: unknown } };
+    }[];
+    if (!Array.isArray(outputs)) continue;
+
+    for (const output of outputs) {
+      const display = output?.type === "analysis.v1" ? output.data?.display : undefined;
+      if (display && typeof display.kind === "string" && display.payload) {
+        displays.push({ kind: display.kind, payload: display.payload });
+      }
+    }
+  }
+
+  return displays;
+}

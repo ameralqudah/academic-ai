@@ -21,6 +21,7 @@ import * as artifactsRepo from '@/server/repositories/artifacts.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
+import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { earlierWorkIn } from '@/server/agent/earlier-work';
 import type { OutputReference } from '@/server/tasks/contracts';
@@ -28,6 +29,7 @@ import type { OutputReference } from '@/server/tasks/contracts';
 import { retrievePassages } from '@/server/files/retrieve';
 
 import { fragment, type ContextFragment } from './envelope';
+import { summarisePayload, summariseResult } from './result-summaries';
 
 export interface SourceScope {
   userId: string;
@@ -48,9 +50,10 @@ export interface SourceScope {
  * that took the sum of six queries would be felt on every message.
  */
 export async function collectFragments(scope: SourceScope): Promise<ContextFragment[]> {
-  const [conversation, earlier, project, task, file, artifacts] = await Promise.all([
+  const [conversation, earlier, taskResults, project, task, file, artifacts] = await Promise.all([
     conversationFragments(scope).catch(recover('conversation')),
     earlierWorkFragments(scope).catch(recover('earlier-work')),
+    taskResultFragments(scope).catch(recover('task-results')),
     projectFragments(scope).catch(recover('project')),
     taskFragments(scope).catch(recover('task')),
     fileFragments(scope).catch(recover('file')),
@@ -61,6 +64,7 @@ export async function collectFragments(scope: SourceScope): Promise<ContextFragm
     ...instructionFragments(scope),
     ...conversation,
     ...earlier,
+    ...taskResults,
     ...project,
     ...task,
     ...file,
@@ -121,9 +125,12 @@ async function conversationFragments(scope: SourceScope): Promise<ContextFragmen
    * fragments that selection would discard; fetching fewer would hide the
    * instruction that matters.
    */
-  const messages = await conversationsRepo.listMessages(scope.conversationId, 20);
+  const [messages, runs] = await Promise.all([
+    conversationsRepo.listMessages(scope.conversationId, 20),
+    analysisRunsRepo.listByConversation(scope.conversationId, scope.userId).catch(() => []),
+  ]);
 
-  return messages
+  const said = messages
     .filter((message) => typeof message.content === 'string' && message.content.trim().length > 0)
     .map((message) =>
       fragment({
@@ -138,6 +145,125 @@ async function conversationFragments(scope: SourceScope): Promise<ContextFragmen
         },
       }),
     );
+
+  /*
+   * What the tools returned in this conversation.
+   *
+   * An analysis turn is stored as a structured payload with empty text, so the
+   * filter above dropped it, and "explain these results" reached a model that
+   * had never seen them. The numbers are carried as tool results — computed,
+   * not written by a model — which is the authority they deserve and the one
+   * the prompt tells the model it may not alter.
+   */
+  const seenRuns = new Set<string>();
+  const computed = messages.flatMap((message) =>
+    summarisePayload(message.payload).map((result, index) => {
+      if (result.runId) seenRuns.add(result.runId);
+      return fragment({
+        id: `result-${message.id}-${index}`,
+        kind: 'tool-result',
+        authority: 'tool-result',
+        content: result.text,
+        provenance: { source: result.kind, id: result.runId ?? message.id, at: message.createdAt?.toISOString() },
+        relevance: 0.85,
+      });
+    }),
+  );
+
+  /*
+   * Runs recorded against the conversation that no message carries — an
+   * analysis whose turn failed to save, or one run from another screen. The
+   * run table is the record of what was computed; the messages are only one
+   * way it was shown.
+   */
+  const unshown = runs
+    .filter((run) => !seenRuns.has(run.id))
+    .slice(0, 6)
+    .flatMap((run) => {
+      const text = summariseResult(run.testKey.startsWith('reliability') ? 'reliability' : 'analysis', run.result);
+      return text
+        ? [
+            fragment({
+              id: `run-${run.id}`,
+              kind: 'tool-result',
+              authority: 'tool-result',
+              content: text,
+              provenance: { source: `analysis:${run.testKey}`, id: run.id, at: run.createdAt?.toISOString() },
+              relevance: 0.8,
+            }),
+          ]
+        : [];
+    });
+
+  /*
+   * The latest few are pinned. "Explain these results" shares no words with a
+   * line of statistics, so relevance scored on overlap would rank them below
+   * chatter and a tight budget could drop them — the one thing the question is
+   * about. They are short; keeping four costs little.
+   */
+  const pinned = new Set(computed.slice(-4).map((entry) => entry.id));
+  const kept = computed.map((entry) => (pinned.has(entry.id) ? { ...entry, pinned: true } : entry));
+
+  return [...said, ...kept, ...unshown];
+}
+
+/**
+ * What earlier tasks in this conversation computed and found.
+ *
+ * A task's results live in its steps, not in the conversation: a PLS run or a
+ * literature search inside a task was visible to that task and to nothing
+ * after it. The written text already travels as earlier work; this carries the
+ * rest — the estimates and the sources — so the next turn can reason from them.
+ */
+async function taskResultFragments(scope: SourceScope): Promise<ContextFragment[]> {
+  if (!scope.conversationId) return [];
+
+  const tasks = (await tasksRepo.listForUser(scope.userId, 12)).filter(
+    (task) =>
+      task.conversationId === scope.conversationId &&
+      task.id !== scope.taskId &&
+      task.status === 'COMPLETED',
+  );
+
+  const fragments: ContextFragment[] = [];
+
+  for (const task of tasks.slice(0, 6)) {
+    for (const step of await tasksRepo.stepsOf(task.id)) {
+      if (step.status !== 'COMPLETED') continue;
+      const outputs = (step.output as { outputs?: OutputReference[] } | null)?.outputs ?? [];
+
+      for (const output of outputs) {
+        const kind =
+          output.type === 'pls-results.v1'
+            ? 'pls'
+            : output.type === 'analysis.v1'
+              ? ((output.data as { method?: string } | null)?.method === 'cb-sem' ? 'cbsem' : 'analysis')
+              : output.type === 'sources.v1'
+                ? 'literature'
+                : null;
+        if (!kind) continue;
+
+        const data = (output.data ?? {}) as Record<string, unknown>;
+        const text = summariseResult(
+          kind,
+          kind === 'pls' ? { estimates: data.estimates, report: data } : kind === 'literature' ? { sources: data.references } : data,
+        );
+        if (!text) continue;
+
+        fragments.push(
+          fragment({
+            id: `task-result-${output.id}`,
+            kind: kind === 'literature' ? 'research' : 'tool-result',
+            authority: kind === 'literature' ? 'external-evidence' : 'tool-result',
+            content: text,
+            provenance: { source: output.producedBy.capability, id: output.id, at: output.createdAt },
+          }),
+        );
+      }
+    }
+  }
+
+  return fragments.slice(0, 10);
 }
 
 /**

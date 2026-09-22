@@ -56,6 +56,25 @@ export async function findOwned(id: string, userId: string): Promise<Dataset | u
  * once existed — a saved analysis pointing at a file the user has since
  * removed — and never as a route to the bytes.
  */
+/**
+ * The file a conversation is working on: the most recent one linked to it.
+ *
+ * Linked through the column the table already had, so keeping a dataset with
+ * its conversation needs no migration.
+ */
+export async function latestForConversation(
+  conversationId: string,
+  userId: string,
+): Promise<Dataset | undefined> {
+  const [row] = await db
+    .select()
+    .from(datasets)
+    .where(and(eq(datasets.conversationId, conversationId), eq(datasets.userId, userId), alive()))
+    .orderBy(desc(datasets.createdAt))
+    .limit(1);
+  return row;
+}
+
 export async function findOwnedIncludingDeleted(
   id: string,
   userId: string,

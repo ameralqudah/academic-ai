@@ -4,7 +4,10 @@ import { getTranslations } from 'next-intl/server';
 import { ActiveTasks } from '@/components/agent/active-tasks';
 import { AgentChat } from '@/components/agent/agent-chat';
 import { requirePageUser } from '@/server/auth/guards';
-import { findOwned as findOwnedDataset } from '@/server/repositories/datasets.repository';
+import {
+  findOwned as findOwnedDataset,
+  latestForConversation as latestDatasetForConversation,
+} from '@/server/repositories/datasets.repository';
 import { getThread } from '@/server/services/chat.service';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 
@@ -122,6 +125,18 @@ export default async function ChatPage({
     : null;
   const t = await getTranslations({ locale, namespace: 'agent' });
 
+  /*
+   * The conversation's own file, when the URL names none.
+   *
+   * Reopening a conversation used to lose the data it was about: the file was
+   * held in the browser and nowhere else. It is linked to the conversation now,
+   * so opening the thread brings it back attached.
+   */
+  const file =
+    attached ??
+    (thread ? await latestDatasetForConversation(thread.conversation.id, user.id).catch(() => undefined) : undefined) ??
+    null;
+
   const projects = await projectsRepo.listByUser(user.id, 50);
 
   return (
@@ -167,13 +182,13 @@ export default async function ChatPage({
         initialTurns={thread ? toTurns(thread.messages) : undefined}
         initialBranches={thread?.branchPoints ?? []}
         initialFile={
-          attached
+          file
             ? {
-                datasetId: attached.id,
-                name: attached.originalName,
-                rows: attached.rowCount ?? 0,
-                columns: attached.columnCount ?? 0,
-                fields: columnsOf(attached.profile),
+                datasetId: file.id,
+                name: file.originalName,
+                rows: file.rowCount ?? 0,
+                columns: file.columnCount ?? 0,
+                fields: columnsOf(file.profile),
               }
             : undefined
         }

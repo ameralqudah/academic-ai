@@ -95,6 +95,34 @@ test.describe('the chat workspace', () => {
     await expect(page.locator('input[type="file"]')).toBeAttached();
     await expect(page.getByRole('button', { name: /attach/i })).toBeVisible();
   });
+
+  test('an attached file is still there when the conversation is reopened', async ({ page }) => {
+    await registerAndLogin(page, 'chat-file-kept', 'en');
+    await page.goto('/en/chat');
+
+    const csv = ['score,gender', ...Array.from({ length: 30 }, (_, i) => `${3 + (i % 3)},${i % 2 ? 'f' : 'm'}`)].join('\n');
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'kept-survey.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from(csv),
+    });
+    await expect(page.getByText('kept-survey.csv', { exact: true })).toBeVisible({ timeout: 20_000 });
+
+    /* The answer itself does not matter here — only that the turn reached the server. */
+    await page.route('**/api/chat', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response });
+    });
+    const composer = page.getByRole('textbox');
+    await composer.fill('Describe this data');
+    await composer.press('Enter');
+    await page.waitForURL(/[?&]c=/, { timeout: 20_000 });
+    await page.waitForResponse('**/api/chat', { timeout: 30_000 }).catch(() => undefined);
+
+    /* Reopened, the way the sidebar opens it: the file was held in the browser and is not any more. */
+    await page.goto(page.url());
+    await expect(page.getByText('kept-survey.csv', { exact: true })).toBeVisible({ timeout: 20_000 });
+  });
 });
 
 test.describe('the sidebar', () => {

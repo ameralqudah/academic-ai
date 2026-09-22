@@ -4628,5 +4628,60 @@ console.log('\nwhat a model costs');
   check('β and R² appear on the figure', plsSvg.includes('β = 0.421') && plsSvg.includes('R² = 0.177'), true);
 }
 
+/* ------------------------------------------------------------------ */
+/* Stored results, as the next turn reads them                          */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nStored results, as the next turn reads them');
+
+  const { summariseResult, summarisePayload } = await import('../src/server/context/result-summaries');
+
+  const ttest = summariseResult('analysis', {
+    test: 'independentT',
+    variables: ['satisfaction', 'gender'],
+    statistic: { name: 't', value: 2.4567 },
+    df: 118,
+    pValue: 0.0154,
+    effect: { name: "Cohen's d", value: 0.448, band: 'small' },
+    estimates: [
+      { label: 'male', n: 60, mean: 3.81, sd: 0.62 },
+      { label: 'female', n: 60, mean: 3.52, sd: 0.67 },
+    ],
+    n: 120,
+  });
+  check('a test keeps its statistic', ttest?.includes('t = 2.457'), true);
+  check('its p', ttest?.includes('p = 0.015'), true);
+  check('its effect size', ttest?.includes("Cohen's d = 0.448 (small)"), true);
+  check('and each group', ttest?.includes('male: M = 3.81, SD = 0.62, n = 60'), true);
+  check('a very small p is reported as a bound', summariseResult('analysis', { test: 'x', statistic: { name: 'F', value: 9 }, pValue: 0.00001 })?.includes('p < .001'), true);
+
+  const pls = summariseResult('pls', {
+    estimates: {
+      paths: [{ from: 'Digital Transformation', to: 'Service Quality', coefficient: 0.4213 }],
+      rSquared: [{ construct: 'Service Quality', rSquared: 0.1776 }],
+      n: 212,
+    },
+  });
+  check('a PLS path keeps its coefficient', pls?.includes('Digital Transformation → Service Quality: β = 0.421'), true);
+  check('and R²', pls?.includes('R²(Service Quality) = 0.178'), true);
+
+  const found = summariseResult('literature', {
+    sources: [{ title: 'Hospital Logistics', year: 2022, doi: '10.1111/h5678' }],
+  });
+  check('sources keep their DOI', found?.includes('doi:10.1111/h5678'), true);
+  check('an empty search says it found nothing', summariseResult('webSources', { sources: [] }), 'Web sources: no sources found');
+  check('a progress event carries nothing', summariseResult('event', { type: 'x' }), null);
+  check('a malformed payload does not throw', summariseResult('analysis', 'nonsense'), null);
+
+  const many = summarisePayload({
+    results: [
+      { kind: 'analysis', runId: 'run-1', payload: { test: 'pearson', statistic: { name: 'r', value: 0.5 }, pValue: 0.01 } },
+      { kind: 'question', payload: { text: 'which?' } },
+    ],
+  });
+  check('a payload yields one line per result that says something', many.length, 1);
+  check('with the run it came from', many[0]?.runId, 'run-1');
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

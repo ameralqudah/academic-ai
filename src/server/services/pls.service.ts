@@ -206,7 +206,27 @@ export async function runPls(input: {
             {
               kind: 'pls',
               datasetId: input.datasetId,
-              payload: { report } as unknown as Record<string, unknown>,
+              payload: {
+                report,
+                /*
+                 * The figures themselves, compact. The report is built for the
+                 * interface — message keys and table rows — and a later turn
+                 * asking about "the strongest relationship" needs the paths and
+                 * their coefficients, not a table to parse.
+                 */
+                estimates: {
+                  paths: structural.paths.map((path) => ({
+                    from: path.from,
+                    to: path.to,
+                    coefficient: path.coefficient,
+                  })),
+                  rSquared: structural.endogenous.map((entry) => ({
+                    construct: entry.construct,
+                    rSquared: entry.rSquared,
+                  })),
+                  n: estimate.n,
+                },
+              } as unknown as Record<string, unknown>,
             },
           ],
         },

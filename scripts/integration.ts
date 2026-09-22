@@ -4368,6 +4368,141 @@ async function main() {
     check('without a question', plan.missingInformation.length, 0);
   }
 
+  /* --- a conversation keeps its data and its results -------------------- */
+
+  {
+    /*
+     * The first half of the research workflow: a file uploaded, a test run,
+     * and then "explain these results". The file used to live in the browser
+     * and the results in a payload the context never read, so the explanation
+     * was written by a model that had seen neither.
+     */
+    const researcher = await newUser('research-session');
+    const thread = await startConversation({ userId: researcher, firstMessage: 'Analyse my data' });
+
+    const rows = [['score', 'gender', 'q1', 'q2', 'q3']];
+    for (let i = 0; i < 60; i += 1) {
+      const male = i % 2 === 0;
+      const base = male ? 4 : 3;
+      rows.push([String(base + ((i * 7) % 10) / 10), male ? 'm' : 'f', String(3 + (i % 3)), String(3 + ((i + 1) % 3)), String(3 + (i % 3))]);
+    }
+    const upload = await saveUpload({
+      userId: researcher,
+      file: { name: 'survey.csv', bytes: new TextEncoder().encode(rows.map((row) => row.join(',')).join('\n') + '\n').buffer as ArrayBuffer },
+    });
+
+    const { datasetForTurn } = await import('@/server/services/dataset.service');
+
+    check(
+      'a file sent with a turn is used',
+      await datasetForTurn({ userId: researcher, conversationId: thread.id, datasetId: upload.dataset.id }),
+      upload.dataset.id,
+    );
+    check(
+      'and a later turn that sends none gets the conversation’s file',
+      await datasetForTurn({ userId: researcher, conversationId: thread.id, datasetId: null }),
+      upload.dataset.id,
+    );
+    const other = await startConversation({ userId: researcher, firstMessage: 'Something else' });
+    check(
+      'another conversation does not',
+      await datasetForTurn({ userId: researcher, conversationId: other.id, datasetId: null }),
+      null,
+    );
+
+    /* A test recorded the way the analysis agent records it: numbers in the payload, no text. */
+    const tTest = await runAnalysis({
+      datasetId: upload.dataset.id,
+      userId: researcher,
+      conversationId: thread.id,
+      test: 't.independent',
+      columns: { dependent: 'score', grouping: 'gender' },
+    });
+    await recordTurn({
+      conversationId: thread.id,
+      userId: researcher,
+      userMessage: 'Compare the scores of men and women',
+      assistantMessage: '',
+      payload: { results: [{ kind: 'analysis', runId: tTest.run.id, datasetId: upload.dataset.id, payload: tTest.result }] },
+    });
+
+    /* And one that no message shows. */
+    const alpha = await runAnalysis({
+      datasetId: upload.dataset.id,
+      userId: researcher,
+      conversationId: thread.id,
+      test: 'reliability.cronbachAlpha',
+      columns: { items: ['q1', 'q2', 'q3'] },
+    });
+
+    /* A PLS run inside a task in the same conversation. */
+    const plsTask = await tasksRepo.create({
+      userId: researcher,
+      conversationId: thread.id,
+      request: 'Run PLS',
+      locale: 'en',
+      status: 'COMPLETED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+    const [plsStep] = await tasksRepo.addSteps([
+      { taskId: plsTask.id, ordinal: 0, capability: 'statistics.pls', label: 'pls', status: 'PENDING', dependsOn: [], input: {} },
+    ]);
+    await tasksRepo.completeStep(plsStep!.id, {
+      outputs: [
+        makeOutput({ taskId: plsTask.id, stepId: plsStep!.id, capability: 'statistics.pls', projectId: null }, 'pls-results.v1', {
+          verdict: 'acceptable',
+          sections: [],
+          n: 60,
+          estimates: {
+            constructs: [],
+            paths: [{ from: 'Engagement', to: 'Performance', coefficient: 0.6127 }],
+            rSquared: [{ construct: 'Performance', rSquared: 0.3754 }],
+            loadings: [],
+            n: 60,
+          },
+        }),
+      ],
+    });
+
+    const { buildContextPrompt } = await import('@/server/context/manager');
+    const explained = (
+      await buildContextPrompt({
+        purpose: 'answer',
+        request: 'Explain these results',
+        userId: researcher,
+        conversationId: thread.id,
+        locale: 'en',
+      })
+    ).prompt;
+
+    const t = (tTest.result as { statistic: { value: number } }).statistic.value.toFixed(3);
+    assertTrue('"explain these results" is given the test’s statistic', explained.includes(`(Welch) = ${t}`));
+    assertTrue('and its p-value', /p (?:=|<) ?\.?\d/.test(explained));
+    assertTrue(
+      'and the analysis no message showed',
+      explained.includes(`Cronbach's alpha = ${(alpha.result as { alpha: number }).alpha.toFixed(3)}`),
+    );
+    assertTrue('and the PLS paths a task estimated', explained.includes('Engagement → Performance: β = 0.613'));
+    assertTrue(
+      'as computed results, ahead of what anyone wrote',
+      explained.indexOf('Computed results') >= 0 && explained.indexOf('Computed results') < explained.indexOf('What the user wrote'),
+    );
+
+    /* A task started from the workspace is written into its conversation. */
+    const { recordTaskTurn } = await import('@/server/services/chat.service');
+    await recordTaskTurn({ conversationId: thread.id, userId: researcher, userMessage: 'Write the discussion', taskId: plsTask.id });
+    const { getThread } = await import('@/server/services/chat.service');
+    const reopened = await getThread(thread.id, researcher);
+    assertTrue(
+      'a task turn is in the thread when it is reopened',
+      reopened.messages.some((message) =>
+        JSON.stringify(message.payload ?? {}).includes(plsTask.id),
+      ),
+    );
+  }
+
 
   /* ------------------------------------------ live progress and resumption */
 

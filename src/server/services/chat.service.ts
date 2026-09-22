@@ -403,3 +403,35 @@ export function titleFrom(message: string, maxLength = 60): string {
   const lastSpace = cut.lastIndexOf(' ');
   return `${lastSpace > maxLength * 0.6 ? cut.slice(0, lastSpace) : cut}…`;
 }
+
+/**
+ * A task, written into the conversation it was started from.
+ *
+ * Only tasks delegated by the chat router were recorded. One started from the
+ * workspace, or one a direct answer escalated into, ran to completion while
+ * the conversation held nothing about it: a reload lost the panel, and the
+ * next turn could not see that the work had happened.
+ *
+ * In the shape the thread already reads back — `payload.results` with a task
+ * reference — so reopening the conversation redraws the progress panel.
+ * Never throws: failing to record must not fail work that has started.
+ */
+export async function recordTaskTurn(input: {
+  conversationId: string | null;
+  userId: string;
+  userMessage: string;
+  taskId: string;
+  restatement?: string;
+}): Promise<void> {
+  if (!input.conversationId) return;
+
+  await recordTurn({
+    conversationId: input.conversationId,
+    userId: input.userId,
+    userMessage: input.userMessage,
+    assistantMessage: input.restatement?.trim() || ' ',
+    payload: { results: [{ kind: 'task', runId: input.taskId, payload: null }] },
+  }).catch((error: unknown) => {
+    logger.warn('chat.taskTurnNotRecorded', { error: String(error).slice(0, 200) });
+  });
+}

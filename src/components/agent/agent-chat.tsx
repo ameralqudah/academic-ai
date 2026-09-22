@@ -307,6 +307,8 @@ export function AgentChat({
       form.append('file', selected);
       // A file uploaded while a project is selected belongs to that project.
       if (projectId) form.append('projectId', projectId);
+      /* So the file stays with this conversation, and comes back when it is reopened. */
+      if (conversationId) form.append('conversationId', conversationId);
 
       const response = await fetch('/api/datasets', { method: 'POST', body: form });
       const json = await response.json();
@@ -774,12 +776,25 @@ export function AgentChat({
     setBusy(true);
 
     try {
+      /*
+       * The conversation the model belongs to, made now if there is none yet.
+       * Without it the server estimated the model and kept nothing: the results
+       * were on screen and nowhere else, and the next question about them was
+       * asked of a conversation that had never seen them.
+       */
+      const thread =
+        conversationId ??
+        (await ensureConversation(
+          `PLS-SEM: ${plsDraft.constructs.map((construct) => construct.name.trim()).filter(Boolean).join(', ')}`,
+        ));
+
       const response = await fetch('/api/pls', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           datasetId: file.datasetId,
           projectId: projectId ?? undefined,
+          ...(thread ? { conversationId: thread } : {}),
           bootstrap,
           model: {
             constructs: plsDraft.constructs.map((construct) => ({

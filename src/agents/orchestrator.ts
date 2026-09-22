@@ -46,6 +46,7 @@ import {
 import { encodeEvent, type AgentEvent, type PlanStep } from './events';
 import { classifyIntent } from './intent';
 import { capabilityFor, type IntentKey } from './registry';
+import { datasetForTurn } from '@/server/services/dataset.service';
 
 /** A task may never exceed this, whatever happens inside it. */
 const MAX_UNITS_PER_TASK = 20;
@@ -142,6 +143,22 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
 
     yield { type: 'conversation', conversationId };
 
+    /*
+     * The conversation's file when the turn sends none, and the link that
+     * keeps a sent one with the conversation. From here on the whole turn —
+     * profiling, the steps, what is recorded — works from this request.
+     */
+    request = {
+      ...request,
+      conversationId,
+      datasetId:
+        (await datasetForTurn({
+          userId: request.userId,
+          conversationId,
+          datasetId: request.datasetId ?? null,
+        })) ?? undefined,
+    };
+
     /* ------------------------------ understand --------------------------- */
 
     const profile = request.datasetId
@@ -170,7 +187,8 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
 
     const task = await tasksRepo.start({
       userId: request.userId,
-      conversationId: request.conversationId ?? null,
+      /* The conversation just made, on a first turn — the request's is still null. */
+      conversationId,
       projectId: request.projectId ?? null,
       kind: intent.intent,
       intent: intent.intent,
@@ -271,6 +289,12 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
 
       const outcome = await executeStep({
         step: step.id,
+        /*
+         * With the conversation's id, including one created above for a first
+         * turn. The steps record their analyses against it, and on a first turn
+         * the request still carried null — so the first analysis of every new
+         * conversation was saved belonging to no conversation.
+         */
         request,
         intent: intent.intent,
         mentionedColumns: intent.mentionedColumns,
@@ -860,6 +884,15 @@ async function executeStep(input: {
           role: turn.role,
           content: turn.content,
         })),
+        /*
+         * The conversation, so "explain these results" is answered from the
+         * results: the context builder reads the analyses this conversation
+         * ran, with their numbers. The history alone carries only text, and an
+         * analysis turn has none.
+         */
+        ...(request.conversationId
+          ? { context: { conversationId: request.conversationId, datasetId: request.datasetId ?? null } }
+          : {}),
       });
 
       return { kind: 'event', event: { type: 'delta', text: answer.content } };

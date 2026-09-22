@@ -626,3 +626,41 @@ function noticesFor(parsed: ParsedDataset): { key: string; params?: Record<strin
 
   return notices;
 }
+
+/**
+ * The dataset a conversation turn works on, and the link that keeps it there.
+ *
+ * The attachment lived in the browser: reload the page, or come back to the
+ * conversation tomorrow, and the file was gone — "analyse it" then asked which
+ * file, and every tool downstream started without the data. Now the file a
+ * turn names is linked to the conversation, and a turn that names none gets
+ * the conversation's file.
+ *
+ * A file already linked to another conversation is left where it is: the link
+ * says where the file was uploaded, and moving it would take it from there.
+ * It is still used for this turn, because the researcher chose it.
+ */
+export async function datasetForTurn(input: {
+  userId: string;
+  conversationId: string | null;
+  datasetId: string | null;
+}): Promise<string | null> {
+  if (input.datasetId) {
+    if (input.conversationId) {
+      const dataset = await datasetsRepo.findOwned(input.datasetId, input.userId).catch(() => undefined);
+      if (dataset && !dataset.conversationId) {
+        await datasetsRepo
+          .update(dataset.id, input.userId, { conversationId: input.conversationId })
+          .catch((error: unknown) => logger.warn('dataset.linkFailed', { error: String(error).slice(0, 200) }));
+      }
+    }
+    return input.datasetId;
+  }
+
+  if (!input.conversationId) return null;
+
+  const linked = await datasetsRepo
+    .latestForConversation(input.conversationId, input.userId)
+    .catch(() => undefined);
+  return linked?.id ?? null;
+}

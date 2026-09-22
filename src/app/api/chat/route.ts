@@ -8,7 +8,7 @@ import { buildContextPrompt } from '@/server/context/manager';
 import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion, streamGeneralAnswer } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
-import { recordTurn } from '@/server/services/chat.service';
+import { recordTaskTurn, recordTurn } from '@/server/services/chat.service';
 import { streamResponse } from '@/server/http/stream';
 import { ensureTasksReady } from '@/server/services/startup';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
@@ -16,6 +16,7 @@ import * as conversationsRepo from '@/server/repositories/conversations.reposito
 import * as artifactsRepo from '@/server/repositories/artifacts.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { isEcho } from '@/agents/restatement';
+import { datasetForTurn } from '@/server/services/dataset.service';
 
 /**
  * One place a message goes.
@@ -119,8 +120,18 @@ export const POST = withApi<Body>(
      */
     await ensureTasksReady();
 
-    const dataset = body.datasetId
-      ? await datasetsRepo.findOwned(body.datasetId, user.id)
+    /*
+     * The file this turn works on: the one sent, or the one this conversation
+     * has — which is what keeps it attached after a reload or on a later day.
+     */
+    const datasetId = await datasetForTurn({
+      userId: user.id,
+      conversationId: body.conversationId ?? null,
+      datasetId: body.datasetId ?? null,
+    });
+
+    const dataset = datasetId
+      ? await datasetsRepo.findOwned(datasetId, user.id)
       : undefined;
 
     /*
@@ -261,7 +272,7 @@ export const POST = withApi<Body>(
         datasetId:
           resolved?.status === 'resolved' && resolved.candidate.datasetId
             ? resolved.candidate.datasetId
-            : (body.datasetId ?? null),
+            : datasetId,
         ...(resolved?.status === 'resolved'
           ? {
               references: {
@@ -344,7 +355,7 @@ export const POST = withApi<Body>(
         userId: user.id,
         conversationId: body.conversationId ?? null,
         projectId: body.projectId ?? null,
-        datasetId: body.datasetId ?? null,
+        datasetId,
         locale: requestLanguage,
       });
 
@@ -404,13 +415,22 @@ export const POST = withApi<Body>(
         userLanguage,
         projectId: body.projectId ?? null,
         conversationId: body.conversationId ?? null,
-        datasetId: body.datasetId ?? null,
+        datasetId,
       });
 
       logger.info('chat.escalated', {
         taskId: task.id,
         intent: decision.intent.intent,
         signal,
+      });
+
+      /* Recorded like any delegated task, so it survives a reload and the next turn sees it. */
+      await recordTaskTurn({
+        conversationId: body.conversationId ?? null,
+        userId: user.id,
+        userMessage: body.message,
+        taskId: task.id,
+        restatement: restatementOf(decision.intent.restatement, body.message),
       });
 
       return task;

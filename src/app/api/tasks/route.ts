@@ -4,6 +4,8 @@ import { ok, withApi } from '@/server/http/api';
 import { ensureTasksReady } from '@/server/services/startup';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { startTask } from '@/server/services/task.service';
+import { recordTaskTurn } from '@/server/services/chat.service';
+import { datasetForTurn } from '@/server/services/dataset.service';
 
 /**
  * Starts a task.
@@ -32,13 +34,26 @@ export const POST = withApi<Body>(
      */
     await ensureTasksReady();
 
+    const datasetId = await datasetForTurn({
+      userId: user.id,
+      conversationId: body.conversationId ?? null,
+      datasetId: body.datasetId ?? null,
+    });
+
     const task = await startTask({
       userId: user.id,
       request: body.request,
       locale: body.locale,
       projectId: body.projectId ?? null,
       conversationId: body.conversationId ?? null,
-      datasetId: body.datasetId ?? null,
+      datasetId,
+    });
+
+    await recordTaskTurn({
+      conversationId: body.conversationId ?? null,
+      userId: user.id,
+      userMessage: body.request,
+      taskId: task.id,
     });
 
     return ok({ task: { id: task.id, status: task.status } }, { status: 202 });

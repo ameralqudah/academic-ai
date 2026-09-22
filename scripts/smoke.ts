@@ -4510,5 +4510,123 @@ console.log('\nwhat a model costs');
   check('the same intent with real work to do is a task', route('research.section', false), 'agent');
 }
 
+/* ------------------------------------------------------------------ */
+/* Research diagrams                                                    */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nResearch diagrams');
+
+  const { parseSpec, hypothesisLabel, ensureIndicators, abbreviation } = await import('../src/server/diagrams/spec');
+  const { layoutDiagram } = await import('../src/server/diagrams/layout');
+  const { renderSvg } = await import('../src/server/diagrams/svg');
+  const { asksForDiagram, diagramKindOf, specFromPls } = await import('../src/server/diagrams/requests');
+  const { validateArtifactBytes } = await import('../src/server/generators/documents');
+
+  /* The two requests from production, and the ones that must not be caught. */
+  check('"a model or framework drawing" asks for a diagram', asksForDiagram('بدي رسمة مودل او framework للدراسه'), true);
+  check('"a real, downloadable drawing" too', asksForDiagram('بدي رسمه حقيقيه وواقعيه قابله للتحميل'), true);
+  check('"draw the structural model" too', asksForDiagram('draw the structural model'), true);
+  check('a chart of results is not a model diagram', asksForDiagram('بدي رسم بياني للنتائج'), false);
+  check('nor a pie chart', asksForDiagram('draw a pie chart'), false);
+  check('nor a question about variables', asksForDiagram('اعطيني الابعاد لكل متغير'), false);
+  check('the measurement model is named', diagramKindOf('ارسم نموذج القياس'), 'measurement');
+  check('the structural model too', diagramKindOf('draw the structural model'), 'structural');
+  check('and anything else is the conceptual model', diagramKindOf('بدي رسمة للدراسة'), 'conceptual');
+
+  check('a hypothesis label is kept', hypothesisLabel('h2a'), 'H2A');
+  check('a number is not a label', hypothesisLabel('0.42'), undefined);
+  check('nor a coefficient', hypothesisLabel('β = 0.3'), undefined);
+
+  const raw = {
+    title: 'نموذج',
+    constructs: [
+      { id: 'X', name: 'التوظيف بالذكاء الاصطناعي', role: 'independent', dimensions: ['العدالة', 'الكفاءة'] },
+      { id: 'M', name: 'الاندماج', role: 'independent' },
+      { id: 'Y', name: 'الأداء الوظيفي', role: 'dependent' },
+      { id: 'W', name: 'الثقافة الرقمية', role: 'independent' },
+    ],
+    paths: [
+      { from: 'X', to: 'M', hypothesis: 'H1' },
+      { from: 'M', to: 'Y', hypothesis: 'H2' },
+      { from: 'X', to: 'Y', hypothesis: 'β = 0.5' },
+      { from: 'X', to: 'Nope' },
+    ],
+    moderations: [{ moderator: 'W', from: 'X', to: 'Y', hypothesis: 'H4' }],
+    values: { paths: [{ from: 'X', to: 'Y', beta: 0.9 }] },
+  };
+  const parsed = parseSpec(raw, { kind: 'conceptual', language: 'ar' });
+  const spec = 'spec' in parsed ? parsed.spec : null;
+
+  check('a model with variables and relations is drawable', Boolean(spec), true);
+  check('a path to a variable that does not exist is dropped', spec?.paths.length, 3);
+  check('a mediator is recognised from its arrows', spec?.constructs.find((c) => c.id === 'M')?.role, 'mediator');
+  check('a moderator from its moderation', spec?.constructs.find((c) => c.id === 'W')?.role, 'moderator');
+  check('a coefficient offered as a label is refused', spec?.paths.find((p) => p.from === 'X' && p.to === 'Y')?.hypothesis, undefined);
+  check('and numbers the model supplied never reach the figure', spec?.values, undefined);
+  check('nothing to draw asks for variables', 'missing' in parseSpec({ constructs: [{ name: 'A' }] }, { kind: 'conceptual', language: 'en' }), true);
+
+  if (spec) {
+    const layout = layoutDiagram(spec);
+    const boxes = layout.shapes.filter((shape) => shape.kind !== 'item');
+    const overlapping = boxes.some((a, i) =>
+      boxes.some((b, j) => i < j && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h),
+    );
+    check('no two variables overlap', overlapping, false);
+
+    const x = layout.shapes.find((shape) => shape.id === 'X')!;
+    const y = layout.shapes.find((shape) => shape.id === 'Y')!;
+    check('an Arabic model reads right to left: the predictor on the right', x.x > y.x, true);
+
+    const m = layout.shapes.find((shape) => shape.id === 'M')!;
+    const direct = layout.edges.find((edge) => edge.kind === 'path' && Math.abs(edge.from.y - edge.to.y) < 60 && edge.label === undefined);
+    check('the direct path passes above the mediator, not through it', direct ? m.y > Math.max(direct.from.y, direct.to.y) : m.y > x.y, true);
+
+    const w = layout.shapes.find((shape) => shape.id === 'W')!;
+    check('the moderator sits above the model', w.y < Math.min(x.y, y.y), true);
+    check('its arrow lands on the relation', layout.edges.some((edge) => edge.kind === 'moderation'), true);
+
+    const svg = renderSvg(layout);
+    check('the drawing is a valid figure', (await validateArtifactBytes(new TextEncoder().encode(svg), 'svg')).valid, true);
+    check('carrying its own Arabic font', svg.includes("font-family:'Plex Arabic'"), true);
+
+    const hostile = parseSpec(
+      { constructs: [{ name: '<script>alert(1)</script>' }, { name: 'B" onload="x' }], paths: [{ from: '<script>alert(1)</script>', to: 'B" onload="x' }] },
+      { kind: 'structural', language: 'en' },
+    );
+    if ('spec' in hostile) {
+      const unsafe = renderSvg(layoutDiagram(hostile.spec));
+      check('a name is drawn as text, never run', /<script|onload="/i.test(unsafe), false);
+      check('and the file passes the no-script check', (await validateArtifactBytes(new TextEncoder().encode(unsafe), 'svg')).valid, true);
+    }
+    check('a file with script in it is refused', (await validateArtifactBytes(new TextEncoder().encode('<svg><script>1</script></svg>'), 'svg')).valid, false);
+    check('and one with an event handler', (await validateArtifactBytes(new TextEncoder().encode('<svg onload="x()"></svg>'), 'svg')).valid, false);
+
+    const measured = ensureIndicators({ ...spec, kind: 'measurement' });
+    check('a measurement model uses dimensions as items when it has them', measured.constructs.find((c) => c.id === 'X')?.indicators, ['العدالة', 'الكفاءة']);
+    check('and says when item labels are placeholders', measured.notes.length, 1);
+  }
+
+  check('an English name abbreviates to its initials', abbreviation('Service Quality'), 'SQ');
+
+  const pls = specFromPls(
+    {
+      constructs: [
+        { name: 'DT', indicators: ['dt1', 'dt2'], mode: 'reflective' },
+        { name: 'SQ', indicators: ['sq1', 'sq2'], mode: 'reflective' },
+      ],
+      paths: [{ from: 'DT', to: 'SQ', coefficient: 0.4213 }],
+      rSquared: [{ construct: 'SQ', rSquared: 0.1775 }],
+      loadings: [{ construct: 'DT', indicator: 'dt1', loading: 0.81 }],
+      n: 212,
+    },
+    'structural',
+    'en',
+  );
+  check('an estimated model is drawn with its own coefficients', pls.values?.paths[0]?.beta, 0.4213);
+  check('and says where they came from', /n = 212/.test(pls.values?.source ?? ''), true);
+  const plsSvg = renderSvg(layoutDiagram(pls));
+  check('β and R² appear on the figure', plsSvg.includes('β = 0.421') && plsSvg.includes('R² = 0.177'), true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

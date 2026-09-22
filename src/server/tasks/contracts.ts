@@ -52,6 +52,8 @@ export type OutputType =
   | 'pls-model.v1'
   /** Estimated PLS results. */
   | 'pls-results.v1'
+  /** A research-model diagram: its structure, and the files drawn from it. */
+  | 'diagram.v1'
   /** Written text, for a document or a chapter. */
   | 'prose.v1'
   /** References with their verification status. */

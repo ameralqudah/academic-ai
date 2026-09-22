@@ -105,7 +105,17 @@ export function decide(input: {
   referencesPrevious: RouteDecision['referencesPrevious'];
   hasDataset: boolean;
   asksAboutEarlierWork?: boolean;
+  wantsDiagram?: boolean;
 }): { path: RoutePath; reason: string; confidence: number } {
+  /*
+   * A drawing of the research model. First, because the direct answer cannot
+   * draw — it produced boxes of dashes in a code block — and because the short
+   * "بدي رسمة" otherwise reads as a question about earlier work.
+   */
+  if (input.wantsDiagram) {
+    return { path: 'agent', reason: 'a diagram was requested', confidence: 0.9 };
+  }
+
   /*
    * A file was asked for. Producing one is a task with an artifact at the end,
    * and no conversational answer satisfies it — telling someone to copy text

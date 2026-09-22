@@ -61,6 +61,14 @@ import { instructionFrom } from './step-instruction';
 import { sourcesAsMaterial } from './found-sources';
 import { noDataRule } from '@/server/tasks/no-data-rule';
 import { latestEarlierWork } from '@/server/agent/earlier-work';
+import { extractDiagramSpec } from '@/server/diagrams/extract';
+import { layoutDiagram } from '@/server/diagrams/layout';
+import { renderPptx } from '@/server/diagrams/pptx';
+import { defaultTitle, diagramKindOf, specFromPls } from '@/server/diagrams/requests';
+import { ensureIndicators, type DiagramKind, type DiagramSpec } from '@/server/diagrams/spec';
+import { renderSvg } from '@/server/diagrams/svg';
+import { isArabic } from '@/server/diagrams/text';
+
 
 /**
  * The producer identity every output carries.
@@ -711,6 +719,31 @@ export function registerAllHandlers(): void {
             findings: section.findings.length,
           })),
           n: analysis.n,
+          /*
+           * The model and its figures, small enough to carry: a diagram step
+           * draws the estimated model with these numbers rather than asking a
+           * language model to recall them.
+           */
+          estimates: {
+            constructs: analysis.model.constructs,
+            paths: analysis.structural.paths.map((path) => ({
+              from: path.from,
+              to: path.to,
+              coefficient: path.coefficient,
+            })),
+            rSquared: analysis.structural.endogenous.map((entry) => ({
+              construct: entry.construct,
+              rSquared: entry.rSquared,
+            })),
+            loadings: analysis.measurement.flatMap((construct) =>
+              construct.indicators.map((indicator) => ({
+                construct: indicator.construct,
+                indicator: indicator.indicator,
+                loading: indicator.loading,
+              })),
+            ),
+            n: analysis.n,
+          },
         },
         { metadata: { datasetId, converged: true } },
       ),
@@ -1376,6 +1409,136 @@ export function registerAllHandlers(): void {
           },
         ],
         warnings: substitution,
+      },
+    );
+  });
+
+  /* ------------------------------- drawing ------------------------------ */
+
+  /*
+   * A research-model diagram: conceptual, measurement or structural.
+   *
+   * Structure from the conversation or from an estimated PLS model; drawing by
+   * code. Two files — an SVG shown in the chat, which the browser turns into a
+   * PNG on request, and a PowerPoint slide of native shapes that can be edited.
+   */
+  registerHandler('diagram.draw', async (context): Promise<Observation> => {
+    const request = instructionOf(context, 'instruction', 'topic') || String(context.context.request ?? '');
+    const requested = textInput(context, 'kind');
+    const kind: DiagramKind =
+      requested === 'measurement' || requested === 'structural' || requested === 'conceptual'
+        ? requested
+        : diagramKindOf(request);
+
+    /* An estimated model in this task is the model, with its real figures. */
+    const estimated = readAllOutputs<{ estimates?: Parameters<typeof specFromPls>[0] }>(
+      context.available,
+      'pls-results.v1',
+    ).find((result) => result.estimates)?.estimates;
+
+    /*
+     * The researcher's own words decide the language, not the step's input —
+     * which may hold only "measurement" — and an estimated model's variable
+     * names decide it before either: a figure is labelled in the language of
+     * what is on it.
+     */
+    const names = estimated?.constructs.map((construct) => construct.name).join(' ') ?? '';
+    const language = names
+      ? isArabic(names)
+        ? 'ar'
+        : 'en'
+      : decideOutputLanguage({
+          request: String(context.context.request ?? request),
+          contextLanguage: (context.context.language as 'ar' | 'en' | undefined) ?? null,
+          interfaceLocale: context.locale,
+        }).language;
+
+    let spec: DiagramSpec;
+
+    if (estimated) {
+      spec = specFromPls(estimated, kind, language);
+    } else {
+      const extracted = await extractDiagramSpec({
+        userId: context.userId,
+        request,
+        kind,
+        language,
+        conversationId: (context.context.conversationId as string | undefined) ?? null,
+        taskId: context.taskId,
+      });
+
+      if ('missing' in extracted) {
+        return needsInput(
+          say(
+            context,
+            'Which variables should the model show, and how are they related? For example: "X affects Y through M, and W moderates X → Y".',
+            'ما متغيرات النموذج وكيف ترتبط؟ مثلًا: «يؤثر س في ص من خلال م، ويعدّل ع العلاقة بين س وص».',
+          ),
+          'instruction',
+        );
+      }
+
+      spec = extracted.spec;
+    }
+
+    if (!spec.title) spec = { ...spec, title: defaultTitle(spec.kind, language) };
+    if (spec.kind === 'measurement') spec = ensureIndicators(spec);
+
+    const layout = layoutDiagram(spec);
+    const svg = renderSvg(layout);
+    const pptx = await renderPptx(layout);
+
+    const base = spec.title.slice(0, 60).replace(/[^\p{L}\p{N}\s-]/gu, '').trim() || 'diagram';
+    const common = {
+      userId: context.userId,
+      projectId: (context.context.projectId as string) ?? null,
+      metadata: { taskId: context.taskId, diagram: spec.kind },
+    };
+
+    const drawing = await storeArtifact({
+      ...common,
+      kind: 'svg',
+      filename: `${base}.svg`,
+      bytes: new TextEncoder().encode(svg),
+    });
+    const slide = await storeArtifact({
+      ...common,
+      kind: 'pptx',
+      filename: `${base}.pptx`,
+      bytes: pptx,
+    });
+
+    const stamp = producer(context, 'diagram.draw');
+    const files = [drawing, slide];
+
+    return succeeded(
+      [
+        makeOutput(stamp, 'diagram.v1', {
+          kind: spec.kind,
+          title: spec.title,
+          constructs: spec.constructs.map((construct) => ({ name: construct.name, role: construct.role })),
+          paths: spec.paths,
+          moderations: spec.moderations,
+          withValues: Boolean(spec.values),
+          svgArtifactId: drawing.id,
+        }),
+        ...files.map((file) =>
+          makeOutput(stamp, 'artifact.v1', {
+            artifactId: file.id,
+            filename: file.filename,
+            kind: file.kind,
+            validationStatus: file.validationStatus,
+          }),
+        ),
+      ],
+      {
+        artifacts: files.map((file) => ({
+          id: file.id,
+          kind: file.kind,
+          filename: file.filename,
+          validationStatus: file.validationStatus,
+        })),
+        modelCalls: estimated ? 0 : 1,
       },
     );
   });

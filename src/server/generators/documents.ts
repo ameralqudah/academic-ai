@@ -518,6 +518,15 @@ export async function validateArtifactBytes(
       return { valid: true };
     }
 
+    /* A drawing: an SVG root, and no script — the file is shown inline in the app. */
+    if (kind === 'svg') {
+      const text = new TextDecoder().decode(bytes);
+      if (!/^\s*(?:<\?xml[^>]*>\s*)?<svg[\s>]/.test(text)) return { valid: false, reason: 'not an svg' };
+      /* An attribute, quoted: escaped text that merely reads "onload=" is not one. */
+      if (/<script|\son[a-z]+\s*=\s*["']|javascript:/i.test(text)) return { valid: false, reason: 'active content' };
+      return { valid: true };
+    }
+
     if (kind === 'csv' || kind === 'md' || kind === 'bib' || kind === 'ris' || kind === 'txt') {
       const text = new TextDecoder().decode(bytes);
       if (text.trim().length === 0) return { valid: false, reason: 'empty' };

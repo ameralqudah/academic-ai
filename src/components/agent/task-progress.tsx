@@ -466,15 +466,30 @@ function TaskPanel({
           {steps
             .filter((step) => step.artifactIds.length > 0)
             .map((step) =>
-              step.artifactIds.map((artifactId) => (
-                <ArtifactCard
-                  key={artifactId}
-                  artifactId={artifactId}
-                  name={fileInfo(step.output).filename ?? step.label}
-                  kind={fileInfo(step.output).kind ?? ''}
-                  failed={fileInfo(step.output).validationStatus === 'fail'}
-                />
-              )),
+              step.artifactIds.map((artifactId) => {
+                const info = fileInfo(step.output, artifactId);
+
+                /* A drawing is shown, not listed: it is the answer, and it is small. */
+                if (info.kind === 'svg') {
+                  return (
+                    <DiagramPreview
+                      key={artifactId}
+                      artifactId={artifactId}
+                      name={info.filename ?? step.label}
+                    />
+                  );
+                }
+
+                return (
+                  <ArtifactCard
+                    key={artifactId}
+                    artifactId={artifactId}
+                    name={info.filename ?? step.label}
+                    kind={info.kind ?? ''}
+                    failed={info.validationStatus === 'fail'}
+                  />
+                );
+              }),
             )}
         </div>
       )}
@@ -787,11 +802,28 @@ function ArtifactCard({
  * rather than its own name, and a failed quality check never showed its
  * warning. Both shapes are read, so a row written either way is understood.
  */
-function fileInfo(output: Record<string, unknown> | null | undefined): {
+function fileInfo(
+  output: Record<string, unknown> | null | undefined,
+  /**
+   * The file asked about, when a step made more than one. The legacy view
+   * merges every output into one object, so a step that drew a figure and its
+   * PowerPoint copy listed both under the second one's name.
+   */
+  artifactId?: string,
+): {
   filename?: string;
   kind?: string;
   validationStatus?: string;
 } {
+  const own = (
+    (output?.outputs ?? []) as { type?: string; data?: Record<string, unknown> }[]
+  ).find((entry) => entry.type === 'artifact.v1' && entry.data?.artifactId === artifactId)?.data;
+
+  if (artifactId && own) {
+    const read = (key: string) => (typeof own[key] === 'string' ? (own[key] as string) : undefined);
+    return { filename: read('filename'), kind: read('kind'), validationStatus: read('validationStatus') };
+  }
+
   const legacy = (output?.legacy ?? {}) as Record<string, unknown>;
   const pick = (key: string) => {
     const value = output?.[key] ?? legacy[key];
@@ -842,5 +874,81 @@ function WrittenResult({ text }: { text: string }) {
         {copied ? t("copied") : t("copy")}
       </button>
     </section>
+  );
+}
+
+/**
+ * A research diagram in the thread, with its two downloads.
+ *
+ * The PNG is made here, in the browser, from the SVG: the drawing carries its
+ * own font, so the canvas renders exactly what is on screen, at three times the
+ * size for print. The server never rasterises, which is why the figure looks
+ * the same on the page, in the download and in a thesis.
+ */
+function DiagramPreview({ artifactId, name }: { artifactId: string; name: string }) {
+  const t = useTranslations('task');
+  const href = `/api/artifacts/${artifactId}`;
+  const [busy, setBusy] = useState(false);
+
+  async function downloadPng() {
+    setBusy(true);
+    try {
+      const svg = await (await fetch(href)).text();
+      const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error('image'));
+        image.src = url;
+      });
+
+      const scale = 3;
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth * scale;
+      canvas.height = image.naturalHeight * scale;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('canvas');
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+
+      const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!png) throw new Error('png');
+
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(png);
+      link.download = `${name.replace(/\.svg$/i, '')}.png`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    } catch {
+      /* The SVG link beside it still works; a failed conversion costs one format. */
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <figure className="flex flex-col gap-2 rounded-xl border border-line-strong bg-white p-2">
+      {/* eslint-disable-next-line @next/next/no-img-element -- a generated figure, not a static asset */}
+      <img src={href} alt={name} className="h-auto w-full rounded-lg" />
+      <figcaption className="flex flex-wrap items-center gap-2 px-1 pb-1">
+        <span className="me-auto truncate text-xs text-muted">{name.replace(/\.svg$/i, '')}</span>
+        <button
+          type="button"
+          onClick={() => void downloadPng()}
+          disabled={busy}
+          className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-xs text-ink hover:border-primary disabled:opacity-50"
+        >
+          <Download className="size-3.5" aria-hidden />
+          {t('diagram.png')}
+        </button>
+        <a
+          href={href}
+          className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-xs text-ink hover:border-primary"
+        >
+          <Download className="size-3.5" aria-hidden />
+          {t('diagram.svg')}
+        </a>
+      </figcaption>
+    </figure>
   );
 }

@@ -28,6 +28,7 @@ import { selectModel } from '@/server/ai/model-router';
 
 import { allCapabilities, capabilityFor, isKnownCapability } from './capabilities';
 import { repairPrerequisites } from './prerequisites';
+import { asksForDiagram, diagramKindOf } from '@/server/diagrams/requests';
 
 export interface PlannedStep {
   /** A key the plan uses to express dependencies before ids exist. */
@@ -79,6 +80,32 @@ export async function planTask(input: {
    */
   const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
+  /*
+   * A request to draw the research model, with no data attached, needs no
+   * planning: one step that reads the model from the conversation and draws
+   * it. Left to the planner, "a real, downloadable drawing" was read as a
+   * request for art, and the researcher was asked whether they wanted a
+   * portrait or a landscape.
+   *
+   * With a dataset the request may be "run PLS and draw the result", which is
+   * two steps in order — that goes to the planner, told what the capability is.
+   */
+  if (asksForDiagram(input.request) && !input.context.datasetId && !input.context.references) {
+    return {
+      steps: [
+        {
+          key: 'draw',
+          capability: 'diagram.draw',
+          label: input.locale === 'ar' ? 'رسم النموذج' : 'Drawing the model',
+          dependsOn: [],
+          input: { kind: diagramKindOf(input.request), instruction: input.request },
+        },
+      ],
+      missingInformation: [],
+      summary: '',
+    };
+  }
+
   const capabilities = allCapabilities()
     .map(
       (capability) =>
@@ -114,6 +141,7 @@ Input fields. Use these names, so the step can find what you gave it:
    - academic.search, web.search: {"query": "<search terms>"}
    - deep.research: {"question": "<what to find out>"}
    - literature.review, document.write: {"topic": "<the subject>"}
+   - diagram.draw: {"kind": "conceptual" | "measurement" | "structural", "instruction": "<what to draw>"} — draws the research model from the conversation, or from a statistics.pls step it depends on (then with that analysis's real coefficients). One step; it needs nothing written first.
 
 Rules:
 
@@ -131,6 +159,8 @@ Rules:
    - statistics.* need a dataset, not a search.
 
    "Write a literature review about X" is therefore at least two steps: search, then review. Never one.
+
+4b. The context may hold recentConversation — the turns just before this request, oldest first. The request continues that conversation: read it before deciding what is meant and before asking anything. "Draw it", "a real drawing", "the methodology" mean the thing being discussed there.
 
 5. missingInformation is for things you genuinely cannot infer and that would change the work — the topic when there is none, the analysis when several are possible. Do not ask about things you can reasonably assume; asking is a cost to the user.
 

@@ -19,6 +19,8 @@ const DATA_INTENTS = new Set([
   'stats.categorical',
   'stats.nonparametric',
   'stats.logistic',
+  'stats.plsSem',
+  'stats.cbSem',
 ]);
 
 /** Whether a request of this kind is one this path answers. */
@@ -37,4 +39,53 @@ export function columnsNamedIn(text: string, profile: DatasetProfile): string[] 
   return profile.columns
     .filter((column) => column.name.trim().length > 1 && lower.includes(column.name.toLowerCase()))
     .map((column) => column.name);
+}
+
+/* The start of a word, in any script: \b does not see Arabic letters. */
+const START = String.raw`(?<![\p{L}\p{N}])`;
+
+/*
+ * Programs and methods named in a request. Each is a name, not a sentence, so
+ * matching the word is the right tool: "AMOS" means AMOS in every dialect.
+ */
+const COVARIANCE_SEM = new RegExp(
+  `${START}(?:amos|lisrel|mplus|lavaan|cb[-\\s]?sem|cfa|التحليل\\s+العاملي\\s+التوكيدي|تحليل\\s+عاملي\\s+توكيدي)`,
+  'iu',
+);
+const VARIANCE_SEM = new RegExp(`${START}(?:smart\\s?-?pls|pls(?:[-\\s]?sem)?|warp\\s?pls|adanco)(?![\\p{L}])`, 'iu');
+const STATISTICS_PACKAGE = new RegExp(
+  `${START}(?:spss|jamovi|jasp|stata|minitab|eviews|r\\s+studio|rstudio)(?![\\p{L}])`,
+  'iu',
+);
+const ANALYSIS_WORDS = new RegExp(
+  [
+    String.raw`\b(?:analy[sz]e|analysis|statistics|descriptive|frequencies|frequency\s+table|tables?)\b`,
+    `${START}(?:و?حلل|حلّل|و?تحليل|احصاء|إحصاء|احصائي|إحصائي|جداول|جدول|تكرارات|التكرارات|وصفي|اوصف|أوصف|وصّف|وصف)`,
+  ].join('|'),
+  'iu',
+);
+const WHOLE = new RegExp(`${START}(?:كامل|كاملة|شامل|شاملة|كل\\s+شي|كل\\s+شيء|full|complete|everything|whole)`, 'iu');
+
+/**
+ * The analysis a request names by its program or method, if it names one.
+ *
+ * "حلل AMOS" asks for a covariance-based factor model, "SmartPLS" for a
+ * variance-based one, and "SPSS" for the tables a statistics package prints.
+ * The classifier knows the words; it did not know that they are instructions.
+ */
+export function softwareIntentOf(message: string): 'stats.cbSem' | 'stats.plsSem' | 'data.describe' | null {
+  if (COVARIANCE_SEM.test(message)) return 'stats.cbSem';
+  if (VARIANCE_SEM.test(message)) return 'stats.plsSem';
+  if (STATISTICS_PACKAGE.test(message)) return 'data.describe';
+  return null;
+}
+
+/** Whether a message asks for its data to be analysed, in any words. */
+export function asksForAnalysis(message: string): boolean {
+  return ANALYSIS_WORDS.test(message) || softwareIntentOf(message) !== null;
+}
+
+/** "Analyse everything": the full set of tables rather than one of them. */
+export function asksForEverything(message: string): boolean {
+  return WHOLE.test(message) || STATISTICS_PACKAGE.test(message);
 }

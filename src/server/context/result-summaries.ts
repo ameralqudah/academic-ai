@@ -163,7 +163,36 @@ export function summariseResult(kind: string, payload: unknown): string | null {
         .filter(([, value]) => num(value) !== null)
         .slice(0, 8)
         .map(([key, value]) => `${key} = ${fixed(value)}`);
-      return `Analysis result — CB-SEM${indices.length ? `: ${indices.join(', ')}` : ''}`;
+      const loadings = (Array.isArray(data.loadings) ? (data.loadings as Payload[]) : [])
+        .slice(0, 40)
+        .map((loading) => `${str(loading.construct)}→${str(loading.indicator)} ${fixed(loading.standardised)}`);
+      const validity = (Array.isArray(data.reliability) ? (data.reliability as Payload[]) : []).map(
+        (row) => `${str(row.construct)} CR = ${fixed(row.compositeReliability)}, AVE = ${fixed(row.ave)}`,
+      );
+      return [
+        `Analysis result — CB-SEM (CFA)${indices.length ? `: ${indices.join(', ')}` : ''}`,
+        ...(loadings.length ? [`standardised loadings: ${loadings.join('; ')}`] : []),
+        ...validity,
+      ].join('; ');
+    }
+    case 'descriptives': {
+      const rows = Array.isArray(data.descriptives) ? (data.descriptives as Payload[]) : [];
+      const tables = Array.isArray(data.frequencies) ? (data.frequencies as Payload[]) : [];
+      const numbers = rows
+        .slice(0, 30)
+        .map((row) => `${str(row.variable)}: n = ${num(row.n) ?? '?'}, M = ${fixed(row.mean)}, SD = ${fixed(row.sd)}, min = ${fixed(row.min)}, max = ${fixed(row.max)}`);
+      const counts = tables.slice(0, 20).map((table) => {
+        const entries = Array.isArray(table.rows) ? (table.rows as Payload[]) : [];
+        return `${str(table.variable)}: ${entries
+          .slice(0, 10)
+          .map((entry) => `${str(entry.value)} ${num(entry.frequency) ?? 0} (${fixed(entry.validPercent)}%)`)
+          .join(', ')}`;
+      });
+      return [`Descriptive statistics, N = ${num(data.n) ?? '?'}`, ...numbers, ...(counts.length ? [`frequencies — ${counts.join(' | ')}`] : [])].join('; ');
+    }
+    case 'note': {
+      const lines = Array.isArray(data.lines) ? data.lines.map(str).filter(Boolean) : [];
+      return lines.length ? `Guidance given: ${lines.join(' ')}` : null;
     }
     case 'literature':
       return sources(data, 'Literature found');

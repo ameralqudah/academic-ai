@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Composer, type ModeKey, type ModeOption, type ModelOption } from '@/components/agent/composer';
 import { ArtifactPanelProvider } from '@/components/agent/artifact-panel';
 import { TaskProgress } from '@/components/agent/task-progress';
+import { CbSemView, DescriptivesView, NoteView } from '@/components/agent/analysis-tables';
 import { PlsModelBuilder, type PlsModelDraft } from '@/components/agent/pls-builder';
 import { ProjectPicker, type ProjectOption } from '@/components/agent/project-picker';
 import { MessageActions, MessageEditor } from '@/components/agent/message-actions';
@@ -1817,6 +1818,18 @@ function ResultView({
 
   if (kind === 'cleaning') {
     return <CleaningView payload={payload} />;
+  }
+
+  if (kind === 'descriptives') {
+    return <DescriptivesView payload={payload} />;
+  }
+
+  if (kind === 'note') {
+    return <NoteView payload={payload} />;
+  }
+
+  if (kind === 'cbsem') {
+    return <CbSemView payload={payload} />;
   }
 
   if (kind === 'webSources') {

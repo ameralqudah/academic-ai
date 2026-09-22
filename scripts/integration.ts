@@ -4530,7 +4530,7 @@ async function main() {
       analyseDataRequest({ userId: analyst, datasetId, intent, message, mentioned: [], language: 'en', conversationId: thread.id });
 
     const described = await ask('data.describe', 'Describe my data');
-    check('describing the data shows its profile', described.status === 'done' ? described.displays.map((d) => d.kind) : [], ['profile']);
+    check('describing the data shows the descriptive tables', described.status === 'done' ? described.displays.map((d) => d.kind) : [], ['descriptives']);
 
     const compared = await ask('stats.compare', 'Compare score between gender groups');
     check('a comparison named in words runs the right test', compared.status === 'done' ? compared.test : null, 't.independent');
@@ -4572,6 +4572,64 @@ async function main() {
     ).prompt;
     const t = (table?.payload as { statistic: { value: number } }).statistic.value.toFixed(3);
     assertTrue('"explain the results" sees the statistic the analysis computed', explained.includes(`(Welch) = ${t}`));
+  }
+
+  /* --- any program: SPSS, AMOS, SmartPLS --------------------------------- */
+
+  {
+    /*
+     * A survey with two scales, generated from two correlated factors so a
+     * factor model has something real to find. "حلل spss كامل" gets the
+     * package's tables, "AMOS" a confirmatory factor analysis, and "SmartPLS"
+     * asks for the paths before it estimates anything.
+     */
+    const researcher = await newUser('any-program');
+    const thread = await startConversation({ userId: researcher, firstMessage: 'My survey' });
+    let seed = 7;
+    const random = () => {
+      seed = (seed * 16807) % 2147483647;
+      return seed / 2147483647;
+    };
+    const normal = () => Math.sqrt(-2 * Math.log(random() || 1e-9)) * Math.cos(2 * Math.PI * random());
+    const likert = (value: number) => String(Math.min(5, Math.max(1, Math.round(3 + value))));
+    const rows = [['Participant_Code', 'Sector', 'SQ1', 'SQ2', 'SQ3', 'SAT1', 'SAT2', 'SAT3']];
+    for (let i = 0; i < 180; i += 1) {
+      const sq = normal();
+      const sat = 0.6 * sq + 0.8 * normal();
+      rows.push([
+        `P${i + 1}`,
+        i % 3 === 0 ? 'Public' : 'Private',
+        ...[0, 1, 2].map(() => likert(0.9 * sq + 0.5 * normal())),
+        ...[0, 1, 2].map(() => likert(0.9 * sat + 0.5 * normal())),
+      ]);
+    }
+    const upload = await saveUpload({
+      userId: researcher,
+      file: { name: 'scales.csv', bytes: new TextEncoder().encode(rows.map((row) => row.join(',')).join('\n') + '\n').buffer as ArrayBuffer },
+    });
+    const { analyseDataRequest } = await import('@/server/services/data-analysis.service');
+    const ask = (intent: string, message: string) =>
+      analyseDataRequest({ userId: researcher, datasetId: upload.dataset.id, intent, message, mentioned: [], language: 'ar', conversationId: thread.id });
+
+    const spss = await ask('data.describe', 'حلل spss كامل');
+    const kinds = spss.status === 'done' ? spss.displays.map((display) => display.kind) : [];
+    check('SPSS, complete: the tables, each scale’s reliability, and what can be tested next', kinds, ['descriptives', 'reliability', 'reliability', 'note']);
+    const tables = spss.status === 'done' ? (spss.displays[0]?.payload as { descriptives: { variable: string; mean: number }[]; skipped: { variable: string }[] }) : null;
+    assertTrue('with means computed from the file', typeof tables?.descriptives.find((row) => row.variable === 'SQ1')?.mean === 'number');
+    assertTrue('and the participant codes left out', Boolean(tables?.skipped.some((entry) => entry.variable === 'Participant_Code')));
+
+    const amos = await ask('stats.cbSem', 'حلل AMOS');
+    const cfa = amos.status === 'done' ? (amos.displays[0]?.payload as { fit?: { cfi: number }; loadings?: unknown[] }) : null;
+    check('AMOS: a confirmatory factor analysis of the scales in the file', amos.status === 'done' ? amos.displays[0]?.kind : amos.status, 'cbsem');
+    assertTrue('with its fit indices', typeof cfa?.fit?.cfi === 'number');
+    check('and a loading for every item', cfa?.loadings?.length, 6);
+
+    const pls = await ask('stats.plsSem', 'حلل SmartPLS');
+    check('SmartPLS without paths asks for them', pls.status, 'question');
+    assertTrue('naming the scales it found', pls.status === 'question' && pls.question.includes('SQ (SQ1, SQ2, SQ3)') && pls.question.includes('SAT'));
+
+    const estimated = await ask('stats.plsSem', 'حلل SmartPLS\nSQ -> SAT');
+    check('and with them, estimates the model', estimated.status === 'done' ? estimated.displays[0]?.kind : estimated.status, 'pls');
   }
 
   /* ------------------------------------------ live progress and resumption */

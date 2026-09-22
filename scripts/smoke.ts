@@ -4804,5 +4804,48 @@ console.log('\nwhat a model costs');
   check('by sitting below the model', Boolean(trust && brand && trust.y > brand.y), true);
 }
 
+/* ------------------------------------------------------------------ */
+/* Any program: SPSS tables, AMOS and SmartPLS from the file           */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nAny program: SPSS tables, AMOS and SmartPLS from the file');
+  const { parseCsv, profileDataset } = await import('../src/analysis');
+  const { descriptiveTables } = await import('../src/analysis/descriptives');
+  const { constructsFromItems, pathsFromText } = await import('../src/analysis/measurement');
+  const { softwareIntentOf, asksForAnalysis, asksForEverything } = await import('../src/server/services/data-requests');
+
+  const rows = ['Participant_Code,Sector,Years,SQ1,SQ2,SQ3,SAT1,SAT2,SAT3'];
+  for (let i = 0; i < 20; i++) {
+    rows.push([`P${String(i + 1).padStart(2, '0')}`, ['Public', 'Private'][i % 2], 3 + (i % 9), 1 + (i % 5), 1 + ((i + 1) % 5), 1 + (i % 5), 2 + (i % 4), 2 + ((i + 1) % 4), 2 + (i % 4)].join(','));
+  }
+  const profile = profileDataset(parseCsv(rows.join('\n'), 'survey.csv'));
+  const tables = descriptiveTables(profile);
+
+  check('a participant code is not tabulated as a variable', tables.skipped.some((entry) => entry.variable === 'Participant_Code' && entry.reason === 'identifier'), true);
+  const years = tables.descriptives.find((row) => row.variable === 'Years');
+  check('a number gets N, mean and SD from the file', years ? [years.n, years.min, years.max] : null, [20, 3, 11]);
+  const sector = tables.frequencies.find((table) => table.variable === 'Sector');
+  check('a category gets a frequency table', sector?.rows.map((row) => row.frequency).sort(), [10, 10]);
+  check('whose cumulative percent ends at 100', Math.round(sector?.rows.at(-1)?.cumulativePercent ?? 0), 100);
+  const scale = tables.frequencies.find((table) => table.variable === 'SQ1');
+  check('a scale item is counted in its own order, 1 to 5', scale?.rows.map((row) => row.value), ['1', '2', '3', '4', '5']);
+
+  const constructs = constructsFromItems(profile);
+  check('the constructs are read from the item names', constructs.map((construct) => construct.name), ['SQ', 'SAT']);
+  check('with their items', constructs[1]?.indicators, ['SAT1', 'SAT2', 'SAT3']);
+
+  check('a written arrow is a path', pathsFromText('SQ -> SAT', ['SQ', 'SAT']), [{ from: 'SQ', to: 'SAT' }]);
+  check('so is an Arabic sentence', pathsFromText('SQ يؤثر على SAT', ['SQ', 'SAT']), [{ from: 'SQ', to: 'SAT' }]);
+  check('two constructs named without a direction are not guessed into a path', pathsFromText('SQ SAT', ['SQ', 'SAT']), []);
+
+  check('AMOS asks for a factor model', softwareIntentOf('حلل AMOS'), 'stats.cbSem');
+  check('and so does "confirmatory factor analysis"', softwareIntentOf('بدي تحليل عاملي توكيدي'), 'stats.cbSem');
+  check('SmartPLS for PLS', softwareIntentOf('حلل SmartPLS'), 'stats.plsSem');
+  check('SPSS for the package tables', softwareIntentOf('حلل spss كامل'), 'data.describe');
+  check('"give me analysis tables" is analysis', asksForAnalysis('اعطيني جداول تحليل'), true);
+  check('a question about a concept is not', asksForAnalysis('ما هو معامل كرونباخ ألفا؟'), false);
+  check('"complete" asks for everything', asksForEverything('حلل spss كامل'), true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -446,6 +446,72 @@ test.describe('a direct answer, as it is written', () => {
     await expect(page.getByText(/t \(Welch\) \(9\.94\) = 5\.780/)).toBeVisible();
   });
 
+  test('any program: SPSS tables and an AMOS factor analysis are drawn as tables', async ({ page }) => {
+    await registerAndLogin(page, 'any-program', 'en');
+    await page.goto('/en/chat');
+
+    const display = (kind: string, payload: object) => ({ type: 'analysis.v1', data: { display: { kind, payload } } });
+    const outputs = [
+      display('descriptives', {
+        n: 14,
+        descriptives: [{ variable: 'Years_In_Industry', n: 14, missing: 0, min: 3, max: 25, mean: 11.43, sd: 6.212, skewness: 0.41, kurtosis: -0.8 }],
+        frequencies: [
+          {
+            variable: 'Sector',
+            missing: 0,
+            total: 14,
+            rows: [
+              { value: 'Public', frequency: 8, percent: 57.14, validPercent: 57.14, cumulativePercent: 57.14 },
+              { value: 'Private', frequency: 6, percent: 42.86, validPercent: 42.86, cumulativePercent: 100 },
+            ],
+          },
+        ],
+        skipped: [{ variable: 'Participant_Code', reason: 'identifier' }],
+      }),
+      display('cbsem', {
+        n: 180,
+        fit: { chiSquare: 9.21, df: 8, pValue: 0.325, normedChiSquare: 1.15, cfi: 0.998, tli: 0.996, rmsea: 0.029, srmr: 0.021, verdict: 'good' },
+        loadings: [{ construct: 'SQ', indicator: 'SQ1', standardised: 0.812, pValue: 0, isReference: true }],
+        reliability: [{ construct: 'SQ', compositeReliability: 0.861, ave: 0.674 }],
+        factorCorrelations: [],
+      }),
+    ];
+
+    await page.route('**/api/tasks/programs/stream', (route) => route.fulfill({ status: 404 }));
+    await page.route('**/api/tasks/programs', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            task: { id: 'programs', status: 'COMPLETED', request: 'Analyse with SPSS', pendingQuestion: null, pauseReasonKey: null, errorReasonKey: null, context: {} },
+            steps: [
+              {
+                id: 's0', ordinal: 0, capability: 'data.analyse', label: 'Analysing the data', status: 'COMPLETED', attempts: 1,
+                errorReasonKey: null, dynamic: false, durationMs: 200, artifactIds: [],
+                output: { outputs, legacy: {}, observation: { warnings: [] } },
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    await answerWith(page, [{ type: 'task', task: { id: 'programs', status: 'QUEUED' } }]);
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('Analyse with SPSS');
+    await composer.press('Enter');
+
+    await expect(page.getByText('Descriptive Statistics')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('cell', { name: '11.43' })).toBeVisible();
+    await expect(page.getByText('Cumulative Percent')).toBeVisible();
+    await expect(page.getByText(/Not tabulated.*Participant_Code/)).toBeVisible();
+    await expect(page.getByText(/Model fit — good fit/)).toBeVisible();
+    await expect(page.getByRole('cell', { name: '0.998' })).toBeVisible();
+    await expect(page.getByText('Composite reliability and convergent validity')).toBeVisible();
+    await page.screenshot({ path: 'test-results/any-program.png', fullPage: true });
+  });
+
   test('an Arabic result reads right to left in the English interface, under what was understood', async ({
     page,
   }) => {

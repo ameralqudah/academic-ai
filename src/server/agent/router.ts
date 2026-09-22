@@ -24,6 +24,7 @@
 import { logger } from '@/lib/logger';
 import { classifyIntent, type IntentResult } from '@/agents/intent';
 import { asksAboutEarlierWork, asksToExplain, decide, detectReference } from './routing-rules';
+import { asksForAnalysis, isDataIntent, softwareIntentOf } from '@/server/services/data-requests';
 import type { DatasetProfile } from '@/analysis/types';
 import { asksForDiagram } from '@/server/diagrams/requests';
 
@@ -114,8 +115,8 @@ const CAPABILITY_FOR: Record<string, string[]> = {
   'stats.nonparametric': ['data.analyse'],
   'stats.logistic': ['data.analyse'],
   'stats.recommend': ['data.analyse'],
-  'stats.plsSem': ['statistics.pls'],
-  'stats.cbSem': ['statistics.cbsem'],
+  'stats.plsSem': ['data.analyse'],
+  'stats.cbSem': ['data.analyse'],
 
   'data.clean': ['data.analyse'],
   'data.describe': ['data.analyse'],
@@ -164,13 +165,30 @@ export interface RouteInput {
  * This reads its answer and decides what kind of execution the request needs.
  */
 export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
-  const intent = await classifyIntent({
+  const classified = await classifyIntent({
     message: input.message,
     locale: input.locale,
     userLanguage: input.userLanguage,
     profile: input.profile ?? null,
     history: input.history,
   });
+
+  /*
+   * With a file attached, a request that names a program or asks for analysis
+   * is analysis. "حلل spss كامل" was read as a general question and answered
+   * with a description of what the tables would contain — no numbers — and
+   * "حلل AMOS" as nothing in particular. Writing requests keep their intent:
+   * "write the results chapter" is about the analysis, not a request for one.
+   */
+  const intent = { ...classified };
+  if (input.hasDataset && !classified.intent.startsWith('research.')) {
+    const software = softwareIntentOf(input.message);
+    if (software && (software !== 'data.describe' || !isDataIntent(classified.intent) || classified.intent === 'data.inspect')) {
+      intent.intent = software;
+    } else if (classified.intent.startsWith('general.') && asksForAnalysis(input.message)) {
+      intent.intent = 'data.describe';
+    }
+  }
 
   const referencesPrevious = detectReference(input.message, input.hasPriorWork ?? false);
 

@@ -13,16 +13,28 @@
  */
 
 import { planCleaning } from '@/analysis';
-import { inferRoles, type AnalysisIntent } from '@/analysis/infer-roles';
+import { descriptiveTables } from '@/analysis/descriptives';
+import { inferRoles, isGrouping, isQuantitative, itemGroups, type AnalysisIntent } from '@/analysis/infer-roles';
+import { constructsFromItems, pathsFromText } from '@/analysis/measurement';
 import type { RoleAssignment } from '@/analysis/inference/recommend';
-import type { ColumnProfile } from '@/analysis/types';
+import type { ColumnProfile, DatasetProfile } from '@/analysis/types';
 
 import { chooseTestFor, columnsFor } from './analysis-choice';
-import { columnsNamedIn } from './data-requests';
+import { asksForEverything, columnsNamedIn } from './data-requests';
 import { loadForAnalysis } from './dataset.service';
+import { runCbSem, runPls } from './pls.service';
 import { runAnalysis } from './statistics.service';
 
-export type DisplayKind = 'profile' | 'cleaning' | 'recommendation' | 'analysis' | 'reliability';
+export type DisplayKind =
+  | 'profile'
+  | 'descriptives'
+  | 'note'
+  | 'cleaning'
+  | 'recommendation'
+  | 'analysis'
+  | 'reliability'
+  | 'pls'
+  | 'cbsem';
 
 export interface AnalysisDisplay {
   kind: DisplayKind;
@@ -125,7 +137,16 @@ export async function analyseDataRequest(input: {
   const profileDisplay: AnalysisDisplay = { kind: 'profile', payload: profile as unknown as Record<string, unknown> };
 
   if (input.intent === 'data.inspect' || input.intent === 'data.describe') {
-    return { status: 'done', displays: [profileDisplay] };
+    const tables: AnalysisDisplay = {
+      kind: 'descriptives',
+      payload: descriptiveTables(profile) as unknown as Record<string, unknown>,
+    };
+    if (!asksForEverything(input.message)) return { status: 'done', displays: [tables] };
+    return { status: 'done', displays: [tables, ...(await everythingElse(input, profile))] };
+  }
+
+  if (input.intent === 'stats.cbSem' || input.intent === 'stats.plsSem') {
+    return structuralModel(input, profile);
   }
 
   if (input.intent === 'data.clean') {
@@ -207,4 +228,137 @@ export async function analyseDataRequest(input: {
       { kind: 'analysis', payload: outcome.result as Record<string, unknown>, runId: outcome.run.id },
     ],
   };
+}
+
+/**
+ * The rest of "analyse it all": the reliability of every scale in the file,
+ * and what can be tested next — said plainly, including when nothing can.
+ */
+async function everythingElse(
+  input: { userId: string; datasetId: string | null; language: 'ar' | 'en'; conversationId?: string | null; projectId?: string | null },
+  profile: DatasetProfile,
+): Promise<AnalysisDisplay[]> {
+  const displays: AnalysisDisplay[] = [];
+  const ar = input.language === 'ar';
+
+  for (const group of itemGroups(profile).filter((items) => items.length >= 3)) {
+    try {
+      const outcome = await runAnalysis({
+        datasetId: input.datasetId as string,
+        userId: input.userId,
+        projectId: input.projectId ?? null,
+        conversationId: input.conversationId ?? null,
+        test: 'reliability.cronbachAlpha',
+        columns: { items: group.map((column) => column.name) },
+      });
+      displays.push({ kind: 'reliability', payload: outcome.result as Record<string, unknown>, runId: outcome.run.id });
+    } catch {
+      /* A scale the engine cannot assess is left out rather than reported wrongly. */
+    }
+  }
+
+  const numbers = profile.columns.filter(isQuantitative);
+  const groups = profile.columns.filter(isGrouping);
+  const scales = constructsFromItems(profile);
+  const next: string[] = [];
+
+  if (numbers.length === 0) {
+    next.push(
+      ar
+        ? 'الملف لا يحتوي على متغيّرات كمية أو مقاييس، لذلك لا تنطبق عليه اختبارات استدلالية (t أو ANOVA أو الانحدار). الجداول أعلاه هي التحليل المناسب له.'
+        : 'The file has no quantitative variables or scales, so inferential tests (t, ANOVA, regression) do not apply. The tables above are the analysis it supports.',
+    );
+  } else {
+    if (groups.length > 0) {
+      next.push(
+        ar
+          ? `مقارنة المجموعات: اكتب مثلًا «قارن ${numbers[0]?.name} بين ${groups[0]?.name}».`
+          : `Group comparison: write, for example, "compare ${numbers[0]?.name} by ${groups[0]?.name}".`,
+      );
+    }
+    if (numbers.length >= 2) {
+      next.push(
+        ar
+          ? `العلاقات: «العلاقة بين ${numbers[0]?.name} و${numbers[1]?.name}»، أو التنبؤ: «هل ${numbers[0]?.name} يتنبأ بـ ${numbers[1]?.name}».`
+          : `Relationships: "relationship between ${numbers[0]?.name} and ${numbers[1]?.name}", or prediction: "does ${numbers[0]?.name} predict ${numbers[1]?.name}".`,
+      );
+    }
+    if (scales.length >= 2) {
+      next.push(
+        ar
+          ? `نمذجة المعادلات البنائية: وجدت ${scales.length} مقاييس (${scales.map((scale) => scale.name).join('، ')}). اكتب «حلل AMOS» للتحليل العاملي التوكيدي، أو «حلل SmartPLS» مع المسارات.`
+          : `Structural equation modelling: ${scales.length} scales found (${scales.map((scale) => scale.name).join(', ')}). Write "analyse with AMOS" for a confirmatory factor analysis, or "SmartPLS" with the paths.`,
+      );
+    }
+  }
+
+  displays.push({ kind: 'note', payload: { title: ar ? 'الخطوة التالية' : 'Next', lines: next } });
+  return displays;
+}
+
+/**
+ * AMOS or SmartPLS: the measurement model from the item names, the paths from
+ * the researcher's words, and the engine for everything else.
+ */
+async function structuralModel(
+  input: { userId: string; datasetId: string | null; intent: string; message: string; language: 'ar' | 'en' },
+  profile: DatasetProfile,
+): Promise<DataAnalysisOutcome> {
+  const ar = input.language === 'ar';
+  const constructs = constructsFromItems(profile);
+  const names = constructs.map((construct) => `${construct.name} (${construct.indicators.join(', ')})`);
+
+  if (constructs.length < 2) {
+    return {
+      status: 'question',
+      displays: [],
+      question: ar
+        ? `نمذجة المعادلات البنائية تحتاج مقياسين على الأقل، لكل منهما فقرات مرقّمة (مثل SQ1، SQ2، SQ3). ${constructs.length === 1 ? `وجدت مقياسًا واحدًا: ${names[0]}.` : 'لم أجد فقرات مرقّمة في الملف.'} ما المتغيّرات الكامنة وفقراتها؟ اكتبها مثل: SQ = q1, q2, q3`
+        : `Structural equation modelling needs at least two scales, each with numbered items (such as SQ1, SQ2, SQ3). ${constructs.length === 1 ? `One was found: ${names[0]}.` : 'No numbered items were found.'} What are the constructs and their items? Write them as: SQ = q1, q2, q3`,
+    };
+  }
+
+  try {
+    if (input.intent === 'stats.cbSem') {
+      /* A confirmatory factor analysis needs no paths: every factor correlates with every other. */
+      const result = await runCbSem({
+        datasetId: input.datasetId as string,
+        userId: input.userId,
+        model: { constructs, paths: [] } as never,
+      });
+      return { status: 'done', displays: [{ kind: 'cbsem', payload: result as unknown as Record<string, unknown> }] };
+    }
+
+    const paths = pathsFromText(input.message, constructs.map((construct) => construct.name));
+    if (paths.length === 0) {
+      return {
+        status: 'question',
+        displays: [],
+        question: ar
+          ? `وجدت في الملف هذه المقاييس: ${names.join('؛ ')}.\nما المسارات بينها؟ اكتب كل مسار من المؤثِّر إلى المتأثِّر، مثل: ${constructs[0]?.name} -> ${constructs[1]?.name}`
+          : `The file contains these scales: ${names.join('; ')}.\nWhat are the paths between them? Write each from cause to effect, for example: ${constructs[0]?.name} -> ${constructs[1]?.name}`,
+      };
+    }
+
+    const used = new Set(paths.flatMap((path) => [path.from, path.to]));
+    const analysis = await runPls({
+      datasetId: input.datasetId as string,
+      userId: input.userId,
+      model: { constructs: constructs.filter((construct) => used.has(construct.name)), paths },
+    });
+    return { status: 'done', displays: [{ kind: 'pls', payload: analysis as unknown as Record<string, unknown> }] };
+  } catch (error) {
+    /* The engine's own reason — a constant item, too few rows — is the answer. */
+    const message =
+      error && typeof error === 'object' && 'messageAr' in error && ar
+        ? String((error as { messageAr: unknown }).messageAr)
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    return {
+      status: 'question',
+      displays: [],
+      question: ar ? `تعذّر تقدير النموذج: ${message}` : `The model could not be estimated: ${message}`,
+    };
+  }
 }

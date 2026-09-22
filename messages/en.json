@@ -1545,7 +1545,10 @@
     }
   },
   "task": {
-    "diagram": {"png": "PNG image", "svg": "SVG"},
+    "diagram": {
+      "png": "PNG image",
+      "svg": "SVG"
+    },
     "result": "Result",
     "copy": "Copy",
     "copied": "Copied",
@@ -1645,5 +1648,37 @@
     "checkWarned": "The quality check raised notes",
     "truncated": "This is a preview of the beginning only. Download the file to read it in full.",
     "noPreview": "No preview is available for this file. You can download and open it."
+  },
+  "tables": {
+    "descriptives": "Descriptive Statistics",
+    "variable": "Variable",
+    "minimum": "Minimum",
+    "maximum": "Maximum",
+    "mean": "Mean",
+    "sd": "Std. Deviation",
+    "skewness": "Skewness",
+    "kurtosis": "Kurtosis",
+    "value": "Value",
+    "frequency": "Frequency",
+    "percent": "Percent",
+    "validPercent": "Valid Percent",
+    "cumulativePercent": "Cumulative Percent",
+    "missing": "Missing",
+    "total": "Total",
+    "skipped": "Not tabulated (identifiers or free text): {columns}",
+    "fit": "Model fit",
+    "verdict": {
+      "good": "good fit",
+      "acceptable": "acceptable fit",
+      "poor": "poor fit"
+    },
+    "index": "Index",
+    "criterion": "Criterion",
+    "loadings": "Standardised factor loadings",
+    "construct": "Construct",
+    "item": "Item",
+    "standardised": "Loading",
+    "reliabilityValidity": "Composite reliability and convergent validity",
+    "factorCorrelations": "Correlations between constructs"
   }
 }

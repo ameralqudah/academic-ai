@@ -4213,6 +4213,82 @@ async function main() {
     check('with no research at all, the reply is what there is', replyOnly.status === 'resolved' && replyOnly.candidate.taskId, chat.id);
   }
 
+  /* --- a question asked after the paper knows the paper ---------------- */
+
+  {
+    /*
+     * "اعطيني الابعاد لكل متغير", asked in the conversation where a paper on
+     * digital transformation and service quality had just been written, was
+     * answered with "tell me your variables". The paper lived in task steps and
+     * the conversation held a one-line restatement; nothing carried the one
+     * to the other.
+     */
+    const asker = await newUser('earlier-work');
+    const thread = await startConversation({ userId: asker, firstMessage: 'اكتب بحث عن التحول الرقمي' });
+
+    const paper = await tasksRepo.create({
+      userId: asker,
+      conversationId: thread.id,
+      request: 'اكتب بحث عن التحول الرقمي',
+      locale: 'ar',
+      status: 'COMPLETED',
+      context: {},
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+    const [wrote] = await tasksRepo.addSteps([
+      { taskId: paper.id, ordinal: 0, capability: 'document.write', label: 'w', status: 'PENDING', dependsOn: [], input: {} },
+    ]);
+    await tasksRepo.completeStep(wrote!.id, {
+      outputs: [
+        makeOutput({ taskId: paper.id, stepId: wrote!.id, capability: 'document.write', projectId: null }, 'prose.v1', {
+          text: '# أثر التحول الرقمي على جودة الخدمة\n\nمتغيرات الدراسة: التحول الرقمي (البنية التحتية، المهارات الرقمية) وجودة الخدمة (الاعتمادية، الاستجابة).',
+        }),
+      ],
+    });
+
+    const { buildContextPrompt } = await import('@/server/context/manager');
+
+    /* What a direct answer in that conversation is given. */
+    const built = await buildContextPrompt({
+      purpose: 'answer',
+      request: 'اعطيني الابعاد لكل متغير',
+      userId: asker,
+      conversationId: thread.id,
+      locale: 'ar',
+    });
+    assertTrue('the paper written in the conversation is in the context', built.prompt.includes('المهارات الرقمية'));
+    assertTrue('marked as the assistant\'s own earlier work', /Earlier in this conversation the assistant wrote/.test(built.prompt));
+
+    /* And what a task started in that conversation is told. */
+    const { startTask: start, cancelTask: stop } = await import('@/server/services/task.service');
+    const follow = await start({
+      userId: asker,
+      request: 'اكتب المنهجية',
+      locale: 'ar',
+      conversationId: thread.id,
+    });
+    const stored = await tasksRepo.findOwned(follow.id, asker);
+    const earlier = stored?.context.earlierWork as { taskId?: string; opening?: string } | undefined;
+
+    check('a task started there is told what the conversation holds', earlier?.taskId, paper.id);
+    assertTrue('by its opening', (earlier?.opening ?? '').includes('التحول الرقمي'));
+    check('and where it was asked', stored?.context.conversationId, thread.id);
+
+    /* A task's own context excludes itself, so a paper is not "earlier" to its own steps. */
+    const own = await buildContextPrompt({
+      purpose: 'execute',
+      request: 'x',
+      userId: asker,
+      conversationId: thread.id,
+      taskId: paper.id,
+      locale: 'ar',
+    });
+    check('a task does not see its own writing as earlier work', own.prompt.includes('Earlier in this conversation'), false);
+
+    await stop(follow.id, asker);
+  }
+
 
   /* ------------------------------------------ live progress and resumption */
 

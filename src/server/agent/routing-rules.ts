@@ -104,6 +104,7 @@ export function decide(input: {
   wantsFile: boolean;
   referencesPrevious: RouteDecision['referencesPrevious'];
   hasDataset: boolean;
+  asksAboutEarlierWork?: boolean;
 }): { path: RoutePath; reason: string; confidence: number } {
   /*
    * A file was asked for. Producing one is a task with an artifact at the end,
@@ -112,6 +113,15 @@ export function decide(input: {
    */
   if (input.wantsFile) {
     return { path: 'agent', reason: 'a file was requested', confidence: 0.9 };
+  }
+
+  /*
+   * A short question about what is already here. Before the tool rule, because
+   * the classifier reads "the dimensions of each variable" as research and the
+   * research is on screen; a task would start without it.
+   */
+  if (input.asksAboutEarlierWork && ABOUT_THE_WRITING.has(input.intent.intent)) {
+    return { path: 'fast', reason: 'a question about earlier work', confidence: 0.8 };
   }
 
   /* The intent names work that needs a tool: a search, a computation, a file. */
@@ -201,6 +211,45 @@ export function asksForAFileOfIt(message: string): boolean {
   return (
     NAMES_FORMAT.test(message) && ASKS_TO_BE_HANDED.test(message) && !BRINGS_A_SUBJECT.test(message)
   );
+}
+
+/* Verbs that ask for something to be made, which is a task whatever else the message says. */
+const ASKS_TO_MAKE = new RegExp(
+  [
+    String.raw`\b(?:write|draft|compose|search|find|look\s*up|analy[sz]e|run|compute|calculate|generate|create|build|design|make|produce|prepare|review|summari[sz]e)\b`,
+    `${WORD_START}(?:[أا]كتب|اكتبي|[أا]نشئ|[أا]عد|[أا]عدّ|جهز|جهّز|صمم|صمّم|[أا]نتج|[أا]عمل|اعمللي|سو[يّ]|سوّي|ابحث|دو[ّ]?ر|حلل|حلّل|احسب|شغل|شغّل|ول[ّ]?د|راجع|لخ[ّ]?ص|اختصر|طو[ّ]?ل|عد[ّ]?ل|صح[ّ]?ح)`,
+  ].join('|'),
+  'iu',
+);
+
+/*
+ * Intents a short question can turn out to be about the writing on screen.
+ * A literature or web search is asked for its sources and is never satisfied
+ * from the conversation; a statistic needs the engines. Only the intents that
+ * concern the document itself can be answered by reading it.
+ */
+const ABOUT_THE_WRITING = new Set(['research.section', 'research.plan', 'research.results']);
+
+/**
+ * Whether a message is a question about work already in the conversation.
+ *
+ * "اعطيني الابعاد لكل متغير", asked under a finished paper, was classified as
+ * a research section — reasonably, it is about a paper — and became a task.
+ * A task starts from nothing; the model in it had never seen the paper and
+ * asked which variables were meant. A direct answer sees the conversation and
+ * would have listed them.
+ *
+ * Short, brings no verb of making, names no file, and there is earlier work
+ * for it to be about. "Write the methodology" is not this — it asks for a
+ * chapter, which is a task, and the task is now told what it continues.
+ */
+export function asksAboutEarlierWork(message: string, hasPriorWork: boolean): boolean {
+  if (!hasPriorWork) return false;
+
+  const words = message.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 14) return false;
+
+  return !ASKS_TO_MAKE.test(message) && !NAMES_FORMAT.test(message);
 }
 
 /**

@@ -14,6 +14,7 @@ import { capabilityFor, DEFAULT_BUDGET, type TaskBudget } from '@/server/tasks/c
 import { runTask } from '@/server/tasks/executor';
 import { planAdditionalSteps, planTask } from '@/server/tasks/planner';
 import { isActionable } from '@/server/tasks/recommendations';
+import { latestEarlierWork } from '@/server/agent/earlier-work';
 
 /**
  * The reason behind a thrown error, where the message reveals one.
@@ -96,6 +97,19 @@ export async function startTask(input: {
    */
   const budget: TaskBudget = { ...DEFAULT_BUDGET, ...input.budget };
 
+  /*
+   * The opening of what the conversation already holds, for the planner.
+   *
+   * The planner sees the request and the context and nothing else. Asked for
+   * "the methodology" in a conversation that holds a paper, it planned a search
+   * for a paper on methodology. Told what exists, it plans a chapter of it.
+   */
+  const earlier = input.conversationId
+    ? await latestEarlierWork({ userId: input.userId, conversationId: input.conversationId }).catch(
+        () => null,
+      )
+    : null;
+
   const task = await tasksRepo.create({
     userId: input.userId,
     projectId: input.projectId ?? null,
@@ -108,6 +122,17 @@ export async function startTask(input: {
       ...(input.references ? { references: input.references } : {}),
       /* The request itself, so a handler can read what was asked. */
       request: input.request,
+      /* Where it was asked, so a step can read what the conversation already holds. */
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      ...(earlier?.research
+        ? {
+            earlierWork: {
+              taskId: earlier.taskId,
+              heading: earlier.heading,
+              opening: earlier.text.slice(0, 300),
+            },
+          }
+        : {}),
       ...(input.userLanguage ? { userLanguage: input.userLanguage } : {}),
     },
     budget: budget as unknown as Record<string, number>,

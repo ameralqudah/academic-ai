@@ -4462,5 +4462,53 @@ console.log('\nwhat a model costs');
   check('while a file with nothing behind it still is', fresh.length, 2);
 }
 
+/* ------------------------------------------------------------------ */
+/* A question about the paper on screen                                 */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nA question about the paper on screen');
+
+  const { asksAboutEarlierWork, decide } = await import('../src/server/agent/routing-rules');
+
+  for (const message of [
+    'اعطيني الابعاد لكل متغير',
+    'شو الفرضيات؟',
+    'what are the hypotheses',
+    'ما هي متغيرات الدراسة',
+    'explain the second paragraph',
+  ]) {
+    check(`"${message}" asks about earlier work`, asksAboutEarlierWork(message, true), true);
+  }
+
+  for (const message of [
+    'اكتب فصل المنهجية',
+    'write the methodology',
+    'ابحث عن دراسات جديدة',
+    'اعطيني اياه ملف وورد',
+    'لخص البحث',
+    'I need you to write me a complete literature review chapter about digital transformation in hospitals with sources',
+  ]) {
+    check(`"${message}" asks for work to be done`, asksAboutEarlierWork(message, true), false);
+  }
+
+  check('with nothing earlier there is nothing to ask about', asksAboutEarlierWork('شو الفرضيات؟', false), false);
+
+  const route = (intent: string, about: boolean) =>
+    decide({
+      intent: { intent: intent as never, confidence: 0.9 },
+      needsTools: true,
+      wantsFile: false,
+      referencesPrevious: null,
+      hasDataset: false,
+      asksAboutEarlierWork: about,
+    }).path;
+
+  /* The production case: classified as a research section, and it was about one. */
+  check('a question classified as a research section is answered, not planned', route('research.section', true), 'fast');
+  check('a literature search is still a search', route('research.literature', true), 'agent');
+  check('and a statistic still needs the engines', route('stats.relate', true), 'agent');
+  check('the same intent with real work to do is a task', route('research.section', false), 'agent');
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

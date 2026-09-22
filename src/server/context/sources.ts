@@ -22,6 +22,7 @@ import * as conversationsRepo from '@/server/repositories/conversations.reposito
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
+import { earlierWorkIn } from '@/server/agent/earlier-work';
 import type { OutputReference } from '@/server/tasks/contracts';
 
 import { retrievePassages } from '@/server/files/retrieve';
@@ -47,8 +48,9 @@ export interface SourceScope {
  * that took the sum of six queries would be felt on every message.
  */
 export async function collectFragments(scope: SourceScope): Promise<ContextFragment[]> {
-  const [conversation, project, task, file, artifacts] = await Promise.all([
+  const [conversation, earlier, project, task, file, artifacts] = await Promise.all([
     conversationFragments(scope).catch(recover('conversation')),
+    earlierWorkFragments(scope).catch(recover('earlier-work')),
     projectFragments(scope).catch(recover('project')),
     taskFragments(scope).catch(recover('task')),
     fileFragments(scope).catch(recover('file')),
@@ -58,6 +60,7 @@ export async function collectFragments(scope: SourceScope): Promise<ContextFragm
   return [
     ...instructionFragments(scope),
     ...conversation,
+    ...earlier,
     ...project,
     ...task,
     ...file,
@@ -135,6 +138,67 @@ async function conversationFragments(scope: SourceScope): Promise<ContextFragmen
         },
       }),
     );
+}
+
+/**
+ * What earlier tasks in this conversation wrote.
+ *
+ * The conversation's own messages hold the requests and one-line restatements;
+ * the papers those requests produced live in task steps. Without this, a
+ * question about the paper on screen was answered by a model that had never
+ * seen it.
+ *
+ * The most recent piece in full, within reason — six thousand characters is
+ * the whole of a short paper and the opening of a long one — and the pieces
+ * before it by their openings. Model-generated, because it is the assistant's
+ * own draft and must not come back to it as established fact.
+ */
+async function earlierWorkFragments(scope: SourceScope): Promise<ContextFragment[]> {
+  if (!scope.conversationId) return [];
+
+  const works = await earlierWorkIn({
+    userId: scope.userId,
+    conversationId: scope.conversationId,
+    excludeTaskId: scope.taskId ?? null,
+    limit: 3,
+  });
+
+  return works.flatMap((work, index) => {
+    const whole = index === 0;
+    const text = whole ? work.text.slice(0, 6000) : work.text.slice(0, 400);
+    const cut = text.length < work.text.length ? '…' : '';
+    const what = work.research ? 'wrote' : 'answered';
+    const title = work.heading ? ` "${work.heading}"` : '';
+
+    const fragments = [
+      fragment({
+        id: `earlier-${work.outputId}`,
+        kind: 'tool-result',
+        authority: 'model-generated',
+        content: `Earlier in this conversation the assistant ${what}${title}:\n${text}${cut}`,
+        provenance: { source: work.capability, id: work.outputId, at: work.at.toISOString() },
+        relevance: whole ? 0.85 : 0.5,
+      }),
+    ];
+
+    if (whole && work.references.length > 0) {
+      fragments.push(
+        fragment({
+          id: `earlier-sources-${work.outputId}`,
+          kind: 'research',
+          authority: 'external-evidence',
+          content: `Sources that work cites, by number: ${work.references
+            .slice(0, 12)
+            .map((reference, position) => `[${position + 1}] ${reference.title ?? ''} (${reference.year ?? 'n.d.'})`)
+            .join('; ')}`,
+          provenance: { source: 'earlier-work', id: `${work.outputId}-sources`, at: work.at.toISOString() },
+          relevance: 0.6,
+        }),
+      );
+    }
+
+    return fragments;
+  });
 }
 
 /**

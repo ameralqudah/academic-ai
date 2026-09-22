@@ -23,7 +23,7 @@
 
 import { logger } from '@/lib/logger';
 import { classifyIntent, type IntentResult } from '@/agents/intent';
-import { decide, detectReference } from './routing-rules';
+import { asksAboutEarlierWork, decide, detectReference } from './routing-rules';
 import type { DatasetProfile } from '@/analysis/types';
 
 export type RoutePath = 'fast' | 'agent';
@@ -194,6 +194,8 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
     wantsFile,
     referencesPrevious,
     hasDataset: input.hasDataset ?? false,
+    asksAboutEarlierWork:
+      referencesPrevious === null && asksAboutEarlierWork(input.message, input.hasPriorWork ?? false),
   });
 
   logger.info('route.decided', {

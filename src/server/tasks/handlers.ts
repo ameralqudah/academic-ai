@@ -60,6 +60,7 @@ import { broaden, topicOf } from './query';
 import { instructionFrom } from './step-instruction';
 import { sourcesAsMaterial } from './found-sources';
 import { noDataRule } from '@/server/tasks/no-data-rule';
+import { latestEarlierWork } from '@/server/agent/earlier-work';
 
 /**
  * The producer identity every output carries.
@@ -231,6 +232,15 @@ export function registerAllHandlers(): void {
       locale: context.locale,
       projectId: null,
       history: [],
+      /*
+       * The conversation this was asked in, so the answer knows what came
+       * before it. A question about the paper on screen was answered by a
+       * model that had never seen the paper.
+       */
+      context: {
+        conversationId: (context.context.conversationId as string | undefined) ?? null,
+        taskId: context.taskId,
+      },
       /* What the steps before this one found, when they found anything. */
       material: sourcesAsMaterial(referencesFrom(context)),
     });
@@ -760,6 +770,22 @@ export function registerAllHandlers(): void {
     const priorWork = proseFrom(context);
 
     /*
+     * What the conversation already holds, when this task wrote nothing
+     * itself. "Write the methodology" after a paper is a chapter of that
+     * paper — its topic, its variables, its sources — not a fresh start.
+     */
+    const conversationId = context.context.conversationId as string | undefined;
+    const earlier =
+      !priorWork && conversationId
+        ? await latestEarlierWork({
+            userId: context.userId,
+            conversationId,
+            excludeTaskId: context.taskId,
+          }).catch(() => null)
+        : null;
+    const continues = earlier?.research ? earlier : null;
+
+    /*
      * The evidence rule, applied where it matters: writing that presents
      * findings must be grounded in what earlier steps retrieved. Writing with
      * no sources is allowed — an introduction or a methodology description
@@ -804,10 +830,16 @@ export function registerAllHandlers(): void {
     /* Sources support what others found; only an analysis supports what this study found. */
     const evidenceRule = analysisBlock ? '' : noDataRule(language);
 
+    const earlierBlock = continues
+      ? language === 'ar'
+        ? `\n\nهذا القسم يتبع عملاً كُتب في هذه المحادثة من قبل. تابع موضوعه ومتغيراته ومصطلحاته ولا تكرر ما فيه:\n${continues.text.slice(0, 5000)}`
+        : `\n\nThis section belongs to work already written in this conversation. Keep to its topic, variables and terms, and do not repeat what it says:\n${continues.text.slice(0, 5000)}`
+      : '';
+
     const instruction =
       language === 'ar'
-        ? `اكتب قسم «${section}» من البحث بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}${evidenceRule}`
-        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}${evidenceRule}`;
+        ? `اكتب قسم «${section}» من البحث بأسلوب أكاديمي وفقرات متصلة.${priorWork ? ' وتابع ما كُتب في الأقسام السابقة.' : ''}${sourceBlock}${analysisBlock}${evidenceRule}${earlierBlock}`
+        : `Write the "${section}" section${priorWork ? ' following on from the earlier sections' : ''}.${sourceBlock}${analysisBlock}${evidenceRule}${earlierBlock}`;
 
     /*
      * The model chosen for this step, rather than the one configured globally.
@@ -820,7 +852,7 @@ export function registerAllHandlers(): void {
      */
     const requirements = requirementsFor({
       capability: 'document.write',
-      contextTokens: estimateTokens(`${instruction}${sourceBlock}${analysisBlock}`),
+      contextTokens: estimateTokens(instruction),
     });
 
     const selection = await selectModel(requirements);

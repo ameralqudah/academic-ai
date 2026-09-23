@@ -12,6 +12,7 @@
 
 import { relations, sql } from 'drizzle-orm';
 import {
+  bigserial,
   boolean,
   doublePrecision,
   foreignKey,
@@ -1302,6 +1303,8 @@ export const graphNodes = pgTable(
     frozenAt: timestamp('frozen_at', { withTimezone: true, mode: 'date' }),
     createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdByRunId: text('created_by_run_id'),
+    /** P1-D: the research-run step that wrote this, when a run's tool did. */
+    createdByStepId: text('created_by_step_id'),
     /** user | agent | import | engine */
     origin: varchar('origin', { length: 16 }).default('user').notNull(),
     createdAt: createdAt(),
@@ -1310,6 +1313,10 @@ export const graphNodes = pgTable(
   (table) => [
     index('graph_nodes_project_idx').on(table.projectId, table.type, table.status),
     uniqueIndex('graph_nodes_project_id_unique').on(table.projectId, table.id),
+    /** P1-D idempotency: a run step creates at most one node of a type. */
+    uniqueIndex('graph_nodes_step_type_unique')
+      .on(table.projectId, table.createdByStepId, table.type)
+      .where(sql`created_by_step_id is not null`),
   ],
 );
 
@@ -1329,6 +1336,8 @@ export const nodeVersions = pgTable(
     impactReportHash: varchar('impact_report_hash', { length: 64 }),
     createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdByRunId: text('created_by_run_id'),
+    /** P1-D: the research-run step that wrote this, when a run's tool did. */
+    createdByStepId: text('created_by_step_id'),
     createdAt: createdAt(),
   },
   (table) => [
@@ -1363,6 +1372,8 @@ export const graphEdges = pgTable(
     attrs: jsonb('attrs').$type<Record<string, unknown>>().default({}).notNull(),
     createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdByRunId: text('created_by_run_id'),
+    /** P1-D: the research-run step that wrote this, when a run's tool did. */
+    createdByStepId: text('created_by_step_id'),
     /** user | agent | import | engine */
     origin: varchar('origin', { length: 16 }).default('user').notNull(),
     createdAt: createdAt(),
@@ -1456,6 +1467,8 @@ export const aiUsageEvents = pgTable(
     taskId: text('task_id'),
     jobId: text('job_id'),
     runId: text('run_id'),
+    /** P1-D: the research-run step this call belongs to. */
+    stepId: text('step_id'),
     purpose: varchar('purpose', { length: 64 }).notNull(),
     /** generate | stream | structured | tools | embed */
     kind: varchar('kind', { length: 16 }).notNull(),
@@ -1535,6 +1548,8 @@ export const aiToolCalls = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
     runId: text('run_id'),
+    /** P1-D: the research-run step this call belongs to. */
+    stepId: text('step_id'),
     taskId: text('task_id'),
     createdAt: createdAt(),
     finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
@@ -1611,9 +1626,15 @@ export const datasetTransformations = pgTable(
     parameters: jsonb('parameters').$type<Record<string, unknown>>().notNull(),
     report: jsonb('report').$type<Record<string, unknown>>().notNull(),
     engineVersion: varchar('engine_version', { length: 64 }).notNull(),
+    /** P1-D: the run step's idempotency key; the same key on the same input gives the same version. */
+    idempotencyKey: varchar('idempotency_key', { length: 64 }),
     createdAt: createdAt(),
   },
-  (table) => [uniqueIndex('dataset_transformations_output_idx').on(table.outputVersionId), index('dataset_transformations_input_idx').on(table.inputVersionId)],
+  (table) => [
+    uniqueIndex('dataset_transformations_output_idx').on(table.outputVersionId),
+    index('dataset_transformations_input_idx').on(table.inputVersionId),
+    uniqueIndex('dataset_transformations_idempotency_idx').on(table.inputVersionId, table.idempotencyKey),
+  ],
 );
 
 /** A machine-readable analysis specification, pinned to a dataset version. Immutable. */
@@ -1639,9 +1660,15 @@ export const statSpecs = pgTable(
     /** Who proposed it: `user`, or `assistant` (an LLM proposal a person then ran). */
     origin: varchar('origin', { length: 16 }).default('user').notNull(),
     graphNodeId: text('graph_node_id'),
+    /** P1-D: the run step's idempotency key; a retried step finds its specification. */
+    idempotencyKey: varchar('idempotency_key', { length: 64 }),
     createdAt: createdAt(),
   },
-  (table) => [index('stat_specs_project_idx').on(table.projectId, table.createdAt), index('stat_specs_version_idx').on(table.datasetVersionId)],
+  (table) => [
+    index('stat_specs_project_idx').on(table.projectId, table.createdAt),
+    index('stat_specs_version_idx').on(table.datasetVersionId),
+    uniqueIndex('stat_specs_idempotency_idx').on(table.idempotencyKey),
+  ],
 );
 
 /**
@@ -1777,3 +1804,164 @@ export type StatEstimate = typeof statEstimates.$inferSelect;
 export type StatTable = typeof statTables.$inferSelect;
 export type StatFigure = typeof statFigures.$inferSelect;
 
+/* -------------------------------------------------------------------------- */
+/*          P1-D: research runs — the controlled execution of tools           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One controlled execution: an intent, the plan made for it, and its steps.
+ * Status transitions, identity and size limits are enforced by triggers and
+ * CHECKs (migration 0014); access by row-level security (0015) on the paths
+ * that run under the restricted role.
+ */
+export const researchRuns = pgTable(
+  'research_runs',
+  {
+    id: id(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => researchProjects.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    intent: text('intent').notNull(),
+    /** Bounded inputs named with the intent (e.g. a dataset version id). */
+    context: jsonb('context').$type<Record<string, unknown>>().default({}).notNull(),
+    /** The validated plan (tools, inputs, dependencies). */
+    plan: jsonb('plan').$type<Record<string, unknown>>(),
+    /** QUEUED | PLANNING | RUNNING | WAITING_APPROVAL | SUCCEEDED | FAILED | CANCELLED */
+    status: varchar('status', { length: 24 }).default('QUEUED').notNull(),
+    stopReason: varchar('stop_reason', { length: 40 }),
+    /** The plan tier the limits were resolved for, at creation. */
+    tier: varchar('tier', { length: 16 }).notNull(),
+    limits: jsonb('limits').$type<Record<string, number>>().notNull(),
+    spent: jsonb('spent').$type<Record<string, number>>().default({}).notNull(),
+    replans: integer('replans').default(0).notNull(),
+    /** The planner's model call: provider, model, call id. */
+    planner: jsonb('planner').$type<Record<string, unknown>>(),
+    cancelRequestedAt: timestamp('cancel_requested_at', { withTimezone: true, mode: 'date' }),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    attempts: integer('attempts').default(0).notNull(),
+    idempotencyKey: varchar('idempotency_key', { length: 200 }),
+    error: jsonb('error').$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    index('research_runs_project_idx').on(table.projectId, table.createdAt),
+    index('research_runs_user_status_idx').on(table.userId, table.status),
+    uniqueIndex('research_runs_idempotency_idx').on(table.userId, table.idempotencyKey),
+  ],
+);
+
+/** One tool call of a run. Its identity, tool and input never change once written. */
+export const runSteps = pgTable(
+  'run_steps',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => researchRuns.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    tool: varchar('tool', { length: 80 }).notNull(),
+    toolVersion: varchar('tool_version', { length: 20 }).notNull(),
+    label: varchar('label', { length: 200 }).notNull(),
+    /** Sequence numbers of the steps this one waits for. */
+    dependsOn: jsonb('depends_on').$type<number[]>().default([]).notNull(),
+    /** The input as planned. */
+    input: jsonb('input').$type<Record<string, unknown>>().notNull(),
+    /** The input after schema validation (and references to earlier steps resolved). */
+    validatedInput: jsonb('validated_input').$type<Record<string, unknown>>(),
+    inputHash: varchar('input_hash', { length: 64 }),
+    /** QUEUED | AUTHORIZED | WAITING_APPROVAL | RUNNING | SUCCEEDED | FAILED | CANCELLED | SKIPPED */
+    status: varchar('status', { length: 24 }).default('QUEUED').notNull(),
+    attempts: integer('attempts').default(0).notNull(),
+    maxAttempts: integer('max_attempts').notNull(),
+    /** The policy decision: outcome, rules, reasons, role, tier. */
+    policy: jsonb('policy').$type<Record<string, unknown>>(),
+    approvalId: text('approval_id'),
+    /** sha256(project | run | seq | tool | version | validated input): unique, so a step's effect happens once. */
+    idempotencyKey: varchar('idempotency_key', { length: 64 }),
+    /** A token written with each claim; settles apply only under the current claim. */
+    claimToken: varchar('claim_token', { length: 64 }),
+    output: jsonb('output').$type<Record<string, unknown>>(),
+    /** What the step produced, by reference: `{ kind, id }`. */
+    outputRef: jsonb('output_ref').$type<Record<string, unknown>>(),
+    error: jsonb('error').$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+    durationMs: integer('duration_ms'),
+  },
+  (table) => [
+    uniqueIndex('run_steps_run_seq_idx').on(table.runId, table.seq),
+    uniqueIndex('run_steps_idempotency_idx').on(table.idempotencyKey),
+  ],
+);
+
+/** An approval request for one exact action, identified by its hash. Single use. */
+export const runApprovals = pgTable(
+  'run_approvals',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => researchRuns.id, { onDelete: 'cascade' }),
+    stepId: text('step_id')
+      .notNull()
+      .references(() => runSteps.id, { onDelete: 'cascade' }),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => researchProjects.id, { onDelete: 'cascade' }),
+    /** Who the run belongs to (the requester). */
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    actionHash: varchar('action_hash', { length: 64 }).notNull(),
+    /** What exactly would happen: tool, version, input digest, targets, summary, impact. */
+    action: jsonb('action').$type<Record<string, unknown>>().notNull(),
+    reason: varchar('reason', { length: 64 }).notNull(),
+    /** PENDING | APPROVED | REJECTED | EXPIRED | CONSUMED */
+    status: varchar('status', { length: 16 }).default('PENDING').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    decidedBy: text('decided_by').references(() => users.id, { onDelete: 'set null' }),
+    decidedAt: timestamp('decided_at', { withTimezone: true, mode: 'date' }),
+    consumedAt: timestamp('consumed_at', { withTimezone: true, mode: 'date' }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index('run_approvals_run_idx').on(table.runId, table.status),
+    /** At most one open request per step. */
+    uniqueIndex('run_approvals_step_open_idx').on(table.stepId).where(sql`status in ('PENDING', 'APPROVED')`),
+  ],
+);
+
+/** The append-only record of a run: what happened, why, and on whose behalf. */
+export const runEvents = pgTable(
+  'run_events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => researchRuns.id, { onDelete: 'cascade' }),
+    stepId: text('step_id'),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => researchProjects.id, { onDelete: 'cascade' }),
+    /** The actor: the run's user, or the person who decided an approval. */
+    userId: text('user_id').notNull(),
+    type: varchar('type', { length: 40 }).notNull(),
+    data: jsonb('data').$type<Record<string, unknown>>().default({}).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [index('run_events_run_idx').on(table.runId, table.id)],
+);
+
+export type ResearchRun = typeof researchRuns.$inferSelect;
+export type RunStep = typeof runSteps.$inferSelect;
+export type RunApproval = typeof runApprovals.$inferSelect;
+export type RunEvent = typeof runEvents.$inferSelect;

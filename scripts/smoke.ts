@@ -1280,8 +1280,13 @@ assertTrue(
   'but it does not refuse non-academic questions',
   !general.includes('You are not a general-purpose chatbot'),
 );
-assertTrue('and it names what the product cannot do', general.includes('It cannot yet'));
-assertTrue('including PLS-SEM', general.includes('PLS-SEM'));
+assertTrue('and it names what the product cannot do', general.includes('It cannot:'));
+assertTrue('such as SPSS .sav files', general.includes('.sav'));
+/* And what it can, so it never tells a researcher a built feature does not exist. */
+assertTrue('it knows it can model with PLS-SEM', general.includes('PLS-SEM'));
+assertTrue('and with CB-SEM', general.includes('CB-SEM'));
+assertTrue('it knows it can draw charts', general.includes('bar charts and histograms'));
+assertTrue('and produce Word files', general.includes('Word, PDF, PowerPoint'));
 
 check('the prompt follows the user into Arabic', generalPrompt({ locale: 'ar' }).includes('Answer in Arabic'), true);
 check('and into English', generalPrompt({ locale: 'en' }).includes('Answer in English'), true);

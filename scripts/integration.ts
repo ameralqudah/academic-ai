@@ -2357,6 +2357,35 @@ async function main() {
     assertTrue('and the one that waited on it', executed.includes('document.write'));
   }
 
+  /* ------- 7a: asking twice is not failing twice ------------------------- */
+
+  {
+    /*
+     * A question is not an attempt. It was recorded as one: a step that asked
+     * "which variables?", was answered with something that still did not name
+     * them, and asked again, was marked "failed after 2 attempts" — ending a
+     * task in which nothing had gone wrong.
+     */
+    executed.length = 0;
+
+    const task = await makeTask([{ key: 'search', capability: 'academic.search', input: { needsInput: true } }]);
+
+    for (let round = 0; round < 3; round += 1) {
+      await runTask(task.id);
+      const asking = await tasksRepo.findAny(task.id);
+      check(`round ${round + 1}: the task is still waiting for an answer`, asking?.status, 'WAITING_FOR_INPUT');
+      const [step] = await tasksRepo.stepsOf(task.id);
+      check(`round ${round + 1}: and its step is still to run`, step?.status, 'PENDING');
+    }
+
+    const [asked] = await tasksRepo.stepsOf(task.id);
+    check('no question was counted as an attempt', asked?.attempts, 0);
+
+    await tasksRepo.updateStepInput(asked?.id as string, { needsInput: false });
+    await runTask(task.id);
+    check('and the answer still completes it', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
+  }
+
   /* ------- 7b: a step the task added to itself may not stop to ask ------- */
 
   {

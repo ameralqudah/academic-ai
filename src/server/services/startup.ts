@@ -19,12 +19,23 @@ import { logger } from '@/lib/logger';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { registerAllHandlers } from '@/server/tasks/handlers';
 import { resumeInterrupted } from '@/server/services/task.service';
+import { jobRunner } from '@/server/jobs/mode';
 
 let done = false;
 let running: Promise<void> | null = null;
 
 export async function ensureStaleJobsFailed(): Promise<void> {
   if (done) return;
+
+  /*
+   * With a queue, orphaned jobs are the reaper's work, judged by their leases:
+   * failing everything older than ten minutes here would also fail jobs a live
+   * worker elsewhere is still running.
+   */
+  if (jobRunner() !== 'direct') {
+    done = true;
+    return;
+  }
 
   /*
    * Concurrent first requests share one run rather than racing. Two instances
@@ -85,8 +96,19 @@ export async function ensureTasksReady(): Promise<void> {
     try {
       registerAllHandlers();
 
-      const resumed = await resumeInterrupted();
-      if (resumed > 0) logger.info('startup.tasksResumed', { count: resumed });
+      if (jobRunner() === 'direct') {
+        /*
+         * Without a queue, the previous behaviour: resume what a restart left
+         * running. Kept only as the rollback path — it cannot tell a task
+         * whose process died from one another instance is still running.
+         */
+        const resumed = await resumeInterrupted();
+        if (resumed > 0) logger.info('startup.tasksResumed', { count: resumed });
+      } else if (jobRunner() === 'inline') {
+        /* Normally started by instrumentation; idempotent, so safe here too. */
+        const { startJobWorkers } = await import('@/server/jobs/worker');
+        await startJobWorkers();
+      }
 
       tasksReady = true;
     } catch (error) {

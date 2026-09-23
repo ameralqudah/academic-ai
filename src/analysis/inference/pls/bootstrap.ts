@@ -78,20 +78,16 @@ export interface BootstrapResult {
 }
 
 /**
- * Runs the bootstrap.
- *
- * Deliberately synchronous and single-threaded: it is CPU-bound arithmetic, and
- * the caller is a background job that owns the process for the duration. The
- * `onProgress` callback is what makes it observable, and `shouldStop` is what
- * makes it interruptible — without those, a minute of silence is
- * indistinguishable from a hang.
+ * The bootstrap as a resumable loop: `step` draws and estimates one resample,
+ * `finish` summarises. The synchronous and asynchronous runners below share
+ * it, so both produce identical results for the same seed.
  */
-export function bootstrapPls(
+function createBootstrap(
   model: PlsModel,
   data: Map<string, number[]>,
   original: PlsEstimate,
-  options: BootstrapOptions = {},
-): BootstrapResult {
+  options: BootstrapOptions,
+) {
   const resamples = options.resamples ?? 5000;
   const level = options.confidenceLevel ?? 0.95;
   const seed = options.seed ?? 20260101;
@@ -122,9 +118,7 @@ export function bootstrapPls(
   let failed = 0;
   let lastReported = 0;
 
-  for (let iteration = 0; iteration < resamples; iteration += 1) {
-    if (options.shouldStop?.()) break;
-
+  function step(iteration: number): void {
     /* Draw n cases with replacement — the bootstrap sample. */
     const draw: number[] = new Array(n);
     for (let i = 0; i < n; i += 1) {
@@ -153,14 +147,14 @@ export function bootstrapPls(
        */
       if (error instanceof PlsError) {
         failed += 1;
-        continue;
+        return;
       }
       throw error;
     }
 
     if (!estimate.converged) {
       failed += 1;
-      continue;
+      return;
     }
 
     /* Sign correction, before anything is recorded. */
@@ -195,33 +189,88 @@ export function bootstrapPls(
     }
   }
 
-  const completed = resamples - failed;
+  function finish(attempted: number): BootstrapResult {
+    const completed = attempted - failed;
 
-  if (completed < resamples * 0.5) {
-    throw new PlsError('analysis.pls.error.bootstrapUnstable', {
+    if (completed < attempted * 0.5) {
+      throw new PlsError('analysis.pls.error.bootstrapUnstable', {
+        failed,
+        resamples: attempted,
+      });
+    }
+
+    const originalPaths = new Map(original.pathCoefficients);
+    const originalLoadings = new Map(
+      original.outer.map((entry) => [`${entry.construct}:${entry.indicator}`, entry.loading]),
+    );
+    const originalWeights = new Map(
+      original.outer.map((entry) => [`${entry.construct}:${entry.indicator}`, entry.weight]),
+    );
+
+    return {
+      paths: summarise(pathSamples, originalPaths, level),
+      loadings: summarise(loadingSamples, originalLoadings, level),
+      weights: summarise(weightSamples, originalWeights, level),
+      resamples: completed,
       failed,
-      resamples,
-    });
+      confidenceLevel: level,
+      durationMs: Date.now() - startedAt,
+      seed,
+    };
   }
 
-  const originalPaths = new Map(original.pathCoefficients);
-  const originalLoadings = new Map(
-    original.outer.map((entry) => [`${entry.construct}:${entry.indicator}`, entry.loading]),
-  );
-  const originalWeights = new Map(
-    original.outer.map((entry) => [`${entry.construct}:${entry.indicator}`, entry.weight]),
-  );
+  return { resamples, step, finish };
+}
 
-  return {
-    paths: summarise(pathSamples, originalPaths, level),
-    loadings: summarise(loadingSamples, originalLoadings, level),
-    weights: summarise(weightSamples, originalWeights, level),
-    resamples: completed,
-    failed,
-    confidenceLevel: level,
-    durationMs: Date.now() - startedAt,
-    seed,
-  };
+/**
+ * Runs the bootstrap synchronously.
+ *
+ * CPU-bound arithmetic in one uninterrupted loop: fine for tests and small
+ * runs, but on a server it blocks the event loop for the whole run, so
+ * `onProgress` writes and `shouldStop` reads that depend on I/O cannot happen
+ * until it ends. Background jobs use `bootstrapPlsAsync`.
+ */
+export function bootstrapPls(
+  model: PlsModel,
+  data: Map<string, number[]>,
+  original: PlsEstimate,
+  options: BootstrapOptions = {},
+): BootstrapResult {
+  const run = createBootstrap(model, data, original, options);
+  let iteration = 0;
+  for (; iteration < run.resamples; iteration += 1) {
+    if (options.shouldStop?.()) break;
+    run.step(iteration);
+  }
+  return run.finish(iteration);
+}
+
+/** Resamples between yields to the event loop in the asynchronous runner. */
+const YIELD_EVERY = 25;
+
+/**
+ * Runs the bootstrap, yielding to the event loop every few resamples.
+ *
+ * The same resamples in the same order as `bootstrapPls` for a given seed, so
+ * the results are identical. The difference is that other work — the
+ * progress write, the cancellation check, other users' requests on a shared
+ * process — runs between batches instead of waiting up to a minute. A
+ * cancelled run returns what it had, counted by the resamples attempted.
+ */
+export async function bootstrapPlsAsync(
+  model: PlsModel,
+  data: Map<string, number[]>,
+  original: PlsEstimate,
+  options: BootstrapOptions = {},
+): Promise<BootstrapResult> {
+  const run = createBootstrap(model, data, original, options);
+  let iteration = 0;
+  for (; iteration < run.resamples; iteration += 1) {
+    if (iteration % YIELD_EVERY === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    if (options.shouldStop?.()) break;
+    run.step(iteration);
+  }
+  return run.finish(iteration);
 }
 
 /* -------------------------------------------------------------------------- */

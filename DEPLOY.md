@@ -231,6 +231,25 @@ Authorized redirect URI: `https://<رابطك>/api/auth/callback/google`
 
 ---
 
+### المهام الخلفية · Background jobs
+
+المهام الطويلة (مهام الوكيل، البحث العميق، إعادة المعاينة في PLS) تُضاف إلى طابور دائم في قاعدة البيانات نفسها
+(pg-boss، مخطط `pgboss`) ولا تضيع عند إعادة النشر. يُحدَّد التنفيذ بالمتغيّر `JOB_RUNNER`:
+
+| القيمة | المعنى |
+| --- | --- |
+| `inline` (الافتراضي خارج Vercel) | خدمة الويب تضيف المهام وتنفّذها — لا حاجة لخدمة إضافية. |
+| `worker` | خدمة الويب تضيف فقط، وخدمة منفصلة `npm run worker` تنفّذ (انظر الكتلة المعلّقة في `render.yaml`). |
+| `direct` (الافتراضي على Vercel) | السلوك القديم داخل العملية بلا طابور — مفتاح التراجع. |
+
+Long-running work is queued in PostgreSQL (pg-boss, schema `pgboss`) and survives redeploys. Each job runs
+under a lease on its row, so two instances never execute the same task; a worker that dies leaves an expired
+lease, and a reaper (every minute) re-queues the work. **Vercel functions cannot host a worker**: on Vercel
+either keep `direct`, or set `JOB_RUNNER=worker` and run `npm run worker` on a long-lived host (Render
+background worker, Fly, a VM) against the same `DATABASE_URL`. The worker needs Node ≥ 22.12.
+
+**Rollback:** set `JOB_RUNNER=direct` and redeploy the environment — no code change needed.
+
 ## 8) الصيانة
 
 | المهمة | كيف |

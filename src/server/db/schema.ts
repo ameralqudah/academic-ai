@@ -799,11 +799,17 @@ export const analysisJobs = pgTable(
     startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
     finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
     durationMs: integer('duration_ms'),
+    /** Which worker holds the job, and until when (see `server/jobs/leases`). */
+    leaseOwner: varchar('lease_owner', { length: 128 }),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
+    /** Times a worker has taken it; a job orphaned twice is failed rather than retried forever. */
+    attempts: integer('attempts').default(0).notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (table) => [
     index('analysis_jobs_user_idx').on(table.userId, table.createdAt),
+    index('analysis_jobs_lease_idx').on(table.status, table.leaseExpiresAt),
     /* Finding work to resume, and finding jobs orphaned by a restart. */
     index('analysis_jobs_status_idx').on(table.status, table.startedAt),
   ],
@@ -1133,6 +1139,15 @@ export const tasks = pgTable(
     errorReasonKey: varchar('error_reason_key', { length: 128 }),
     startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
     finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+    /**
+     * The worker executing this task, and until when its claim holds.
+     *
+     * A task runs only under a live lease, renewed by a heartbeat. Two workers
+     * cannot both hold it, and a lease that expires — the worker died or was
+     * redeployed — is how the reaper knows the task needs picking up again.
+     */
+    leaseOwner: varchar('lease_owner', { length: 128 }),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
@@ -1142,6 +1157,7 @@ export const tasks = pgTable(
   },
   (table) => [
     index('tasks_user_idx').on(table.userId, table.createdAt),
+    index('tasks_lease_idx').on(table.status, table.leaseExpiresAt),
     /* The recovery query: tasks that were running when the process stopped. */
     index('tasks_status_idx').on(table.status),
   ],

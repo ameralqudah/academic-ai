@@ -16,6 +16,13 @@
 
 import 'dotenv/config';
 
+/*
+ * Background work runs in-process here, as it always did in this suite: no
+ * worker consumes a queue in this process. The queued path has its own suite,
+ * scripts/jobs-integration.ts.
+ */
+process.env.JOB_RUNNER ??= 'direct';
+
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

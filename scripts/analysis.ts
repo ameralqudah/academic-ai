@@ -6297,6 +6297,58 @@ console.log('\nuploaded documents are attributed');
     close('forty blank rows in front change nothing', shiftedDiscriminant.htmt.get('TRUST ↔ ATT')?.value ?? Number.NaN, discriminant.htmt.get('TRUST ↔ ATT')?.value ?? 0, 1e-12);
   }
 
+  /* ------------------------------------------ P0.10 asynchronous bootstrap */
+  {
+    console.log('P0.10 — the bootstrap yields to the event loop and can be stopped');
+
+    const { readFile: read } = await import('node:fs/promises');
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+    const { estimatePls } = await import('@/analysis/inference/pls/algorithm');
+    const { bootstrapPls, bootstrapPlsAsync } = await import('@/analysis/inference/pls/bootstrap');
+
+    const data = numericColumns(parseCsv(await read('evals/fixtures/datasets/survey_with_blanks.csv', 'utf8'), 'survey.csv'));
+    const model = {
+      constructs: [
+        { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' as const },
+        { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' as const },
+        { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' as const },
+      ],
+      paths: [
+        { from: 'TRUST', to: 'ATT' },
+        { from: 'ATT', to: 'INT' },
+        { from: 'TRUST', to: 'INT' },
+      ],
+    };
+    const estimate = estimatePls(model, data);
+
+    const sync = bootstrapPls(model, data, estimate, { resamples: 200, seed: 99 });
+    const asyncResult = await bootstrapPlsAsync(model, data, estimate, { resamples: 200, seed: 99 });
+    check(
+      'the asynchronous bootstrap gives identical intervals for the same seed',
+      JSON.stringify(asyncResult.paths),
+      JSON.stringify(sync.paths),
+    );
+
+    /* The event loop runs between batches: a timer fires while the bootstrap is in progress. */
+    let ticks = 0;
+    const timer = setInterval(() => (ticks += 1), 1);
+    await bootstrapPlsAsync(model, data, estimate, { resamples: 300, seed: 5 });
+    clearInterval(timer);
+    assertTrue('other work runs while it resamples', ticks > 0);
+
+    /* Cancellation set from outside, as the job's database check does, stops it mid-run. */
+    let stop = false;
+    const stopped = await bootstrapPlsAsync(model, data, estimate, {
+      resamples: 1000,
+      seed: 7,
+      onProgress: (percent) => {
+        if (percent >= 10) setImmediate(() => (stop = true));
+      },
+      shouldStop: () => stop,
+    });
+    assertTrue('a stop requested mid-run ends it early', stopped.resamples + stopped.failed < 1000);
+  }
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

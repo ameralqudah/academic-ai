@@ -20,6 +20,7 @@
  * and nothing else.
  */
 
+import { dispatchAnalysisJob } from '@/server/jobs/dispatch';
 import { numericColumns } from '@/analysis/numeric-columns';
 import {
   assessDiscriminantValidity,
@@ -45,7 +46,7 @@ import {
   CbSemError,
   type CbSemResult,
 } from '@/analysis/inference/cbsem/cfa';
-import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
+import { bootstrapPlsAsync, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
 import { checkModelData, type DataIssue } from '@/analysis/inference/pls/data-checks';
 import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
 import { logger } from '@/lib/logger';
@@ -422,20 +423,13 @@ export async function startBootstrap(input: {
     },
   });
 
-  void runBootstrapJob(job.id).catch((error: unknown) => {
-    logger.error('pls.bootstrapJobCrashed', { jobId: job.id, error: String(error) });
-  });
+  /* Queued (durable) or, without a queue, run in this process — see `server/jobs/dispatch`. */
+  await dispatchAnalysisJob(job.id, 'pls.bootstrap');
 
   return job;
 }
 
-/**
- * Executes a queued bootstrap.
- *
- * Exported so a real worker process can call it later without this file
- * changing — moving the work off the web process is then a matter of who
- * invokes this, not of rewriting it.
- */
+/** Executes a queued bootstrap. Called by a worker, under the job's lease. */
 export async function runBootstrapJob(jobId: string): Promise<void> {
   const startedAt = Date.now();
 
@@ -470,7 +464,13 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
     let cancelled = false;
     let lastCheck = 0;
 
-    const result = bootstrapPls(spec.model, columns, estimate, {
+    /*
+     * The asynchronous runner yields to the event loop between batches of
+     * resamples, so the progress writes and the cancellation check below
+     * actually run — with the synchronous one they queued up behind the
+     * whole bootstrap, and cancel did nothing until it had finished.
+     */
+    const result = await bootstrapPlsAsync(spec.model, columns, estimate, {
       resamples: spec.resamples,
       confidenceLevel: spec.confidenceLevel,
       seed: spec.seed,

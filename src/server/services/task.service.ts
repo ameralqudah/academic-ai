@@ -7,6 +7,7 @@
  */
 
 import { logger } from '@/lib/logger';
+import { dispatchTask } from '@/server/jobs/dispatch';
 import type { Task, TaskStep } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
@@ -169,12 +170,28 @@ export async function startTask(input: {
   });
 
   /*
-   * Planning and execution run without being awaited, so the response reaches
-   * the client while the work continues. The rejection handler is not optional:
-   * an unhandled rejection from a floating promise takes down the process.
+   * Planning and execution happen in the background: queued (durable) or,
+   * without a queue, in this process. Either way the response reaches the
+   * client while the work continues, and a crash is recorded on the task by
+   * `executeTask`.
    */
-  void planAndRun(task.id).catch((error: unknown) => {
-    logger.error('task.crashed', { taskId: task.id, error: String(error) });
+  await dispatchTask(task.id);
+
+  return task;
+}
+
+/**
+ * Runs a task, recording a crash on the task itself.
+ *
+ * What a worker (or the in-process fallback) calls. A failure that escapes
+ * planning or execution marks the task FAILED with the cause, rather than
+ * leaving it RUNNING with nothing driving it.
+ */
+export async function executeTask(taskId: string): Promise<void> {
+  try {
+    await planAndRun(taskId);
+  } catch (error) {
+    logger.error('task.crashed', { taskId, error: String(error) });
 
     /*
      * The cause, where it can be recognised.
@@ -183,36 +200,25 @@ export async function startTask(input: {
      * word: "Failed". Planning needs a model call, so an exhausted allowance or
      * a missing key stops the task here — and both are things they can act on,
      * where a bare failure is a dead end.
+     *
+     * The message as well as the key: the provider's own message names the
+     * cause, and the classifier will never recognise every phrasing. Stored in
+     * `context`, which already holds task-scoped facts.
      */
     const detail = String(error);
-
-    /*
-     * The message as well as the key.
-     *
-     * The key alone produced "Stopped by an unexpected error" — true, useless,
-     * and exactly what the researcher already knew. The provider's own message
-     * names the cause, and the classifier will never recognise every phrasing
-     * one invents, so keeping the text is what makes an unclassified failure
-     * actionable.
-     *
-     * Stored in `context` rather than a new column: a migration for one
-     * diagnostic string is not worth the deploy risk, and the field already
-     * holds task-scoped facts.
-     */
-    void tasksRepo.setStatus(task.id, 'FAILED', {
-      errorReasonKey: classifyFailure(detail),
-      context: { ...task.context, failureDetail: detail.slice(0, 400) },
-    });
-  });
-
-  return task;
+    const task = await tasksRepo.findAny(taskId).catch(() => undefined);
+    await tasksRepo
+      .setStatus(taskId, 'FAILED', {
+        errorReasonKey: classifyFailure(detail),
+        context: { ...(task?.context ?? {}), failureDetail: detail.slice(0, 400) },
+      })
+      .catch(() => undefined);
+  }
 }
 
 /**
- * Plans a task and runs it.
- *
- * Exported so a worker process can drive it later without this file changing —
- * moving execution off the web process becomes a question of who calls this.
+ * Plans a task and runs it. Called through `executeTask`, by a worker or the
+ * in-process fallback (see `server/jobs/dispatch`).
  */
 export async function planAndRun(taskId: string): Promise<void> {
   const task = await tasksRepo.findAny(taskId);
@@ -482,9 +488,7 @@ export async function answerTask(input: {
 
   await tasksRepo.setStatus(input.taskId, 'RUNNING', { pendingQuestion: null });
 
-  void planAndRun(input.taskId).catch((error: unknown) => {
-    logger.error('task.resumeCrashed', { taskId: input.taskId, error: String(error) });
-  });
+  await dispatchTask(input.taskId);
 }
 
 /** Continues a task that paused at a limit, with more budget. */
@@ -516,9 +520,7 @@ export async function resumeTask(input: {
     });
   }
 
-  void planAndRun(input.taskId).catch((error: unknown) => {
-    logger.error('task.resumeCrashed', { taskId: input.taskId, error: String(error) });
-  });
+  await dispatchTask(input.taskId);
 }
 
 export async function cancelTask(taskId: string, userId: string): Promise<void> {
@@ -557,10 +559,7 @@ export async function resumeInterrupted(): Promise<number> {
 
   for (const task of tasks) {
     logger.info('task.resumingAfterRestart', { taskId: task.id, status: task.status });
-
-    void planAndRun(task.id).catch((error: unknown) => {
-      logger.error('task.resumeCrashed', { taskId: task.id, error: String(error) });
-    });
+    await dispatchTask(task.id);
   }
 
   return tasks.length;

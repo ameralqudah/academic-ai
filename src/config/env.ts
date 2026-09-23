@@ -157,6 +157,16 @@ const serverSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+  /**
+   * Where background work runs (agent tasks, deep research, PLS bootstrap).
+   *
+   * - `inline`: queued in PostgreSQL (pg-boss) and executed by the web process
+   *   itself. Durable and single-service — the default outside Vercel.
+   * - `worker`: queued; executed only by `npm run worker`, a separate service.
+   * - `direct`: the previous in-process promises, no queue. Rollback switch,
+   *   and the default on Vercel, whose functions cannot host a worker.
+   */
+  JOB_RUNNER: z.enum(['inline', 'worker', 'direct']).optional(),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

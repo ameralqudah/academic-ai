@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-23 · **Neon project:** `academic-ai-eu` · **Branch:** `p1d-rls-verify` (`br-muddy-breeze-b2yfw4tj`), created from the default branch (`import`). The verification wrote only to this branch; production was neither read nor changed. · **Server:** PostgreSQL 18.6 · **Connected as:** `neondb_owner`
 
-**Result.** The RLS design of migrations 0014 and 0015 works on Neon, with the roles Neon provides; all the database-level checks below passed. **The application-level test (`test:runs:db` against Neon) could not be run from this environment and has not passed** (§4). `FF_RUNS` stays **off**. The verification branch has been deleted.
+**Result.** The RLS design of migrations 0014 and 0015 works on Neon, with the roles Neon provides; all the database-level checks below passed. **The application-level test (`test:runs:db` against Neon) could not be run from this environment and has not passed** (§4, §6). The production read-only RLS probe passed after the merge (§5). `FF_RUNS` stays **off**. The verification branch has been deleted.
 
 ## 1. How it was run
 
@@ -70,19 +70,60 @@ The follow-up asked for the application's own run path (`npm run test:runs:db`: 
   The fail-closed probe in §3 (checks 1 and 7a–7d) therefore ran through the role the application connects as. It was **not** run through the pooled host.
 - **Clean-up.** The branch `p1d-rls-verify` was **deleted** after the verification, as instructed, and Neon listed it as gone. It held a copy of the default branch's data plus synthetic `p1dv-` rows. The project's `import` and `production` branches were not touched.
 
-## 5. Still blocking before `FF_RUNS` is enabled anywhere real
+## 5. Post-merge audit of production (read-only), 2026-09-23 17:33 UTC
 
-1. **Application path on Neon.** Create a fresh Neon branch and run `npm run test:runs:db` against it, from a machine or CI job whose network can reach `*.neon.tech`. For this session, that would mean adding the host to the environment's allowed domains. Also run `npm run test:runs:db` through the **pooled** connection string, which exercises `SET LOCAL ROLE` behind PgBouncer's transaction mode. Delete the branch afterwards.
-2. **Production role and URL.** Confirm that the production `DATABASE_URL` connects as `neondb_owner` (or as whichever role ran migration 0015, which grants `academic_app` to `current_user`), and note whether it uses the pooled host.
-3. **Deploy order.** Apply migrations 0014 and 0015 to production with `FF_RUNS` **off**. Then run the probe (check 1), read-only, before any flag change.
-   - *Status after the merge.* The Render service `academic-ai-app` auto-deploys `main`, and its build runs `npm run db:migrate`. The deploy of merge commit `5f18aaa` logged `migrations applied successfully` (build log, 2026-09-23 17:22 UTC), so 0014 and 0015 are applied in production with `FF_RUNS` at its default, `false`.
-   - *Still open.* The read-only probe against production has **not** been run.
+This audit ran after #33 was merged (`5f18aaa`) and deployed on Render. Everything ran through the Neon connector as read-only catalog queries and `SELECT`s. No production row, role or setting was changed. No secret, connection string or environment value was read or printed.
+
+**Which database production uses.** It is the default branch `import` (`br-lucky-meadow-b2h0jdhv`) of Neon project `academic-ai-eu`:
+
+- it is the only database with all 16 migrations (0000–0015), the run tables and the `academic_app` role;
+- the `production` branch of the same project has no migration table;
+- the `academic-ai` project (us-east-1) stops at 9 migrations.
+
+The Render service `academic-ai-app` (auto-deploys `main`; its build runs `npm run db:migrate`) logged `migrations applied successfully` for `5f18aaa` at 17:22 UTC.
+
+| # | Check | Status | Evidence |
+|---|---|---|---|
+| 1 | Neon **direct** `test:runs:db` | **Not executed** | This session's network policy denies `*.neon.tech` (TCP 5432 and HTTPS through the proxy). |
+| 2 | Neon **pooled** `test:runs:db` | **Not executed** | Same reason. |
+| 3 | Production `DATABASE_URL` role and host | **Role verified; host inferred** | See the role and host notes below. |
+| 4 | Production read-only RLS probe | **Passed** | See the probe results below. |
+
+**Check 3: the role (verified).** In `pg_stat_activity` on the production branch, every application connection uses `neondb_owner`:
+
+- 5 connections are `postgres.js`, the application;
+- 3 are `academic-ai-jobs`, the pg-boss worker (`src/server/jobs/queue.ts`).
+
+`neondb_owner` is the only login role. It owns the run tables, has BYPASSRLS (expected: the owner path is not the RLS path), and can `SET ROLE academic_app`, which is what migration 0015 needs.
+
+**Check 3: the host (inferred, not verified).** The application's connections report their own `application_name`. The connector's own session, which goes through Neon's pooler, shows up as `pgbouncer`. This suggests the application uses the **direct** (non-pooler) host. The URL itself was not read, so this is an inference.
+
+**Check 4: the probe (passed).** It ran on the production branch in one transaction with `SET LOCAL ROLE academic_app`, using the same probe query as `assertRlsEnforced`:
+
+| Item | Result |
+|---|---|
+| Probe | `role = academic_app`, `bypass = false`, `superuser = false`, `rls = true` (all 4 tables), `row_security = on` |
+| Policies | 11 in place; RLS is on for all four tables |
+| No user context | 0 runs and 0 events visible |
+| Grants | `academic_app` has no DELETE or TRUNCATE on `research_runs` and cannot read `users` |
+| Production data | 0 runs, steps, approvals and events. No run has ever been created there, which is consistent with `FF_RUNS` being off. |
+
+**What the probe does not show.** Production has no run rows, so "0 visible with no user" does not demonstrate isolation there by itself. Isolation, rejected cross-project inserts and fail-closed behaviour were shown with synthetic data on the verification branch (§3), because writing test rows to production is not allowed.
+
+## 6. Still blocking before `FF_RUNS` is enabled anywhere real
+
+1. **Direct Neon `test:runs:db`.** Not executed. Run `npm run test:runs:db` against a fresh Neon branch of `academic-ai-eu`, using that branch's direct connection string. Run it from a machine or CI job that can reach `*.neon.tech` on port 5432, then delete the branch.
+2. **Pooled Neon `test:runs:db`.** Not executed. Run the same suite with the branch's `-pooler` connection string.
+3. **Production host.** The role is verified (`neondb_owner`). Whether `DATABASE_URL` uses the pooled or direct host is only inferred (direct); confirm it in the Render dashboard (service `academic-ai-app`, Environment). If it is the pooled host, item 2 is the one that matters.
+4. **`FF_RUNS` in the Render environment.** The code default is `false`, and `render.yaml` sets neither `FF_RUNS` nor `FF_GRAPH`. However, the live Render environment could not be read from here: no read-only connector tool exists, and the live app is not reachable from this sandbox. Confirm in the dashboard that `FF_RUNS` is absent or `false`.
+
+The production read-only probe (check 4 above) has been executed and passed.
 
 **What this does not claim.** It does not claim general "Neon support", nor that the whole application is RLS-protected. It shows that, on Neon PostgreSQL 18.6 with the `neondb_owner` role:
 
-- migrations 0014 and 0015 apply;
+- migrations 0014 and 0015 apply, and are applied in production;
 - the restricted role can be created and used;
-- the P1-D policies isolate projects;
-- the fail-closed probe detects every way enforcement can be lost.
+- the P1-D policies isolate projects (on the verification branch);
+- the fail-closed probe detects every way enforcement can be lost, and passes in production.
 
-The application-level run on Neon is still outstanding.
+The application-level runs on Neon (checks 1 and 2) are still outstanding.

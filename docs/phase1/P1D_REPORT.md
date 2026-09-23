@@ -314,7 +314,7 @@ Run on local PostgreSQL 16, on a freshly created and migrated database, mirrorin
    **Still blocking before `FF_RUNS` is enabled anywhere real** (§5 of that document):
    - running the application's own run path (`test:runs:db`) against a Neon branch, directly and through the pooler. This was **not executed**: this environment's network policy denies the Neon endpoints;
    - confirming the production `DATABASE_URL` role and host;
-   - running the probe against production after migrating with the flag off.
+   - ~~running the probe against production after migrating with the flag off~~. This was done after the merge and **passed**; see §5 of that document. The production role was also verified as `neondb_owner`.
 
    The fail-closed behaviour is unchanged: without enforceable RLS, every run is refused (`rls_unavailable`).
 2. **RLS covers only the run tables.** Graph and statistics writes made by tools are authorised in the application, by the P1-A/P1-C services (as approved). The whole app is not RLS-protected.

@@ -40,6 +40,11 @@ async function loadSettings(): Promise<AISettings | null> {
   return settings;
 }
 
+/** The admin's provider and model overrides (cached), for the Model Gateway's routing. */
+export async function adminAISettings(): Promise<AISettings | null> {
+  return loadSettings();
+}
+
 export function invalidateProviderCache(): void {
   cached = null;
 }

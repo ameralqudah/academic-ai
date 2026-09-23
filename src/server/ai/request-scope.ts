@@ -18,7 +18,24 @@ export interface PreferredModel {
   model: string;
 }
 
-const scope = new AsyncLocalStorage<{ userId: string; preferredModel?: PreferredModel | null }>();
+/**
+ * Ids the Model Gateway records against every call made inside this scope
+ * (P1-B). Metadata only: authorisation never reads them from here without
+ * checking (`projectId` is re-checked against the user's project role).
+ */
+export interface CallIds {
+  projectId?: string | null;
+  taskId?: string | null;
+  jobId?: string | null;
+  runId?: string | null;
+}
+
+interface Scope extends CallIds {
+  userId: string;
+  preferredModel?: PreferredModel | null;
+}
+
+const scope = new AsyncLocalStorage<Scope>();
 
 /**
  * Runs `run` on behalf of a user, optionally with the model they chose.
@@ -34,6 +51,23 @@ export function runForUser<T>(
   preferredModel?: PreferredModel | null,
 ): T {
   return userId ? scope.run({ userId, preferredModel: preferredModel ?? null }, run) : run();
+}
+
+/**
+ * Adds ids to the current scope for the work inside `run` (a task step, a
+ * job). Outside any user scope it does nothing: ids never create a user.
+ */
+export function withCallIds<T>(ids: CallIds, run: () => T): T {
+  const current = scope.getStore();
+  return current ? scope.run({ ...current, ...ids }, run) : run();
+}
+
+/** The user and ids the Model Gateway meters against; null outside a user scope. */
+export function currentCallScope(): (CallIds & { userId: string }) | null {
+  const current = scope.getStore();
+  if (!current) return null;
+  const { preferredModel: _ignored, ...ids } = current;
+  return ids;
 }
 
 export function currentUserId(): string | undefined {

@@ -51,7 +51,17 @@ const START = String.raw`(?<![\p{L}\p{N}])`;
  * matching the word is the right tool: "AMOS" means AMOS in every dialect.
  */
 const COVARIANCE_SEM = new RegExp(
-  `${START}(?:amos|lisrel|mplus|lavaan|cb[-\\s]?sem|cfa|التحليل\\s+العاملي\\s+التوكيدي|تحليل\\s+عاملي\\s+توكيدي)`,
+  [
+    `${START}(?:amos|lisrel|mplus|lavaan|cb[-\\s]?sem|cfa|التحليل\\s+العاملي\\s+التوكيدي|تحليل\\s+عاملي\\s+توكيدي)`,
+    /*
+     * The measurement model — the outer model — is the factor model and
+     * nothing else: which items load on which construct, and how well. It
+     * needs no paths, and asking for them stopped a researcher who had asked
+     * for exactly the analysis this runs.
+     */
+    String.raw`\b(?:measure?ment|measurment|outer)\s+model\b`,
+    `${START}(?:نموذج|النموذج)\\s*(?:ال)?قياس`,
+  ].join('|'),
   'iu',
 );
 const VARIANCE_SEM = new RegExp(`${START}(?:smart\\s?-?pls|pls(?:[-\\s]?sem)?|warp\\s?pls|adanco)(?![\\p{L}])`, 'iu');

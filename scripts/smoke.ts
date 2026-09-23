@@ -4844,6 +4844,9 @@ console.log('\nwhat a model costs');
   check('two constructs named without a direction are not guessed into a path', pathsFromText('SQ SAT', ['SQ', 'SAT']), []);
 
   check('AMOS asks for a factor model', softwareIntentOf('حلل AMOS'), 'stats.cbSem');
+  check('so does "measurement model"', softwareIntentOf('NEED MEASURMENT MODEL'), 'stats.cbSem');
+  check('and "نموذج القياس"', softwareIntentOf('بدي نموذج القياس'), 'stats.cbSem');
+  check('the structural model does not — it needs the paths', softwareIntentOf('النموذج الهيكلي'), null);
   check('and so does "confirmatory factor analysis"', softwareIntentOf('بدي تحليل عاملي توكيدي'), 'stats.cbSem');
   check('SmartPLS for PLS', softwareIntentOf('حلل SmartPLS'), 'stats.plsSem');
   check('SPSS for the package tables', softwareIntentOf('حلل spss كامل'), 'data.describe');
@@ -4866,6 +4869,16 @@ console.log('\nwhat a model costs');
   const { decideConversationLanguage } = await import('../src/server/context/language');
   const { generateDocx } = await import('../src/server/generators/docx');
   const { validateArtifactBytes: validate } = await import('../src/server/generators/documents');
+
+  const { namesDrawing } = await import('../src/server/diagrams/requests');
+  const { softwareIntentOf: software } = await import('../src/server/services/data-requests');
+  /* With a file attached, a named method and no drawing word is the analysis. */
+  const drawsIt = (message: string, hasDataset: boolean) =>
+    asksForDiagram(message) && (namesDrawing(message) || !hasDataset || software(message) === null);
+  check('"measurement model" over a file is the analysis, not a picture', drawsIt('need measurement model', true), false);
+  check('"ارسم نموذج القياس" is still the picture', drawsIt('ارسم نموذج القياس', true), true);
+  check('and with no file to analyse, the picture is all it can be', drawsIt('need measurement model', false), true);
+  check('a request naming no method stays a drawing', drawsIt('نموذج الدراسة', true), true);
 
   check('"رسمات بيانية" asks for figures', asksForCharts('حلل spss كامل بجداول مع رسمات بيانبه'), true);
   check('and not for the research model', asksForDiagram('حلل spss كامل بجداول مع رسمات بيانبه'), false);
@@ -4901,6 +4914,8 @@ console.log('\nwhat a model costs');
   check('as a valid document', (await validate(file, 'docx')).valid, true);
 
   check('someone writing Arabic is answered in Arabic', decideConversationLanguage({ request: 'حلل SmartPLS', history: ['اوصفلي بيانات', 'قارن بينهم'], interfaceLocale: 'en' }), 'ar');
+  check('a few English words in an Arabic conversation do not switch it', decideConversationLanguage({ request: 'NEED MEASURMENT MODEL', history: ['اوصفلي بيانات'], interfaceLocale: 'en' }), 'ar');
+  check('but an English sentence does', decideConversationLanguage({ request: 'Please write a full review of the literature on resilience', history: ['اوصفلي بيانات'], interfaceLocale: 'en' }), 'en');
   check('and someone writing English is not', decideConversationLanguage({ request: 'run SmartPLS', history: ['describe my data'], interfaceLocale: 'en' }), 'en');
   check('with no history, the interface decides a mixed message', decideConversationLanguage({ request: 'حلل SmartPLS', interfaceLocale: 'en' }), 'en');
 }

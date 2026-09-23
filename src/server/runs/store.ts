@@ -281,6 +281,13 @@ export async function transitionStep(
   return options.tx ? work(options.tx) : withRunScope(userId, work);
 }
 
+/** Marks a failed step as final (no attempts left): a permanent error, or the run was cancelled. */
+export async function exhaustAttempts(userId: string, stepId: string): Promise<void> {
+  await withRunScope(userId, async (tx) => {
+    await tx.update(runSteps).set({ attempts: sql`${runSteps.maxAttempts}`, updatedAt: new Date() }).where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'FAILED')));
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                  Approvals                                 */
 /* -------------------------------------------------------------------------- */

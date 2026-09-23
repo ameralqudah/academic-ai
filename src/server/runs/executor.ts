@@ -389,11 +389,7 @@ async function failAttempt(
   if (!failed) return;
   if (!canRetry && attempts < step.maxAttempts) {
     /* Not retried (permanent error or run retry budget): make it final so the run stops. */
-    await withRunScope(userId, async (tx) => {
-      const { runSteps } = await import('@/server/db/schema');
-      const { eq } = await import('drizzle-orm');
-      await tx.update(runSteps).set({ attempts: step.maxAttempts, updatedAt: new Date() }).where(eq(runSteps.id, step.id));
-    });
+    await store.exhaustAttempts(userId, step.id);
   }
   if (canRetry) await store.patchRun(userId, run.id, { spent: { ...(run.spent as Record<string, number>), retries: retries + 1 } });
 }
@@ -422,11 +418,7 @@ export async function cancelRemaining(userId: string, run: ResearchRun): Promise
       await store.transitionStep(userId, step, ['QUEUED', 'AUTHORIZED', 'WAITING_APPROVAL'], 'CANCELLED', { finishedAt: new Date(), error: { code: 'cancelled' } });
     }
     if (step.status === 'FAILED' && step.attempts < step.maxAttempts) {
-      await withRunScope(userId, async (tx) => {
-        const { runSteps } = await import('@/server/db/schema');
-        const { eq } = await import('drizzle-orm');
-        await tx.update(runSteps).set({ attempts: step.maxAttempts, updatedAt: new Date() }).where(eq(runSteps.id, step.id));
-      });
+      await store.exhaustAttempts(userId, step.id);
     }
     for (const approval of await store.approvalsForStep(userId, step.id)) {
       if (approval.status === 'PENDING' || approval.status === 'APPROVED') await store.expireApproval(userId, approval, 'cancelled');

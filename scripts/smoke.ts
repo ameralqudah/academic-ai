@@ -5341,10 +5341,16 @@ console.log('\nwhat a model costs');
     const source = await readFile(file, 'utf8');
     const handlers = source.match(/export const (GET|POST|PATCH|PUT|DELETE)\b/g) ?? [];
     const flaggedCount = source.match(/= flagged\(/g)?.length ?? 0;
-    /* The graph's limits, or the statistics API's (P1-C), which follow the same read/write split. */
-    const limitedCount = source.match(/rateLimit: (GRAPH_(READ|WRITE)|STATS_(READ|WRITE|RUN|AI))_LIMIT/g)?.length ?? 0;
+    /* The graph's limits, the statistics API's (P1-C), or the research runs' (P1-D), which follow the same read/write split. */
+    const limitedCount = source.match(/rateLimit: (GRAPH_(READ|WRITE)|STATS_(READ|WRITE|RUN|AI)|RUNS_(READ|WRITE))_LIMIT/g)?.length ?? 0;
     if (handlers.length === 0 || flaggedCount !== handlers.length || limitedCount !== handlers.length) unguarded.push(file);
-    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !/GRAPH_WRITE_LIMIT|STATS_(WRITE|RUN|AI)_LIMIT/.test(source) && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
+    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !/GRAPH_WRITE_LIMIT|STATS_(WRITE|RUN|AI)_LIMIT|RUNS_WRITE_LIMIT/.test(source) && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
+    /* P1-D: run routes are behind the runs flag, and every run-creating or deciding handler has a per-user limit. */
+    if (/\/projects\/\[projectId\]\/(runs|tools)\//.test(file)) {
+      const runsFlagged = source.match(/'runs',?\s*\)/g)?.length ?? 0;
+      if (runsFlagged !== handlers.length) unguarded.push(`${file} (runs flag)`);
+      if (/export const POST\b/.test(source) && !/userRateLimit: RUNS_(CREATE|DECIDE)_USER_LIMIT/.test(source)) unguarded.push(`${file} (per-user limit)`);
+    }
   }
   check(`every /api/v1 handler (${routeFiles.length} routes) is behind the flag and rate-limited`, unguarded, []);
 }
@@ -5432,6 +5438,28 @@ console.log('\nwhat a model costs');
   /* The allow-list module, not the tools themselves: this job has no database. */
   const { STATS_TOOL_NAMES } = await import('../src/server/stats/tool-names');
   check('no model tool can write, edit or overwrite a result', STATS_TOOL_NAMES.filter((name: string) => /write|update|overwrite|fake|set|edit|insert|delete|create.*result/i.test(name)), []);
+
+  /* P1-D: one registry, one executor, one store for the run tables. */
+  console.log('\nResearch runs: one registry, one executor, one store (P1-D)');
+  const read = async (file: string) => readFile(file, 'utf8');
+  const definers: string[] = [];
+  const runTableUsers: string[] = [];
+  const executors: string[] = [];
+  const engineImports: string[] = [];
+  const runRandom: string[] = [];
+  for (const file of files.filter((candidate) => candidate.startsWith('src/'))) {
+    const source = await read(file);
+    if (/\bdefineTool\(/.test(source) && !/export function defineTool/.test(source)) definers.push(file);
+    if (/\b(researchRuns|runSteps|runApprovals|runEvents)\b/.test(source) && file !== 'src/server/db/schema.ts') runTableUsers.push(file);
+    if (/\btool\.execute\(/.test(source)) executors.push(file);
+    if (file.startsWith('src/server/runs/') && /Math\.random\s*\(/.test(source)) runRandom.push(file);
+    if (file.startsWith('src/server/runs/tools/') && /^import (?!type)[^;]*from '@\/analysis\/engine/m.test(source)) engineImports.push(file);
+  }
+  check('gateway tools are defined only by the run registry', definers, ['src/server/runs/registry.ts']);
+  check('the run tables are read and written only by the run store (under RLS)', runTableUsers.sort(), ['src/server/runs/store.ts']);
+  check('tools are executed only by the run executor and the assistant (both after the policy)', executors.sort(), ['src/server/runs/assistant.ts', 'src/server/runs/executor.ts']);
+  check('tool adapters do not reach the statistics engine directly (only P1-C services)', engineImports, []);
+  check('no unseeded randomness in the run engine', runRandom, []);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

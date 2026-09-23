@@ -11,6 +11,7 @@
 
 import { readFileSync } from 'node:fs';
 
+import { inspectOutput, numberSpellings } from '@/ai/guardrails';
 import { parseCsv } from '@/analysis/parse';
 import { toNumber } from '@/analysis/stats-core';
 import { figuresFor } from '@/analysis/engine/figures';
@@ -315,6 +316,16 @@ async function main() {
   ok('figures are deterministic', figuresFor(med)[0]!.svg === medFigure.svg);
   ok('EFA gets a scree plot from the eigenvalues', figuresFor(efaP).some((f) => f.kind === 'scree' && f.keys.every((k) => k.startsWith('eigen:'))));
   ok('moderation gets a simple-slopes figure', figuresFor(mod).some((f) => f.kind === 'simple-slopes'));
+
+  /* --------------------------------------------- results-section guardrail */
+  section('Legacy results sections: numbers must match an attached verified analysis');
+  const verified = numberSpellings(reg.estimates.flatMap((e) => [e.estimate, e.p ?? Number.NaN, e.se ?? Number.NaN]));
+  const b = est(reg, 'coef:x');
+  const traced = `x predicted y (b = ${b.estimate.toFixed(3)}, SE = ${(b.se as number).toFixed(3)}).`;
+  ok('a number taken from the attached run is traced', !inspectOutput(traced, { verifiedNumbers: verified }).flags.includes('UNTRACED_STATISTIC'));
+  ok('an invented number is flagged, with a notice', inspectOutput('x predicted y (b = 0.777, p = .013).', { verifiedNumbers: verified }).flags.includes('UNTRACED_STATISTIC'));
+  ok('with nothing attached, every statistic is untraced', inspectOutput('r = .45', { verifiedNumbers: new Set() }).flags.includes('UNTRACED_STATISTIC'));
+  ok('counts and years are not statistics', !inspectOutput('Two groups, 240 students, in 2024.', { verifiedNumbers: new Set() }).flags.includes('UNTRACED_STATISTIC'));
 
   /* ---------------------------------------------------------- determinism */
   section('Determinism and normalisation');

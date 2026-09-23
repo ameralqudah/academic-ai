@@ -12,7 +12,9 @@ export type GuardrailFlag =
   | 'DOI_PRESENT'
   | 'EXTERNAL_URL'
   | 'CLAIMED_EXPERIMENT'
-  | 'FABRICATED_STATISTIC';
+  | 'FABRICATED_STATISTIC'
+  /** A number in a results section that matches none of the verified analyses attached to it (P1-C). */
+  | 'UNTRACED_STATISTIC';
 
 export interface GuardrailFinding {
   flag: GuardrailFlag;
@@ -64,6 +66,44 @@ function collect(
 export interface InspectOptions {
   /** Sections that must not contain numeric findings unless the user supplied data. */
   expectsNoStatistics?: boolean;
+  /**
+   * For results sections: every number the verified analyses attached to the
+   * section contain, as the text may write them. A statistic in the text that
+   * is not one of them is flagged as untraced (P1-C: the check used to be off
+   * exactly where numbers belong).
+   */
+  verifiedNumbers?: ReadonlySet<string>;
+}
+
+/** Numeric spellings a stored value may appear as: 0.4567 → "0.457", ".457", "0.46", ".46", "45.67%"… */
+export function numberSpellings(values: Iterable<number>): Set<string> {
+  const out = new Set<string>();
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    for (const digits of [0, 1, 2, 3, 4]) {
+      for (const candidate of [value, Math.abs(value)]) {
+        const text = candidate.toFixed(digits);
+        out.add(text);
+        out.add(text.replace(/^(-?)0\./, '$1.'));
+      }
+    }
+    if (Math.abs(value) <= 1) for (const digits of [0, 1, 2]) out.add((Math.abs(value) * 100).toFixed(digits));
+  }
+  return out;
+}
+
+/** Decimal numbers and statistic assignments in a text, with the number each carries. */
+const NUMBER_IN_STATISTIC = /(?:\b(?:p|r|t|F|b|β|B|z|d|M|SD|SE|R2|R²|η²|α|χ2|χ²)\s*(?:\(\s*[\d.,\s]+\))?\s*[=<>≤≥]\s*)?([-−]?\d*\.\d+|[-−]?\d+(?:\.\d+)?(?=\s?%))/gu;
+
+function untraced(text: string, verified: ReadonlySet<string>, limit = 5): GuardrailFinding[] {
+  const findings: GuardrailFinding[] = [];
+  for (const match of text.matchAll(NUMBER_IN_STATISTIC)) {
+    const number = (match[1] ?? '').replace('−', '-');
+    if (!number || verified.has(number) || verified.has(number.replace(/^-/, ''))) continue;
+    findings.push({ flag: 'UNTRACED_STATISTIC', sample: sample(match[0]) });
+    if (findings.length >= limit) break;
+  }
+  return findings;
 }
 
 export function inspectOutput(text: string, options: InspectOptions = {}): GuardrailResult {
@@ -75,6 +115,7 @@ export function inspectOutput(text: string, options: InspectOptions = {}): Guard
     ...(options.expectsNoStatistics
       ? collect(text, STATISTIC_PATTERN, 'FABRICATED_STATISTIC', 5)
       : []),
+    ...(options.verifiedNumbers ? untraced(text, options.verifiedNumbers) : []),
   ];
 
   const flags = [...new Set(findings.map((finding) => finding.flag))];
@@ -98,6 +139,13 @@ function noticeFor(flags: GuardrailFlag[]): GuardrailResult['notice'] {
     parts.push({
       en: 'Numeric findings appear in a section that should not contain results. Replace them with your own analysis.',
       ar: 'ظهرت نتائج رقمية في قسم لا ينبغي أن يتضمن نتائج. استبدلها بتحليلك أنت.',
+    });
+  }
+
+  if (flags.includes('UNTRACED_STATISTIC')) {
+    parts.push({
+      en: 'Some numbers here do not match any verified analysis attached to this section. Replace them with values from your own analyses, or insert verified values from the analysis workbench.',
+      ar: 'بعض الأرقام هنا لا تطابق أي تحليل موثّق مرفق بهذا القسم. استبدلها بقيم من تحليلاتك، أو أدرج قيمًا موثّقة من منصة التحليل.',
     });
   }
 

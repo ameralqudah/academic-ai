@@ -5334,9 +5334,10 @@ console.log('\nwhat a model costs');
     const source = await readFile(file, 'utf8');
     const handlers = source.match(/export const (GET|POST|PATCH|PUT|DELETE)\b/g) ?? [];
     const flaggedCount = source.match(/= flagged\(/g)?.length ?? 0;
-    const limitedCount = source.match(/rateLimit: GRAPH_(READ|WRITE)_LIMIT/g)?.length ?? 0;
+    /* The graph's limits, or the statistics API's (P1-C), which follow the same read/write split. */
+    const limitedCount = source.match(/rateLimit: (GRAPH_(READ|WRITE)|STATS_(READ|WRITE|RUN|AI))_LIMIT/g)?.length ?? 0;
     if (handlers.length === 0 || flaggedCount !== handlers.length || limitedCount !== handlers.length) unguarded.push(file);
-    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !source.includes('GRAPH_WRITE_LIMIT') && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
+    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !/GRAPH_WRITE_LIMIT|STATS_(WRITE|RUN|AI)_LIMIT/.test(source) && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
   }
   check(`every /api/v1 handler (${routeFiles.length} routes) is behind the flag and rate-limited`, unguarded, []);
 }
@@ -5409,6 +5410,20 @@ console.log('\nwhat a model costs');
     }
   }
   check('no call site asks for more output than the free plan’s cap (so the cap changes no feature)', overCap, []);
+
+  /* P1-C: research numbers come only from the deterministic engine. */
+  console.log('\nStatistics engine: no number from anywhere else (P1-C)');
+  const statFiles = files.filter((file) => file.startsWith('src/analysis/') || file.startsWith('src/server/stats/'));
+  const unseeded: string[] = [];
+  for (const file of statFiles) if (/Math\.random\s*\(/.test(await readFile(file, 'utf8'))) unseeded.push(file);
+  check('no unseeded randomness in the engine or its server layer', unseeded, []);
+  const writers: string[] = [];
+  for (const file of files) {
+    if (/\.insert\(\s*(statEstimates|statTables|statFigures)\b/.test(await readFile(file, 'utf8'))) writers.push(file);
+  }
+  check('estimates, tables and figures are written in one place only (the engine run)', writers, ['src/server/stats/runs.ts']);
+  const { STATS_TOOL_NAMES } = await import('../src/server/stats/tools');
+  check('no model tool can write, edit or overwrite a result', STATS_TOOL_NAMES.filter((name: string) => /write|update|overwrite|fake|set|edit|insert|delete|create.*result/i.test(name)), []);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

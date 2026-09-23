@@ -298,7 +298,7 @@ See the PR head. The last implementation commit is `93d46ea`; this report is com
 
 ## 19. PR
 
-See the PR opened from `claude/stoic-wozniak-5l0xmv` into `main` (not merged).
+[#32](https://github.com/ameralqudah/academic-ai/pull/32), from `claude/stoic-wozniak-5l0xmv` into `main` (not merged).
 
 ## 20. Known limitations
 

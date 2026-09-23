@@ -24,13 +24,16 @@ export async function dispatchTask(taskId: string): Promise<void> {
   });
 }
 
-export async function dispatchAnalysisJob(jobId: string, kind: 'pls.bootstrap' | 'research.deep'): Promise<void> {
+export async function dispatchAnalysisJob(jobId: string, kind: 'pls.bootstrap' | 'research.deep' | 'stats.run'): Promise<void> {
   if (jobRunner() !== 'direct' && (await enqueue(QUEUES.analysis, { jobId }, jobId))) return;
 
   const start = async () => {
     if (kind === 'pls.bootstrap') {
       const { runBootstrapJob } = await import('@/server/services/pls.service');
       await runBootstrapJob(jobId);
+    } else if (kind === 'stats.run') {
+      const { runStatsJob } = await import('@/server/stats/runs');
+      await runStatsJob(jobId);
     } else {
       const { runResearchJob } = await import('@/server/services/deep-research.service');
       await runResearchJob(jobId);

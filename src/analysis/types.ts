@@ -41,6 +41,10 @@ export interface Dataset {
   skippedRows: number;
   /** Set when the file was larger than the row cap and had to be truncated. */
   truncatedTo?: number;
+  /** Rows that had more fields than the header; the extra fields were not read. */
+  raggedRows?: number;
+  /** Non-empty cells read as missing because they were a missing marker ("NA", "-", …), by marker. */
+  missingMarkers?: Record<string, number>;
 }
 
 export interface NumericSummary {

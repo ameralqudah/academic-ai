@@ -984,6 +984,25 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
   }
 
   return db.transaction(async (tx) => {
+    /*
+     * Idempotent on the engine's own run id (P1-C): a retried job, or a second
+     * worker, gets the run already recorded instead of recording it twice.
+     */
+    const engineRunId = typeof input.run.legacyRunId === 'string' ? input.run.legacyRunId : null;
+    if (engineRunId) {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`graph-run:${projectId}:${engineRunId}`}))`);
+      const [already] = await tx
+        .select()
+        .from(graphNodes)
+        .where(and(eq(graphNodes.projectId, projectId), eq(graphNodes.type, 'analysis_run'), sql`${graphNodes.data} ->> 'legacyRunId' = ${engineRunId}`))
+        .limit(1);
+      if (already) {
+        const produced = await tx.select({ srcId: graphEdges.srcId }).from(graphEdges).where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'produced_by'), eq(graphEdges.dstId, already.id)));
+        const nodes = produced.length ? await tx.select().from(graphNodes).where(inArray(graphNodes.id, produced.map((edge) => edge.srcId))) : [];
+        const outputs = Object.fromEntries(nodes.map((node) => [String((node.data as { key?: string }).key ?? node.id), node])) as Record<string, GraphNode>;
+        return { run: already as GraphNode, outputs, report: null, alreadyRecorded: true };
+      }
+    }
     const analysis = await loadNode(tx, projectId, input.analysisId, 'share');
     if (analysis.type !== 'analysis') throw AppError.validation({ analysisId: 'Not an analysis.' });
     const inputs = [analysis];
@@ -1070,8 +1089,21 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
       );
     }
 
-    return { run, outputs, report };
+    return { run, outputs, report, alreadyRecorded: false };
   });
+}
+
+/**
+ * The Impact Report a re-run replacing `runId` would produce, so the user can
+ * review and acknowledge it before the new run is recorded (P1-C). Same
+ * proposal and same dependents as `recordRun` computes, hence the same hash.
+ */
+export async function previewRerun(projectId: string, actor: Actor, runId: string): Promise<ImpactReport> {
+  await authorize(projectId, actor, 'VIEWER');
+  const previous = await loadNode(db, projectId, runId);
+  if (previous.type !== 'analysis_run') throw AppError.validation({ runId: 'Not a run.' });
+  const { report } = await buildReport(db, projectId, { nodeId: previous.id, fromVersion: previous.currentVersion, kind: 'structural', proposalHash: `rerun:${previous.id}` });
+  return report;
 }
 
 /* -------------------------------------------------------------------------- */

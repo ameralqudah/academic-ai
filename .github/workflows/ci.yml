@@ -43,6 +43,8 @@ jobs:
         run: npm run test:smoke
       - name: Model Gateway unit suite (mock providers, no network)
         run: npm run test:gateway
+      - name: Statistics engine suite (golden references from R, committed; no R needed)
+        run: npm run test:stats
       - name: Statistics suite (includes lavaan/semTools reference parity)
         run: npm run test:analysis
       - name: Knowledge providers (tolerates network outages)
@@ -85,6 +87,10 @@ jobs:
         run: npm run test:graph
       - name: Model Gateway suite (quota, metering, routing; mock providers)
         run: npm run test:gateway:db
+      - name: Statistics provenance suite (versions, runs, graph, manuscript, tools)
+        run: npm run test:stats:db
+        env:
+          STORAGE_LOCAL_DIR: /tmp/academic-ai-storage
 
   build-and-e2e:
     name: Production build and browser tests

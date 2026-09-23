@@ -102,7 +102,7 @@ async function runResearchJobAsOwner(jobId: string): Promise<void> {
 
   if (!job || job.status !== 'QUEUED') return;
 
-  await jobsRepo.markRunning(jobId);
+  if (!(await jobsRepo.markRunning(jobId))) return;
 
   try {
     const spec = job.spec as {

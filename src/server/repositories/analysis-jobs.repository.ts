@@ -64,11 +64,18 @@ export async function listForUser(userId: string, limit = 20): Promise<AnalysisJ
     .limit(limit);
 }
 
-export async function markRunning(id: string): Promise<void> {
-  await db
+/**
+ * Claims a queued job. False when it is no longer QUEUED (cancelled, or already
+ * claimed): the caller must then do nothing. P1-C: the transition used to be
+ * unconditional, so a job cancelled between the check and the claim ran anyway.
+ */
+export async function markRunning(id: string): Promise<boolean> {
+  const rows = await db
     .update(analysisJobs)
     .set({ status: 'RUNNING', startedAt: new Date(), progress: 0, updatedAt: new Date() })
-    .where(eq(analysisJobs.id, id));
+    .where(and(eq(analysisJobs.id, id), eq(analysisJobs.status, 'QUEUED')))
+    .returning({ id: analysisJobs.id });
+  return rows.length > 0;
 }
 
 /**
@@ -89,12 +96,13 @@ export async function updateProgress(id: string, progress: number, stage?: strin
     .where(eq(analysisJobs.id, id));
 }
 
+/** Records a result, only while the job is RUNNING: a cancel that arrived first wins (P1-C). */
 export async function complete(
   id: string,
   result: Record<string, unknown>,
   durationMs: number,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const rows = await db
     .update(analysisJobs)
     .set({
       status: 'COMPLETED',
@@ -105,11 +113,14 @@ export async function complete(
       durationMs,
       updatedAt: new Date(),
     })
-    .where(eq(analysisJobs.id, id));
+    .where(and(eq(analysisJobs.id, id), eq(analysisJobs.status, 'RUNNING')))
+    .returning({ id: analysisJobs.id });
+  return rows.length > 0;
 }
 
-export async function fail(id: string, reasonKey: string, durationMs?: number): Promise<void> {
-  await db
+/** Fails a job that has not already finished or been cancelled (P1-C: never overwrites a cancel). */
+export async function fail(id: string, reasonKey: string, durationMs?: number): Promise<boolean> {
+  const rows = await db
     .update(analysisJobs)
     .set({
       status: 'FAILED',
@@ -118,7 +129,9 @@ export async function fail(id: string, reasonKey: string, durationMs?: number): 
       ...(durationMs === undefined ? {} : { durationMs }),
       updatedAt: new Date(),
     })
-    .where(eq(analysisJobs.id, id));
+    .where(and(eq(analysisJobs.id, id), inArray(analysisJobs.status, ['QUEUED', 'RUNNING'])))
+    .returning({ id: analysisJobs.id });
+  return rows.length > 0;
 }
 
 export async function cancel(id: string, userId: string): Promise<boolean> {

@@ -436,7 +436,7 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
   const [job] = await Promise.all([jobsRepo.findOwnedAny(jobId)]);
   if (!job || job.status !== 'QUEUED') return;
 
-  await jobsRepo.markRunning(jobId);
+  if (!(await jobsRepo.markRunning(jobId))) return;
 
   try {
     const spec = job.spec as {

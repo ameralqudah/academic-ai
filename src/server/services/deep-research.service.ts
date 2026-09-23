@@ -25,6 +25,7 @@ import {
 } from '@/server/research/pipeline';
 import { recordTurn } from '@/server/services/chat.service';
 import { recordSimple } from '@/server/services/usage.service';
+import { runForUser, withCallIds } from '@/server/ai/request-scope';
 import { isWebSearchConfigured } from '@/server/services/web-search.service';
 
 /** More than this in flight and a user is queueing work nobody will read. */
@@ -78,8 +79,23 @@ export async function startDeepResearch(input: {
   return job;
 }
 
-/** Executes a queued research job. Called by a worker, under the job's lease. */
+/**
+ * Executes a queued research job. Called by a worker, under the job's lease.
+ *
+ * Runs on behalf of the job's owner (P1-B): the worker has no request, and
+ * without this scope every model call inside was routed with no known plan.
+ * The Model Gateway refuses calls outside a user scope, and looks the plan up
+ * from this user id — the job never carries it, so it cannot lose it.
+ */
 export async function runResearchJob(jobId: string): Promise<void> {
+  const owner = await jobsRepo.findOwnedAny(jobId);
+  if (!owner) return;
+  await runForUser(owner.userId, () =>
+    withCallIds({ jobId, projectId: owner.projectId ?? null }, () => runResearchJobAsOwner(jobId)),
+  );
+}
+
+async function runResearchJobAsOwner(jobId: string): Promise<void> {
   const startedAt = Date.now();
   const runId = jobId;
   const job = await jobsRepo.findOwnedAny(jobId);

@@ -36,7 +36,8 @@ import { existsSync } from 'node:fs';
 import { checkQuality } from '@/server/quality/engine';
 import { decide, detectReference } from '@/server/agent/routing-rules';
 import { decideOutputLanguage } from '@/server/context/language';
-import { requirementsFor, shouldFailOver } from '@/server/ai/model-requirements';
+import { requirementsFor } from '@/server/ai/model-requirements';
+import { classifyHttp, classifyThrown, GatewayError } from '@/server/ai/gateway/errors';
 import { extractDocument } from '@/server/files/extract';
 import { chunkDocument, retrievePassages } from '@/server/files/retrieve';
 import { generateDocx } from '@/server/generators/docx';
@@ -5329,20 +5330,18 @@ console.log('\nquota and language in the chat path');
  * neither.
  */
 {
-  const aiSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+  /* Since P1-B every provider failure is classified and translated in one place: the Model Gateway. */
+  const { toAppError } = await import('@/server/ai/gateway/errors');
+  const quota = toAppError(classifyHttp('google', 429, JSON.stringify({ error: { message: 'You exceeded your current quota' } })));
+  const outage = toAppError(classifyHttp('google', 400, JSON.stringify({ error: { type: 'invalid_request_error', message: 'bad field' } })));
 
-  assertTrue(
-    'an exhausted quota is distinguished from an outage',
-    aiSource.includes('error.status === 429'),
-  );
+  assertTrue('an exhausted quota is distinguished from an outage', quota.message !== outage.message);
   assertTrue(
     'and says the allowance resets',
-    aiSource.includes('quota has been used up') && aiSource.includes('تتجدّد تلقائيًا'),
+    quota.message.includes('quota has been used up') && quota.messageAr.includes('تتجدّد تلقائيًا'),
   );
-  assertTrue(
-    'while other failures keep the generic message',
-    aiSource.includes('throw AppError.aiUnavailable('),
-  );
+  const { AppError } = await import('@/server/http/errors');
+  assertTrue('while other failures keep the generic message', outage.message === AppError.aiUnavailable().message);
 }
 
 /*
@@ -5417,21 +5416,19 @@ console.log('\nmodel routing');
  * everywhere, and retrying spends a second call to receive the same answer.
  */
 {
-  const quota = Object.assign(new Error('You exceeded your current quota'), { status: 429 });
-  const down = Object.assign(new Error('Service Unavailable'), { status: 503 });
-  const gateway = Object.assign(new Error('Bad Gateway'), { status: 502 });
+  /* Since P1-B the Model Gateway classifies failures, by status and provider error type (errors.ts). */
+  const retryable = (status: number, body: unknown) => classifyHttp('google', status, JSON.stringify(body)).retryable;
 
-  assertTrue('an exhausted quota fails over', shouldFailOver(quota));
-  assertTrue('so does an outage', shouldFailOver(down));
-  assertTrue('and a gateway failure', shouldFailOver(gateway));
-  assertTrue('and a timeout', shouldFailOver(new Error('ETIMEDOUT')));
-  assertTrue('and a rate limit named in the message', shouldFailOver(new Error('rate limit reached')));
+  assertTrue('an exhausted quota fails over', retryable(429, { error: { message: 'You exceeded your current quota' } }));
+  assertTrue('so does an outage', retryable(503, { error: { message: 'Service Unavailable' } }));
+  assertTrue('and a gateway failure', retryable(502, { error: { message: 'Bad Gateway' } }));
+  assertTrue('and a timeout', classifyThrown('google', Object.assign(new Error('ETIMEDOUT'), { name: 'TimeoutError' }), false).retryable);
+  assertTrue('and a rate limit named by the provider', retryable(400, { error: { status: 'RESOURCE_EXHAUSTED', message: 'rate limit reached' } }));
 
   /* These would fail the same way everywhere. */
-  const malformed = Object.assign(new Error('invalid request schema'), { status: 400 });
-
-  assertTrue('a malformed request does not', !shouldFailOver(malformed));
-  assertTrue('nor a refusal', !shouldFailOver(new Error('I cannot help with that')));
+  assertTrue('a malformed request does not', !retryable(400, { error: { type: 'invalid_request_error', message: 'invalid request schema' } }));
+  assertTrue('nor a refusal', !new GatewayError('refusal', 'I cannot help with that').retryable);
+  assertTrue('nor a refusal reported by the provider', !retryable(400, { error: { type: 'content_policy_violation', message: 'blocked' } }));
 }
 
 {
@@ -5440,25 +5437,29 @@ console.log('\nmodel routing');
    * handlers. A name written here would be a second source of truth that
    * drifts from the configured one.
    */
+  /* Since P1-B the models are read by the Model Gateway, which the router asks. */
   const routerSource = await readFile('src/server/ai/model-router.ts', 'utf8');
+  const gatewayConfig = await readFile('src/server/ai/gateway/index.ts', 'utf8');
 
-  assertTrue('the router reads models from the environment', routerSource.includes('env.GOOGLE_MODEL'));
+  assertTrue('the gateway reads models from the environment', gatewayConfig.includes('env.GOOGLE_MODEL'));
   assertTrue(
-    'and does not hardcode a model name',
-    !/['"]gemini-[\d.]+|['"]claude-[a-z]+-\d|['"]gpt-[\d.]/.test(routerSource),
+    'and neither it nor the router hardcodes a model name',
+    ![routerSource, gatewayConfig].some((source) => /['"]gemini-[\d.]+|['"]claude-[a-z]+-\d|['"]gpt-[\d.]/.test(source)),
   );
 
-  /* Candidates are the providers with keys — a keyless model is not an option. */
   /*
-   * Asserted on behaviour, not on the text of the check: the router filters by
-   * `isUsableApiKey`, the same rule the providers apply to themselves, so a
-   * blank or placeholder key is never a candidate.
+   * Candidates are the providers with usable keys — a keyless model is not an
+   * option. Asserted on behaviour: the adapters apply `isUsableApiKey`, and the
+   * gateway routes only among configured adapters.
    */
   const { isUsableApiKey } = await import('@/ai/key');
+  const adapterSources = await Promise.all(['anthropic', 'openai', 'google'].map((name) => readFile(`src/server/ai/gateway/adapters/${name}.ts`, 'utf8')));
+  const gatewaySource = await readFile('src/server/ai/gateway/gateway.ts', 'utf8');
   assertTrue(
     'only configured providers are candidates',
-    routerSource.includes('ANTHROPIC_API_KEY') &&
-      routerSource.includes('isUsableApiKey(key)') &&
+    gatewayConfig.includes('ANTHROPIC_API_KEY') &&
+      adapterSources.every((source) => source.includes('isUsableApiKey(this.apiKey)')) &&
+      gatewaySource.includes('available[m.provider]?.configured()') &&
       !isUsableApiKey('') &&
       !isUsableApiKey('   ') &&
       !isUsableApiKey('paste your key here') &&
@@ -5542,24 +5543,24 @@ console.log('\nno model call bypasses the router');
     ['src/server/tasks/handlers.ts', 'the capability handlers'],
   ] as const) {
     const source = await readFile(file, 'utf8');
-    assertTrue(`${label} routes its model`, source.includes('selectModel('));
+    /* Through the router, or (for structured output) the Model Gateway directly — both route by plan. */
+    assertTrue(`${label} routes its model`, source.includes('selectModel(') || source.includes('gateway().'));
   }
 }
 
 {
   /*
-   * Failover is wired at the one point every completion passes through.
-   * Putting it at each call site would mean one copy per caller, and the one
-   * that was forgotten would be the one that mattered.
+   * Failover is wired at the one point every model call passes through — the
+   * Model Gateway since P1-B. A second copy in the service was how retries
+   * stacked and how a free account's failed call reached the premium model
+   * (audit G-2, G-7), so its absence is asserted too.
    */
   const serviceSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+  const gatewaySource = await readFile('src/server/ai/gateway/gateway.ts', 'utf8');
 
-  assertTrue('failover wraps the provider call', serviceSource.includes('runWithFailover(input,'));
-  assertTrue('deciding by the failure, not the caller', serviceSource.includes('shouldFailOver(error)'));
-  assertTrue(
-    'and throwing the original error when there is nothing to fall back to',
-    serviceSource.includes('if (!alternative) throw error'),
-  );
+  assertTrue('failover wraps every provider call, in the gateway', gatewaySource.includes('nextTarget(attempt, primary, fallback)'));
+  assertTrue('deciding by the failure, not the caller', gatewaySource.includes('shouldRetry(error, attempt)'));
+  assertTrue('and the service has no second failover of its own', !serviceSource.includes('runWithFailover') && !serviceSource.includes('alternativeProvider('));
 }
 
 

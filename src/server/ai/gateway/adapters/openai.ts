@@ -125,7 +125,9 @@ export class OpenAIAdapter implements ProviderAdapter {
       ...(choice ? { tool_choice: choice } : {}),
       ...(call.responseSchema
         ? { response_format: { type: 'json_schema', json_schema: { name: call.responseSchema.name, schema: withoutMeta(call.responseSchema.schema), strict: false } } }
-        : {}),
+        : request.jsonMode
+          ? { response_format: { type: 'json_object' } }
+          : {}),
       stream,
       ...(stream ? { stream_options: { include_usage: true } } : {}),
     };

@@ -83,6 +83,12 @@ export const requestSchema = z.object({
   /** false: least deliberation the model offers; undefined: provider default. */
   reasoning: z.boolean().optional(),
   cacheSystem: z.boolean().default(true),
+  /**
+   * Ask for a JSON reply without a schema (the legacy `json: true`). Prefer
+   * `generateStructured`, which validates; this only sets the provider's JSON
+   * mode where it has one.
+   */
+  jsonMode: z.boolean().default(false),
   /** The user's explicit choice, already checked against their plan by the caller. */
   requested: z.object({ provider: z.enum(PROVIDERS), model: z.string().min(1).max(100) }).nullish(),
   /** Hints for routing (see `routing.ts`). */

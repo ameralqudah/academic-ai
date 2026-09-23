@@ -135,7 +135,11 @@ export class GoogleAdapter implements ProviderAdapter {
       generationConfig: {
         maxOutputTokens: request.maxOutputTokens,
         temperature: request.temperature,
-        ...(call.responseSchema ? { responseMimeType: 'application/json', responseJsonSchema: withoutMeta(call.responseSchema.schema) } : {}),
+        ...(call.responseSchema
+          ? { responseMimeType: 'application/json', responseJsonSchema: withoutMeta(call.responseSchema.schema) }
+          : request.jsonMode
+            ? { responseMimeType: 'application/json' }
+            : {}),
         ...(think ? { thinkingConfig: think } : {}),
       },
     };

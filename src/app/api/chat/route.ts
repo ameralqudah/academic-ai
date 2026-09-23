@@ -114,7 +114,7 @@ function restatementOf(restatement: string, message: string): string {
 
 export const POST = withApi<Body>(
   { schema, rateLimit: { max: 60, windowSeconds: 300, key: 'chat.send' } },
-  async ({ user, body }) => {
+  async ({ request, user, body }) => {
     const receivedAt = Date.now();
 
     /*
@@ -419,6 +419,8 @@ export const POST = withApi<Body>(
       chosenModel,
       /* Already built above — passed on rather than built a second time. */
       ...(contextPrompt ? { contextPrompt } : {}),
+      /* A reader that goes away stops the model instead of letting it write to no one (P1-B). */
+      signal: request.signal,
     };
 
     /*

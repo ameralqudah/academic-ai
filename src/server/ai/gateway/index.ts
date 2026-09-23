@@ -21,7 +21,7 @@ import { createGateway, type GatewayDeps, type ModelGateway, type PlanInfo } fro
 import { databaseMeter } from './metering';
 import { systemClock } from './policy';
 import * as quota from './quota';
-import type { ConfiguredModel } from './routing';
+import { route, type ConfiguredModel } from './routing';
 
 export { GatewayError, toAppError } from './errors';
 export { defineTool, capabilityTool } from './tools';
@@ -99,6 +99,46 @@ export const productionDeps: GatewayDeps = {
   notify: (notice) => notify({ kind: notice }),
 };
 
+/**
+ * What the gateway would route to now, for the current user (free when there
+ * is none). Used to label a provider before it is called; the model that
+ * actually serves each call is on its result.
+ */
+export async function predictRoute(input: {
+  needsReasoning: boolean;
+  latencySensitive: boolean;
+  contextTokens?: number;
+  requested?: { provider: Provider; model: string } | null;
+}): Promise<{ provider: Provider; model: string; configured: boolean }> {
+  const scope = currentCallScope();
+  const [{ configured, defaultProvider, siblings }, tier] = await Promise.all([
+    models(),
+    scope ? plan(scope.userId).then((p) => p.tier).catch(() => 'free' as const) : Promise.resolve('free' as const),
+  ]);
+  const available = adapters();
+  const usable = configured.filter((m) => available[m.provider]?.configured());
+  if (usable.length === 0) {
+    const fallback = configured.find((m) => m.provider === defaultProvider) ?? configured[0]!;
+    return { ...fallback, configured: false };
+  }
+  try {
+    const decision = route({
+      tier,
+      configured: usable,
+      defaultProvider,
+      requested: input.requested ?? null,
+      needsReasoning: input.needsReasoning,
+      latencySensitive: input.latencySensitive,
+      contextTokens: input.contextTokens ?? 2000,
+      siblingModels: siblings,
+    });
+    return { provider: decision.chosen.provider, model: decision.chosen.model, configured: true };
+  } catch {
+    /* An entitlement refusal surfaces at call time, with its proper error. */
+    return { ...(input.requested ?? usable[0]!), configured: true };
+  }
+}
+
 let instance: ModelGateway | null = null;
 let override: ModelGateway | null = null;
 
@@ -110,6 +150,6 @@ export function gateway(): ModelGateway {
 }
 
 /** Replaces the gateway for a test run (integration and e2e fakes). Never called by production code. */
-export function useGatewayForTests(replacement: ModelGateway | null): void {
+export function setGatewayForTests(replacement: ModelGateway | null): void {
   override = replacement;
 }

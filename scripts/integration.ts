@@ -52,7 +52,6 @@ import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { namedFormat, resolveReference } from '@/server/agent/continuity';
 import { detectReference } from '@/server/agent/routing-rules';
 import { getTask, substituteFormat } from '@/server/services/task.service';
-import { shouldFailOver } from '@/server/ai/model-requirements';
 import { generateDocx } from '@/server/generators/docx';
 import { generatePdf } from '@/server/generators/documents';
 import {
@@ -5492,197 +5491,81 @@ async function main() {
   section('a provider failure moves to another provider');
 
   /*
-   * `withFailover` existed and nothing called it, which made it a claim rather
-   * than a behaviour. This drives the real sequence through deterministic
-   * providers: one fails the way a real provider fails, the other answers.
-   *
-   * The providers here are test doubles by construction — they implement the
-   * interface and return fixed values — and they exist only in this file.
-   * Nothing in production configuration refers to them.
+   * Since P1-B this drives the real sequence — the Model Gateway's — through
+   * scripted providers: one fails the way a real provider fails (classified by
+   * status and provider error type), the other answers. The same scenarios the
+   * legacy failover was tested with.
    */
+  {
+    const { createGateway } = await import('@/server/ai/gateway/gateway');
+    const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+    const { classifyHttp, GatewayError } = await import('@/server/ai/gateway/errors');
 
-  /** A provider that fails a set number of times, then answers. */
-  function stubProvider(options: {
-    name: 'anthropic' | 'openai' | 'google';
-    failWith?: { message: string; status?: number };
-    answer?: string;
-  }) {
-    let calls = 0;
-
-    return {
-      name: options.name,
-      model: `${options.name}-test`,
-      isConfigured: () => true,
-      countTokens: (text: string) => text.length,
-      stream: async function* () {
-        yield '';
-      },
-      complete: async () => {
-        calls += 1;
-
-        if (options.failWith) {
-          const error = new Error(options.failWith.message);
-          if (options.failWith.status) {
-            (error as unknown as { status: number }).status = options.failWith.status;
-          }
-          throw error;
-        }
-
-        return {
-          text: options.answer ?? 'ok',
-          stopReason: 'STOP',
-          usage: { tokensIn: 10, tokensOut: 10 },
-        };
-      },
-      get calls() {
-        return calls;
-      },
+    const failing = (status: number, body: unknown) => classifyHttp('google', status, JSON.stringify(body));
+    const run = async (first: InstanceType<typeof GatewayError> | null, withAlternative: boolean) => {
+      const primary = new FakeAdapter('google', first ? [{ fail: first }, { fail: first }, { fail: first }] : []);
+      const alternative = new FakeAdapter('openai', [{ reply: { text: 'answered by the fallback' } }]);
+      const gw = createGateway({
+        adapters: () => (withAlternative ? { google: primary, openai: alternative } : { google: primary }),
+        models: async () => ({
+          configured: [{ provider: 'google', model: 'gemini-2.5-pro' }, ...(withAlternative ? [{ provider: 'openai' as const, model: 'gpt-4.1' }] : [])],
+          defaultProvider: 'google',
+          siblings: {},
+        }),
+        plan: async () => ({ tier: 'paid', limits: { maxAiRequests: -1, maxGeneratedWords: -1 }, unlimited: () => true }),
+        checkProject: async () => undefined,
+        quota: {
+          reserve: async (input) => ({ id: input.idempotencyKey, userId: input.userId, periodKey: 'x', requests: 0, words: 0, status: 'reserved' }),
+          commit: async () => undefined,
+          release: async () => undefined,
+        },
+        meter: { attempt: async () => undefined, toolCalls: async () => new Map() },
+        clock: { now: () => 0, sleep: async () => undefined, random: () => 0.5 },
+        scope: () => ({ userId: 'integration' }),
+        notify: () => undefined,
+      });
+      try {
+        const response = await gw.generate({ purpose: 'chat', messages: [{ role: 'user', content: 'hi' }], needsReasoning: false });
+        return { text: response.text, provider: response.provider, primary: primary.calls.length, alternative: alternative.calls.length };
+      } catch (error) {
+        return { error: (error as InstanceType<typeof GatewayError>).errorClass, primary: primary.calls.length, alternative: alternative.calls.length };
+      }
     };
-  }
 
-  /**
-   * The failover sequence, driven directly.
-   *
-   * Mirrors what `runWithFailover` does inside the AI service: try, decide
-   * whether the failure is the provider's, try the alternative if there is
-   * one. Driving it here rather than through `runCompletion` avoids needing a
-   * real key while still exercising the decision and the sequence.
-   */
-  async function attemptWithFailover(
-    primary: ReturnType<typeof stubProvider>,
-    alternative: ReturnType<typeof stubProvider> | null,
-  ): Promise<{ text: string; usedAlternative: boolean } | { error: string }> {
-    try {
-      const result = await primary.complete();
-      return { text: result.text, usedAlternative: false };
-    } catch (error) {
-      if (!shouldFailOver(error)) return { error: 'not-retryable' };
-      if (!alternative) return { error: 'no-alternative' };
+    const quota = await run(failing(429, { error: { message: 'You exceeded your current quota' } }), true);
+    check('a quota failure reaches the fallback', ['text' in quota && quota.text, quota.primary, quota.alternative], ['answered by the fallback', 1, 1]);
 
-      const result = await alternative.complete();
-      return { text: result.text, usedAlternative: true };
-    }
-  }
+    const outage = await run(failing(503, { error: { message: 'Service Unavailable' } }), true);
+    assertTrue('a 503 reaches the fallback', 'text' in outage);
 
-  /* --- 429 on the first provider, the second answers -------------------- */
+    const timeout = await run(new GatewayError('timeout', 'ETIMEDOUT', { provider: 'google' }), true);
+    assertTrue('a timeout reaches the fallback', 'text' in timeout);
 
-  {
-    const primary = stubProvider({
-      name: 'google',
-      failWith: { message: 'You exceeded your current quota', status: 429 },
-    });
+    /* A 400 would fail identically on every provider; retrying hides a bug in the request behind an outage. */
+    const malformed = await run(failing(400, { error: { type: 'invalid_request_error', message: 'invalid request schema' } }), true);
+    check('a malformed request is not retried elsewhere', ['error' in malformed && malformed.error, malformed.alternative], ['invalid_request', 0]);
 
-    const alternative = stubProvider({ name: 'anthropic', answer: 'answered by the fallback' });
+    const refusal = await run(new GatewayError('refusal', 'I cannot help with that request', { provider: 'google' }), true);
+    check('a refusal is not retried elsewhere', ['error' in refusal && refusal.error, refusal.alternative], ['refusal', 0]);
 
-    const outcome = await attemptWithFailover(primary, alternative);
-
-    assertTrue('a quota failure reaches the fallback', 'text' in outcome);
-
-    if ('text' in outcome) {
-      check('and the fallback answered', outcome.text, 'answered by the fallback');
-      check('having actually been used', outcome.usedAlternative, true);
-    }
-
-    check('the first provider was tried once', primary.calls, 1);
-    check('and the second once', alternative.calls, 1);
-  }
-
-  /* --- a service outage behaves the same --------------------------------- */
-
-  {
-    const primary = stubProvider({
-      name: 'google',
-      failWith: { message: 'Service Unavailable', status: 503 },
-    });
-
-    const outcome = await attemptWithFailover(primary, stubProvider({ name: 'openai', answer: 'ok' }));
-    assertTrue('a 503 reaches the fallback', 'text' in outcome);
-  }
-
-  /* --- and a timeout ------------------------------------------------------ */
-
-  {
-    const primary = stubProvider({ name: 'google', failWith: { message: 'ETIMEDOUT' } });
-
-    const outcome = await attemptWithFailover(primary, stubProvider({ name: 'openai', answer: 'ok' }));
-    assertTrue('a timeout reaches the fallback', 'text' in outcome);
-  }
-
-  /* --- a malformed request does not ------------------------------------- */
-
-  {
-    /*
-     * A 400 would fail identically on every provider. Retrying spends a second
-     * call to receive the same answer, and hides a bug in the request behind
-     * what looks like an outage.
-     */
-    const primary = stubProvider({
-      name: 'google',
-      failWith: { message: 'invalid request schema', status: 400 },
-    });
-
-    const alternative = stubProvider({ name: 'anthropic', answer: 'should not be reached' });
-
-    const outcome = await attemptWithFailover(primary, alternative);
-
-    assertTrue('a malformed request is not retried elsewhere', 'error' in outcome);
-    check('the alternative was never called', alternative.calls, 0);
-  }
-
-  /* --- nor a refusal ------------------------------------------------------ */
-
-  {
-    const primary = stubProvider({
-      name: 'google',
-      failWith: { message: 'I cannot help with that request' },
-    });
-
-    const alternative = stubProvider({ name: 'anthropic', answer: 'should not be reached' });
-
-    const outcome = await attemptWithFailover(primary, alternative);
-
-    assertTrue('a refusal is not retried elsewhere', 'error' in outcome);
-    check('the alternative was never called', alternative.calls, 0);
-  }
-
-  /* --- with nothing to fall back to, the failure is clear ---------------- */
-
-  {
-    /*
-     * The state of this deployment: one provider configured. The error must
-     * reach the caller unchanged, because the service layer turns it into a
-     * message that names the quota or the outage — and a wrapper would hide
-     * exactly the detail the researcher needs.
-     */
-    const primary = stubProvider({
-      name: 'google',
-      failWith: { message: 'quota exceeded', status: 429 },
-    });
-
-    const outcome = await attemptWithFailover(primary, null);
-
-    assertTrue('a retryable failure with no alternative still fails', 'error' in outcome);
-
-    if ('error' in outcome) {
-      check('and says why', outcome.error, 'no-alternative');
-    }
+    /* One provider configured: the failure is retried within the budget, then reaches the caller classified. */
+    const alone = await run(failing(429, { error: { message: 'quota exceeded' } }), false);
+    check('a retryable failure with no alternative still fails, and says why', ['error' in alone && alone.error, alone.primary], ['rate_limit', 3]);
   }
 
   {
-    /* The service wires failover at the single point every call passes through. */
+    /* The failover lives in the gateway, and the service has no second copy of it. */
     const serviceSource = await readFile('src/server/services/ai.service.ts', 'utf8');
+    const gatewaySource = await readFile('src/server/ai/gateway/gateway.ts', 'utf8');
 
-    assertTrue('the completion path fails over', serviceSource.includes('runWithFailover(input,'));
-    assertTrue(
-      'choosing the alternative through the router',
-      serviceSource.includes('alternativeProvider('),
-    );
-    assertTrue('and logging the switch', serviceSource.includes("logger.warn('ai.failover'"));
+    assertTrue('every completion path fails over, in the gateway', gatewaySource.includes('nextTarget(attempt, primary, fallback)'));
+    assertTrue('choosing the alternative within the plan (routing decision)', gatewaySource.includes('prepared.decision.fallbacks[0]'));
+    assertTrue("and logging the switch", gatewaySource.includes("'ai.gateway.failover'"));
+    assertTrue('with no stacked failover in the service', !serviceSource.includes('runWithFailover') && !serviceSource.includes('alternativeProvider('));
 
     /*
-     * Provider resolution is the router's job now. One direct call remains, in
-     * the configuration check that runs before the work is known — routing
-     * there would ask for a model for a task not yet described.
+     * Provider resolution is the router's job. One direct call remains, in the
+     * configuration check that runs before the work is known.
      */
     const directCalls = serviceSource.split('await resolveProvider(').length - 1;
     check('one direct resolution remains, in the configuration check', directCalls, 1);

@@ -102,7 +102,13 @@ export async function reserve(input: ReserveInput): Promise<Reservation> {
         AppError.planLimit('aiRequests', used.requests, maxAiRequests),
       );
     }
-    if (input.words > 0 && !input.unlimited(maxGeneratedWords) && used.words + input.words > maxGeneratedWords) {
+    /*
+     * A generation needs room for at least one word, whatever it estimated: a
+     * zero estimate must not slip past a plan whose words are used up. Internal
+     * steps (no request, no words) are metered but not blocked.
+     */
+    const wantsWords = input.requests > 0 || input.words > 0;
+    if (wantsWords && !input.unlimited(maxGeneratedWords) && used.words + Math.max(input.words, 1) > maxGeneratedWords) {
       throw new GatewayError('quota', 'The plan’s generated words for this month are used up.', {}).withCause(
         AppError.planLimit('generatedWords', used.words, maxGeneratedWords),
       );

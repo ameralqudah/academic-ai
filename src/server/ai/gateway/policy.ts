@@ -58,8 +58,13 @@ export function timeoutFor(kind: RequestKind | 'longForm', requested?: number): 
   return requested ? Math.min(requested, ceiling) : ceiling;
 }
 
-/** Delay before `attempt` (2 or 3), honouring the provider's retry-after within the cap; ±20 % jitter. */
-export function backoffMs(attempt: number, error: GatewayError, clock: Clock): number {
+/**
+ * Delay before `attempt` (2 or 3), honouring the provider's retry-after within
+ * the cap; ±20 % jitter. Moving to a *different* model needs no wait: the one
+ * that just reported it is overloaded is the only one worth waiting for.
+ */
+export function backoffMs(attempt: number, error: GatewayError, clock: Clock, sameTarget = true): number {
+  if (!sameTarget) return 0;
   const base = BACKOFF_MS[attempt] ?? BACKOFF_MS[BACKOFF_MS.length - 1]!;
   const asked = error.retryAfterSeconds ? Math.min(error.retryAfterSeconds * 1000, MAX_RETRY_AFTER_MS) : 0;
   const delay = Math.max(base, asked);

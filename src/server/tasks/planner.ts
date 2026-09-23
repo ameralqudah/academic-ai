@@ -22,9 +22,11 @@
  */
 
 import { logger } from '@/lib/logger';
-import { runCompletion } from '@/server/services/ai.service';
+import { z } from 'zod';
+
+import { gateway, GatewayError, toAppError } from '@/server/ai/gateway';
 import { requirementsFor } from '@/server/ai/model-requirements';
-import { selectModel } from '@/server/ai/model-router';
+import { currentPreferredModel } from '@/server/ai/request-scope';
 
 import { allCapabilities, capabilityFor, isKnownCapability } from './capabilities';
 import { repairPrerequisites } from './prerequisites';
@@ -83,12 +85,6 @@ export async function planTask(input: {
    */
   suggestedCapabilities?: string[];
 }): Promise<Plan> {
-  /*
-   * Routed. Planning is reasoning over a request and a context — a different
-   * call from a one-line classification, and it was reaching whichever model
-   * the environment named.
-   */
-  const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
   /*
    * A request to draw the research model, with no data attached, needs no
@@ -292,27 +288,15 @@ ${
 
 10. A document.generate step must depend on the steps that produce its content. Generating a file before the writing that goes in it produces an empty document.`;
 
-  const result = await runCompletion({
-    userId: input.userId,
-    projectId: '',
-    provider,
-    task: 'chat',
-    locale: input.locale,
+  const planned = await planThroughGateway({
+    purpose: 'task.plan',
     system,
-    messages: [
-      {
-        role: 'user',
-        content: `Request: ${input.request}\n\nAvailable context: ${JSON.stringify(input.context)}`,
-      },
-    ],
-    maxTokens: 2500,
-    /* A plan should be the same twice for the same request. */
-    temperature: 0,
-    json: true,
+    content: `Request: ${input.request}\n\nAvailable context: ${JSON.stringify(input.context)}`,
+    maxOutputTokens: 2500,
   });
 
   const referredKind = (input.context.references as { kind?: string } | undefined)?.kind;
-  const parsed = parsePlan(result.text, referredKind === 'artifact' || referredKind === 'prose');
+  const parsed = planned === null ? null : parsePlan(planned, referredKind === 'artifact' || referredKind === 'prose');
 
   if (!parsed) {
     /*
@@ -394,12 +378,6 @@ export async function planAdditionalSteps(input: {
 }): Promise<PlannedStep[]> {
   if (input.stepsAvailable <= 0) return [];
 
-  /*
-   * Routed. Planning is reasoning over a request and a context — a different
-   * call from a one-line classification, and it was reaching whichever model
-   * the environment named.
-   */
-  const provider = (await selectModel(requirementsFor({ capability: 'deep.research' }))).provider;
 
   const capabilities = allCapabilities()
     .map((capability) => `- ${capability.id}`)
@@ -422,33 +400,64 @@ Rules:
 
 4. Do not duplicate work already done or already planned.`;
 
-  const result = await runCompletion({
-    userId: input.userId,
-    projectId: '',
-    provider,
-    task: 'chat',
-    locale: input.locale,
+  const planned = await planThroughGateway({
+    purpose: 'task.replan',
     system,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          `Original request: ${input.originalRequest}`,
-          `What triggered this: ${input.trigger}`,
-          `Completed: ${input.completedSteps.map((step) => step.label).join('; ')}`,
-          `Still planned: ${input.remainingSteps.map((step) => step.label).join('; ')}`,
-        ].join('\n\n'),
-      },
-    ],
-    maxTokens: 1200,
-    temperature: 0,
-    json: true,
+    content: [
+      `Original request: ${input.originalRequest}`,
+      `What triggered this: ${input.trigger}`,
+      `Completed: ${input.completedSteps.map((step) => step.label).join('; ')}`,
+      `Still planned: ${input.remainingSteps.map((step) => step.label).join('; ')}`,
+    ].join('\n\n'),
+    maxOutputTokens: 1200,
   });
 
-  const parsed = parsePlan(result.text);
+  const parsed = planned === null ? null : parsePlan(planned);
   if (!parsed) return [];
 
   return parsed.steps.slice(0, input.stepsAvailable);
+}
+
+/**
+ * A plan from the model, as native structured output through the Model
+ * Gateway (P1-B), validated against the plan's shape before `parsePlan`
+ * checks its meaning (known capabilities, real dependencies). Planning is an
+ * internal step: metered, not counted as a request.
+ *
+ * Null when the model did not return a plan of that shape — the callers
+ * already treat an unplannable request gracefully.
+ */
+const PLAN_SHAPE = z.object({
+  steps: z.array(z.record(z.string(), z.unknown())),
+  summary: z.string().optional(),
+  missingInformation: z.array(z.unknown()).optional(),
+});
+
+async function planThroughGateway(input: { purpose: string; system: string; content: string; maxOutputTokens: number }): Promise<string | null> {
+  const requirements = requirementsFor({ capability: 'deep.research' });
+  try {
+    const { data } = await gateway().generateStructured(
+      {
+        purpose: input.purpose,
+        system: input.system,
+        messages: [{ role: 'user', content: input.content }],
+        maxOutputTokens: input.maxOutputTokens,
+        /* A plan should be the same twice for the same request. */
+        temperature: 0,
+        needsReasoning: requirements.needsReasoning,
+        latencySensitive: requirements.latencySensitive,
+        requested: currentPreferredModel(),
+        countsAsRequest: false,
+      },
+      PLAN_SHAPE,
+      { name: 'plan' },
+    );
+    return JSON.stringify(data);
+  } catch (error) {
+    if (error instanceof GatewayError && error.errorClass === 'schema_validation') return null;
+    if (error instanceof GatewayError) throw toAppError(error);
+    throw error;
+  }
 }
 
 /**

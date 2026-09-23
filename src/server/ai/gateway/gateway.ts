@@ -91,6 +91,13 @@ export interface GatewayDeps {
 
 export interface CallOptions {
   signal?: AbortSignal;
+  /**
+   * Ids for this call on top of the scope's (a streamed generator runs in its
+   * caller's async context, so a call site can name its project here). The
+   * user always comes from the scope; a project named here is authorised
+   * against that user like any other.
+   */
+  ids?: { projectId?: string | null; taskId?: string | null; jobId?: string | null; runId?: string | null };
   /** Timeout class for long-form rounds, which may run longer than a plain generation. */
   timeoutKind?: 'longForm';
 }
@@ -164,7 +171,8 @@ export function createGateway(deps: GatewayDeps) {
       throw new GatewayError('invalid_request', `Invalid gateway request: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
     }
     const request = parsed.data;
-    const scope = deps.scope();
+    const base = deps.scope();
+    const scope = base ? { ...base, ...Object.fromEntries(Object.entries(options.ids ?? {}).filter(([, v]) => v)) } : null;
     if (!scope?.userId) {
       throw new GatewayError('internal', 'A model call was made outside a user scope; refused rather than routed as anonymous.');
     }
@@ -342,9 +350,12 @@ export function createGateway(deps: GatewayDeps) {
             to: `${target.provider}:${target.model}`,
             errorClass: lastError?.errorClass,
           });
-          await deps.clock.sleep(backoffMs(attempt, lastError!, deps.clock), options.signal).catch(() => {
-            throw new GatewayError('cancelled', 'The request was cancelled.');
-          });
+          const wait = backoffMs(attempt, lastError!, deps.clock, target === primary);
+          if (wait > 0) {
+            await deps.clock.sleep(wait, options.signal).catch(() => {
+              throw new GatewayError('cancelled', 'The request was cancelled.');
+            });
+          }
         }
         const started = deps.clock.now();
         try {
@@ -525,9 +536,12 @@ export function createGateway(deps: GatewayDeps) {
           const notice = target === primary ? 'retry' : 'failover';
           deps.notify(notice);
           yield { type: 'notice', notice };
-          await deps.clock.sleep(backoffMs(attempt, lastError!, deps.clock), options.signal).catch(() => {
-            throw new GatewayError('cancelled', 'The request was cancelled.');
-          });
+          const wait = backoffMs(attempt, lastError!, deps.clock, target === primary);
+          if (wait > 0) {
+            await deps.clock.sleep(wait, options.signal).catch(() => {
+              throw new GatewayError('cancelled', 'The request was cancelled.');
+            });
+          }
         }
         const controller = new AbortController();
         current = { attempt, target, started: deps.clock.now(), recorded: false, controller };

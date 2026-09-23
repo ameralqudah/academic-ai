@@ -161,6 +161,7 @@ async function main() {
     maxOutputTokens: 100,
     temperature: 0.2,
     cacheSystem: true,
+    jsonMode: false,
     needsReasoning: false,
     latencySensitive: true,
     countsAsRequest: true,
@@ -323,8 +324,14 @@ async function main() {
     const gw = createGateway(h.deps);
     const r = await gw.generate(ask('x', { needsReasoning: false, latencySensitive: false }));
     check('a rate limit fails over to the permitted alternative', [r.provider, r.attempts, h.notices], ['google', 2, ['failover']]);
-    check('backoff honours retry-after (±20 % jitter, deterministic)', h.sleeps, [2000]);
+    check('moving to a different model does not wait', h.sleeps, []);
     check('each attempt leaves a usage row', h.meter.map((m) => `${m.attempt}:${m.provider}:${m.status}:${m.errorClass ?? ''}`), ['1:openai:failed:rate_limit', '2:google:succeeded:']);
+  }
+  {
+    const o = new FakeAdapter('openai', [{ fail: new GatewayError('rate_limit', 'slow', { provider: 'openai', retryAfterSeconds: 2 }) }, { reply: { text: 'second' } }]);
+    const h = harness({ openai: o }, { models: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai' });
+    const r = await createGateway(h.deps).generate(ask());
+    check('a retry of the same model honours retry-after (±20 % jitter, deterministic)', [r.attempts, h.sleeps, h.notices], [2, [2000], ['retry']]);
   }
   {
     for (const cls of ['auth', 'invalid_request', 'context_length', 'refusal'] as const) {

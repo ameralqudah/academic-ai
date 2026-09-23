@@ -84,12 +84,29 @@ export function arabicShare(text: string): number {
  */
 export function decideConversationLanguage(input: {
   request: string;
+  /** Earlier user turns, most recent first, for a message whose script is mixed. */
+  history?: string[];
   interfaceLocale?: OutputLanguage;
 }): OutputLanguage {
   const letters = (input.request ?? '').replace(/[^\p{L}]/gu, '').length;
 
   if (letters >= 3) {
     const share = arabicShare(input.request);
+    if (share >= 0.5) return 'ar';
+    if (share < 0.2) return 'en';
+  }
+
+  /*
+   * A mixed message — "حلل SmartPLS" — is two Arabic words and a product
+   * name, and the share falls between the thresholds. The conversation
+   * answers it: someone who has been writing Arabic is asked in Arabic, even
+   * with an English interface. Asked in English there, a researcher is being
+   * addressed in a language they did not choose.
+   */
+  for (const turn of (input.history ?? []).slice(0, 5)) {
+    const earlier = (turn ?? '').replace(/[^\p{L}]/gu, '').length;
+    if (earlier < 3) continue;
+    const share = arabicShare(turn);
     if (share >= 0.5) return 'ar';
     if (share < 0.2) return 'en';
   }

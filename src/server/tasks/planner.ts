@@ -50,6 +50,15 @@ export interface Plan {
   summary: string;
 }
 
+/** The file format a request names, if it names one this can produce. */
+function formatAskedFor(request: string): string | null {
+  if (/\b(?:word|docx)\b|وورد|ورد\b/iu.test(request)) return 'docx';
+  if (/\bpdf\b|بي\s*دي\s*اف/iu.test(request)) return 'pdf';
+  if (/\b(?:excel|xlsx|spreadsheet)\b|اكسل|إكسل/iu.test(request)) return 'xlsx';
+  if (/\b(?:powerpoint|pptx)\b|بوربوينت/iu.test(request)) return 'pptx';
+  return null;
+}
+
 /**
  * Builds the initial plan.
  *
@@ -123,6 +132,13 @@ export async function planTask(input: {
     !asksForDiagram(input.request) &&
     !input.context.references
   ) {
+    /*
+     * "…as a Word file" adds the export, and nothing else: the file holds the
+     * tables the analysis computed. A writing step here would produce prose
+     * about results, which is the researcher's to write.
+     */
+    const format = formatAskedFor(input.request);
+
     return {
       steps: [
         {
@@ -132,6 +148,20 @@ export async function planTask(input: {
           dependsOn: [],
           input: { intent: hints.intent, columns: hints.mentioned ?? [] },
         },
+        ...(format
+          ? [
+              {
+                key: 'export',
+                capability: 'document.generate',
+                label: input.locale === 'ar' ? 'إنشاء الملف' : 'Creating the file',
+                dependsOn: ['analyse'],
+                input: {
+                  format,
+                  title: input.locale === 'ar' ? 'نتائج التحليل الإحصائي' : 'Statistical analysis results',
+                },
+              },
+            ]
+          : []),
       ],
       missingInformation: [],
       summary: '',

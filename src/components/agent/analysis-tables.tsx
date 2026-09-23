@@ -12,6 +12,7 @@
 import { useTranslations } from 'next-intl';
 
 import type { DescriptiveTables } from '@/analysis/descriptives';
+import { FigurePreview } from '@/components/agent/task-progress';
 
 const cell = 'px-2 py-1.5 font-mono text-end text-ink';
 const head = 'px-2 py-1.5 text-xs font-medium text-muted';
@@ -119,6 +120,20 @@ export function DescriptivesView({ payload }: { payload: unknown }) {
           {t('skipped', { columns: data.skipped.map((entry) => entry.variable).join(', ') })}
         </p>
       )}
+    </div>
+  );
+}
+
+/** The figures an analysis drew, each downloadable as PNG or SVG. */
+export function ChartsView({ payload }: { payload: unknown }) {
+  const items = (payload as { items?: { title: string; artifactId: string; variable: string }[] })?.items ?? [];
+  if (items.length === 0) return null;
+
+  return (
+    <div className="flex flex-col gap-3">
+      {items.map((item) => (
+        <FigurePreview key={item.artifactId} artifactId={item.artifactId} name={`${item.title}.svg`} />
+      ))}
     </div>
   );
 }

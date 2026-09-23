@@ -4847,5 +4847,58 @@ console.log('\nwhat a model costs');
   check('"complete" asks for everything', asksForEverything('حلل spss كامل'), true);
 }
 
+/* ------------------------------------------------------------------ */
+/* Figures of the data, and the file they go into                      */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nFigures of the data, and the file they go into');
+  const { parseCsv, profileDataset } = await import('../src/analysis');
+  const { descriptiveTables } = await import('../src/analysis/descriptives');
+  const { chartsFor } = await import('../src/server/charts/plots');
+  const { asksForCharts } = await import('../src/server/charts/requests');
+  const { asksForDiagram } = await import('../src/server/diagrams/requests');
+  const { analysisSections } = await import('../src/server/generators/analysis-sections');
+  const { decideConversationLanguage } = await import('../src/server/context/language');
+  const { generateDocx } = await import('../src/server/generators/docx');
+  const { validateArtifactBytes: validate } = await import('../src/server/generators/documents');
+
+  check('"رسمات بيانية" asks for figures', asksForCharts('حلل spss كامل بجداول مع رسمات بيانبه'), true);
+  check('and not for the research model', asksForDiagram('حلل spss كامل بجداول مع رسمات بيانبه'), false);
+  check('while "ارسم نموذج الدراسة" still is the model', asksForDiagram('ارسم نموذج الدراسة'), true);
+
+  const rows = ['Participant_Code,Sector,Years,SQ1'];
+  for (let i = 0; i < 24; i++) rows.push([`P${i + 1}`, ['Public', 'Private'][i % 2], 3 + (i % 12), 1 + (i % 5)].join(','));
+  const profile = profileDataset(parseCsv(rows.join('\n'), 'survey.csv'));
+  const values = new Map<string, number[]>([['Years', Array.from({ length: 24 }, (_, i) => 3 + (i % 12))]]);
+  const charts = chartsFor(profile, { language: 'en', values });
+
+  check('a category and a scale each get a figure', charts.map((chart) => `${chart.variable}:${chart.kind}`), ['Sector:bar', 'Years:histogram', 'SQ1:bar']);
+  check('the participant code gets none', charts.some((chart) => chart.variable === 'Participant_Code'), false);
+  const bar = charts.find((chart) => chart.variable === 'Sector');
+  check('a bar carries the count the table reports', bar?.svg.includes('>12</text>'), true);
+  check('the figure is a valid drawing', (await validate(new TextEncoder().encode(bar?.svg ?? ''), 'svg')).valid, true);
+  check('carrying its own Arabic font', chartsFor(profile, { language: 'ar', values })[0]?.svg.includes("font-family:'Plex Arabic'"), true);
+
+  const sections = analysisSections(
+    [
+      { kind: 'descriptives', payload: descriptiveTables(profile) },
+      { kind: 'reliability', payload: { alpha: 0.842, items: ['SQ1', 'SQ2'], n: 24 } },
+      { kind: 'note', payload: { lines: ['اكتب «قارن Years بين Sector».'] } },
+    ],
+    'ar',
+  );
+  check('the tables become sections of a document', sections.filter((section) => section.table).length >= 3, true);
+  const first = sections[0]?.table;
+  check('with the same numbers the screen shows', first?.rows[0]?.slice(0, 3), ['Years', 24, '3.00']);
+
+  const file = await generateDocx({ title: 'نتائج التحليل الإحصائي', sections });
+  check('and the Word file carries them', file.byteLength > 5000, true);
+  check('as a valid document', (await validate(file, 'docx')).valid, true);
+
+  check('someone writing Arabic is answered in Arabic', decideConversationLanguage({ request: 'حلل SmartPLS', history: ['اوصفلي بيانات', 'قارن بينهم'], interfaceLocale: 'en' }), 'ar');
+  check('and someone writing English is not', decideConversationLanguage({ request: 'run SmartPLS', history: ['describe my data'], interfaceLocale: 'en' }), 'en');
+  check('with no history, the interface decides a mixed message', decideConversationLanguage({ request: 'حلل SmartPLS', interfaceLocale: 'en' }), 'en');
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

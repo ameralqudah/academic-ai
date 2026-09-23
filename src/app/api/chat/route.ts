@@ -180,6 +180,7 @@ export const POST = withApi<Body>(
     /* The language to address the researcher in; see `decideConversationLanguage`. */
     const userLanguage = decideConversationLanguage({
       request: body.message,
+      history: history.filter((turn) => turn.role === 'user').map((turn) => turn.content),
       interfaceLocale: body.locale,
     });
 

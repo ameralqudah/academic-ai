@@ -5,6 +5,8 @@
  * database that the analysis itself needs.
  */
 
+import { asksForCharts } from '@/server/charts/requests';
+
 import type { DatasetProfile } from '@/analysis/types';
 
 const DATA_INTENTS = new Set([
@@ -82,10 +84,13 @@ export function softwareIntentOf(message: string): 'stats.cbSem' | 'stats.plsSem
 
 /** Whether a message asks for its data to be analysed, in any words. */
 export function asksForAnalysis(message: string): boolean {
-  return ANALYSIS_WORDS.test(message) || softwareIntentOf(message) !== null;
+  return ANALYSIS_WORDS.test(message) || asksForCharts(message) || softwareIntentOf(message) !== null;
 }
 
 /** "Analyse everything": the full set of tables rather than one of them. */
 export function asksForEverything(message: string): boolean {
   return WHOLE.test(message) || STATISTICS_PACKAGE.test(message);
 }
+
+export { asksForCharts } from '@/server/charts/requests';
+

@@ -468,6 +468,7 @@ test.describe('a direct answer, as it is written', () => {
         ],
         skipped: [{ variable: 'Participant_Code', reason: 'identifier' }],
       }),
+      display('charts', { items: [{ title: 'Counts of Sector', kind: 'bar', variable: 'Sector', artifactId: 'figure-bar' }] }),
       display('cbsem', {
         n: 180,
         fit: { chiSquare: 9.21, df: 8, pValue: 0.325, normedChiSquare: 1.15, cfi: 0.998, tli: 0.996, rmsea: 0.029, srmr: 0.021, verdict: 'good' },
@@ -477,6 +478,12 @@ test.describe('a direct answer, as it is written', () => {
       }),
     ];
 
+    await page.route('**/api/artifacts/figure-bar', (route) =>
+      route.fulfill({
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="90"><rect width="200" height="90" fill="#fff"/><rect x="20" y="20" width="40" height="60" fill="#eef5f2" stroke="#0b4a3b"/></svg>',
+      }),
+    );
     await page.route('**/api/tasks/programs/stream', (route) => route.fulfill({ status: 404 }));
     await page.route('**/api/tasks/programs', (route) =>
       route.fulfill({
@@ -509,6 +516,9 @@ test.describe('a direct answer, as it is written', () => {
     await expect(page.getByText(/Model fit — good fit/)).toBeVisible();
     await expect(page.getByRole('cell', { name: '0.998' })).toBeVisible();
     await expect(page.getByText('Composite reliability and convergent validity')).toBeVisible();
+    /* A figure of the data, with its downloads. */
+    await expect(page.getByRole('img', { name: 'Counts of Sector.svg' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'PNG image' })).toBeVisible();
     await page.screenshot({ path: 'test-results/any-program.png', fullPage: true });
   });
 

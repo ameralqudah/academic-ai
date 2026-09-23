@@ -24,12 +24,12 @@ export const ITEM_FILL = '#ffffff';
 export const MODERATOR_FILL = '#fbf6ea';
 export const ACCENT = '#8a6420';
 
-const FONT_FAMILY = "'Plex Arabic', 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, Arial, sans-serif";
+export const FONT_FAMILY = "'Plex Arabic', 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, Arial, sans-serif";
 
 let fontFaces: string | null = null;
 
 /** The @font-face rules, read once. Absent fonts leave the system fallback. */
-function embeddedFonts(): string {
+export function embeddedFonts(): string {
   if (fontFaces !== null) return fontFaces;
 
   const directory = join(process.cwd(), 'node_modules', '@fontsource', 'ibm-plex-sans-arabic', 'files');

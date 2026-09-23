@@ -20,7 +20,9 @@ import type { RoleAssignment } from '@/analysis/inference/recommend';
 import type { ColumnProfile, DatasetProfile } from '@/analysis/types';
 
 import { chooseTestFor, columnsFor } from './analysis-choice';
-import { asksForEverything, columnsNamedIn } from './data-requests';
+import { chartsFor } from '@/server/charts/plots';
+
+import { asksForCharts, asksForEverything, columnsNamedIn } from './data-requests';
 import { loadForAnalysis } from './dataset.service';
 import { runCbSem, runPls } from './pls.service';
 import { runAnalysis } from './statistics.service';
@@ -33,6 +35,7 @@ export type DisplayKind =
   | 'recommendation'
   | 'analysis'
   | 'reliability'
+  | 'charts'
   | 'pls'
   | 'cbsem';
 
@@ -141,8 +144,19 @@ export async function analyseDataRequest(input: {
       kind: 'descriptives',
       payload: descriptiveTables(profile) as unknown as Record<string, unknown>,
     };
-    if (!asksForEverything(input.message)) return { status: 'done', displays: [tables] };
-    return { status: 'done', displays: [tables, ...(await everythingElse(input, profile))] };
+    const figures = asksForCharts(input.message)
+      ? [
+          {
+            kind: 'charts' as const,
+            payload: {
+              items: chartsFor(profile, { language: input.language, values: numbersByColumn(loaded) }),
+            },
+          },
+        ]
+      : [];
+
+    if (!asksForEverything(input.message)) return { status: 'done', displays: [tables, ...figures] };
+    return { status: 'done', displays: [tables, ...figures, ...(await everythingElse(input, profile))] };
   }
 
   if (input.intent === 'stats.cbSem' || input.intent === 'stats.plsSem') {
@@ -228,6 +242,24 @@ export async function analyseDataRequest(input: {
       { kind: 'analysis', payload: outcome.result as Record<string, unknown>, runId: outcome.run.id },
     ],
   };
+}
+
+/** Every numeric column's values, for the figures that need the raw numbers. */
+function numbersByColumn(loaded: { data: { columns: string[]; rows: unknown[][] } }): Map<string, number[]> {
+  const values = new Map<string, number[]>();
+
+  loaded.data.columns.forEach((name, index) => {
+    values.set(
+      name,
+      loaded.data.rows.map((row) => {
+        const value = row[index];
+        const parsed = typeof value === 'number' ? value : Number(value);
+        return Number.isFinite(parsed) ? parsed : Number.NaN;
+      }),
+    );
+  });
+
+  return values;
 }
 
 /**

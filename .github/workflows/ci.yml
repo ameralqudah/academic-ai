@@ -1,0 +1,132 @@
+# Continuous integration: every push and pull request runs the full regression
+# suite — types, lint, dependency audit, the pure-logic and statistics suites
+# (including the lavaan parity fixtures), the database suites against a real
+# PostgreSQL, a production build, and the browser tests.
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  # Harmless placeholders for code that reads configuration at import time.
+  AUTH_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
+  EMAIL_PROVIDER: console
+  BILLING_PROVIDER: manual
+
+jobs:
+  checks:
+    name: Types, lint, audit, unit and statistics suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Dependency audit (high and critical fail the build)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Smoke suite
+        run: npm run test:smoke
+      - name: Statistics suite (includes lavaan/semTools reference parity)
+        run: npm run test:analysis
+      - name: Knowledge providers (tolerates network outages)
+        run: npm run test:knowledge
+
+  database:
+    name: Integration and job suites (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: academic_ai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/academic_ai_test
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Migrate
+        run: npm run db:migrate
+      - name: Seed plans
+        run: npm run db:seed
+      - name: Integration suite
+        run: npm run test:integration
+      - name: Durable job suite
+        run: npm run test:jobs
+
+  build-and-e2e:
+    name: Production build and browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [checks]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: academic_ai_e2e
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/academic_ai_e2e
+      AUTH_URL: http://127.0.0.1:3100
+      APP_URL: http://127.0.0.1:3100
+      AUTH_RATE_LIMIT_MAX: '1000'
+      STORAGE_LOCAL_DIR: /tmp/academic-ai-storage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: mkdir -p "$STORAGE_LOCAL_DIR"
+      - name: Migrate and seed
+        run: npm run db:migrate && npm run db:seed
+      - name: Production build
+        run: npm run build
+        env:
+          NODE_ENV: production
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Browser tests
+        run: npm run test:e2e
+        env:
+          NODE_ENV: production
+          CI: 'true'
+      - name: Upload the Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

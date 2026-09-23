@@ -401,7 +401,15 @@ export function AgentChat({
 
   async function send(
     text: string,
-    options: { regeneratedParentId?: string | null } = {},
+    options: {
+      regeneratedParentId?: string | null;
+      /** Answer this existing question instead of recording a new one (edit, regenerate). */
+      replyToMessageId?: string | null;
+      /** Show the question as a new bubble even though it is not recorded again (edit). */
+      showQuestion?: boolean;
+      /** Variable roles from the role picker, sent with this request only. */
+      roles?: RoleAssignment[];
+    } = {},
   ) {
     const trimmed = text.trim();
     if (!trimmed || busy) return;
@@ -450,7 +458,16 @@ export function AgentChat({
      * appeared in code that had not changed.
      */
     if (mode === 'chat') {
-      void runRouted(trimmed);
+      /*
+       * The options go with it. They were dropped here, so regenerate recorded
+       * the question a second time and the role picker's answer never left
+       * the browser.
+       */
+      void runRouted(trimmed, {
+        replyToMessageId: options.replyToMessageId ?? options.regeneratedParentId ?? null,
+        showQuestion: options.showQuestion ?? !(options.replyToMessageId ?? options.regeneratedParentId),
+        roles: options.roles,
+      });
       return;
     }
 
@@ -689,7 +706,14 @@ export function AgentChat({
         return index >= 0 ? current.slice(0, index) : current;
       });
 
-      void send(content);
+      /*
+       * The edited question is already stored — as a new branch — so the
+       * answer attaches to it rather than recording the question again.
+       */
+      void send(content, {
+        replyToMessageId: (json.data?.message?.id as string | undefined) ?? null,
+        showQuestion: true,
+      });
     } catch {
       setError(te('network'));
     }
@@ -729,7 +753,8 @@ export function AgentChat({
        * conversation reads as the user asking twice.
        */
       void send(json.data.prompt as string, {
-        regeneratedParentId: json.data.parentMessageId as string | null,
+        replyToMessageId: json.data.parentMessageId as string | null,
+        showQuestion: false,
       });
     } catch {
       setError(te('network'));
@@ -1151,17 +1176,41 @@ export function AgentChat({
    * does not need to know how the choice was made — that reasoning is the mode
    * dropdown by another name.
    */
-  async function runRouted(message: string) {
+  async function runRouted(
+    message: string,
+    options: { replyToMessageId?: string | null; showQuestion?: boolean; roles?: RoleAssignment[] } = {},
+  ) {
     setError(null);
     setDraft('');
     setBusy(true);
 
     const thread = conversationId ?? (await ensureConversation(message));
 
-    setTurns((current) => [
-      ...current,
-      { id: crypto.randomUUID(), role: 'user', text: message },
-    ]);
+    /*
+     * A temporary id until the server says what it stored; `adoptIds` swaps
+     * it. An edited question already has its real id.
+     */
+    const questionId = options.replyToMessageId ?? crypto.randomUUID();
+    if (options.showQuestion !== false) {
+      setTurns((current) => [...current, { id: questionId, role: 'user', text: message }]);
+    }
+
+    /** Replaces temporary ids with the stored ones, so edit and regenerate work before a reload. */
+    const adoptIds = (
+      ids: { userMessageId?: string; assistantMessageId?: string } | null | undefined,
+      assistantTempId?: string,
+    ) => {
+      if (!ids) return;
+      setTurns((current) =>
+        current.map((turn) => {
+          if (turn.id === questionId && ids.userMessageId) return { ...turn, id: ids.userMessageId };
+          if (assistantTempId && turn.id === assistantTempId && ids.assistantMessageId) {
+            return { ...turn, id: ids.assistantMessageId };
+          }
+          return turn;
+        }),
+      );
+    };
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1179,11 +1228,14 @@ export function AgentChat({
           datasetId: file?.datasetId ?? undefined,
           /* A direct answer arrives as it is written; a task still arrives as JSON. */
           stream: true,
+          ...(modelId ? { modelId } : {}),
+          ...(options.roles?.length ? { roles: options.roles } : {}),
+          ...(thread && options.replyToMessageId ? { replyToMessageId: options.replyToMessageId } : {}),
         }),
       });
 
       if (response.ok && response.body && response.headers.get('content-type')?.includes('text/event-stream')) {
-        await readAnswerStream(response.body);
+        await readAnswerStream(response.body, adoptIds);
         return;
       }
 
@@ -1200,23 +1252,27 @@ export function AgentChat({
          * so the wait is not silent while the plan is built — a blank panel for
          * twenty seconds reads as a hang.
          */
+        const answerId = crypto.randomUUID();
         setTurns((current) => [
           ...current,
           {
-            id: crypto.randomUUID(),
+            id: answerId,
             role: 'assistant',
             ...(json.data.restatement ? { text: json.data.restatement } : {}),
             results: [{ kind: 'task', runId: json.data.task.id as string, payload: null }],
           },
         ]);
+        adoptIds(json.data.messageIds, answerId);
 
         return;
       }
 
+      const answerId = crypto.randomUUID();
       setTurns((current) => [
         ...current,
-        { id: crypto.randomUUID(), role: 'assistant', text: json.data.content as string },
+        { id: answerId, role: 'assistant', text: json.data.content as string },
       ]);
+      adoptIds(json.data.messageIds, answerId);
     } catch (error) {
       /* Stopped on purpose: what was written stays, and nothing is reported. */
       if ((error as { name?: string })?.name !== 'AbortError') setError(te('network'));
@@ -1235,8 +1291,16 @@ export function AgentChat({
    * far is replaced by the task — it was a refusal, and showing both would put
    * "I cannot do that" above the thing doing it.
    */
-  async function readAnswerStream(body: ReadableStream<Uint8Array>) {
+  async function readAnswerStream(
+    body: ReadableStream<Uint8Array>,
+    adoptIds?: (
+      ids: { userMessageId?: string; assistantMessageId?: string } | null | undefined,
+      assistantTempId?: string,
+    ) => void,
+  ) {
     const id = crypto.randomUUID();
+    /* Applied once the stream has finished, so no patch lands on a renamed turn. */
+    let storedIds: { userMessageId?: string; assistantMessageId?: string } | null = null;
     const patch = (change: (turn: Turn) => Turn) =>
       setTurns((current) => current.map((turn) => (turn.id === id ? change(turn) : turn)));
 
@@ -1274,8 +1338,13 @@ export function AgentChat({
             ...(event.restatement ? { text: String(event.restatement) } : {}),
             results: [{ kind: 'task', runId: task.id, payload: null }],
           }));
+          storedIds = (event.messageIds as typeof storedIds) ?? null;
           break;
         }
+
+        case 'done':
+          storedIds = (event.messageIds as typeof storedIds) ?? null;
+          break;
 
         case 'error':
           setError(String((locale === 'ar' ? event.messageAr : event.message) ?? te('generic')));
@@ -1310,6 +1379,7 @@ export function AgentChat({
           /* An answer that never produced a word leaves no empty bubble behind. */
           .filter((turn) => turn.id !== id || Boolean(turn.text) || Boolean(turn.results?.length)),
       );
+      adoptIds?.(storedIds, id);
     }
   }
 
@@ -1501,7 +1571,7 @@ export function AgentChat({
             const original = rolePrompt.message;
             setRolePrompt(null);
             /* Resends the request that was asked, now carrying the answer. */
-            void send(original);
+            void send(original, { roles });
           }}
         />
       )}

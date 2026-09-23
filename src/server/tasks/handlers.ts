@@ -1778,7 +1778,12 @@ export function registerAllHandlers(): void {
    * the older name for it and does the same thing — it used to only ask.
    */
   const dataAnalyse = async (context: StepContext): Promise<Observation> => {
-    const hints = (context.context.analysisHints ?? {}) as { intent?: string; mentioned?: string[] };
+    const hints = (context.context.analysisHints ?? {}) as {
+      intent?: string;
+      mentioned?: string[];
+      /** Variable roles the researcher assigned in the role picker. */
+      roles?: { column: string; role: 'dependent' | 'independent' | 'grouping' | 'covariate' | 'paired' }[];
+    };
     const answers = ((context.context.userAnswers as string[] | undefined) ?? []).join('\n');
     const request = String(context.context.request ?? '');
     const language = (context.context.userLanguage as 'ar' | 'en' | undefined) ?? context.locale;
@@ -1789,6 +1794,7 @@ export function registerAllHandlers(): void {
       intent: textInput(context, 'intent') || hints.intent || 'stats.recommend',
       message: [request, answers].filter(Boolean).join('\n'),
       mentioned: Array.isArray(context.input.columns) ? (context.input.columns as string[]) : (hints.mentioned ?? []),
+      ...(hints.roles?.length ? { roles: hints.roles } : {}),
       language,
       conversationId: (context.context.conversationId as string | undefined) ?? null,
       projectId: (context.context.projectId as string | undefined) ?? null,

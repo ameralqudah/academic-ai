@@ -8,7 +8,8 @@ import { buildContextPrompt } from '@/server/context/manager';
 import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion, streamGeneralAnswer } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
-import { recordTaskTurn, recordTurn, requireOwned } from '@/server/services/chat.service';
+import { recordReply, recordTaskTurn, requireOwned } from '@/server/services/chat.service';
+import { resolveRequestedModel } from '@/server/services/model-access.service';
 import { streamResponse } from '@/server/http/stream';
 import { ensureTasksReady } from '@/server/services/startup';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
@@ -85,6 +86,23 @@ const schema = z.object({
   datasetId: z.string().optional(),
   /** Ask for a direct answer as it is written, rather than once it is finished. */
   stream: z.boolean().optional(),
+  /** A model the user picked in the composer. Checked against their plan here. */
+  modelId: z.string().max(120).optional(),
+  /** Variable roles from the role picker, for an analysis that asked for them. */
+  roles: z
+    .array(
+      z.object({
+        column: z.string().max(200),
+        role: z.enum(['dependent', 'independent', 'grouping', 'covariate', 'paired']),
+      }),
+    )
+    .max(30)
+    .optional(),
+  /**
+   * Answer a question already in the thread — a regeneration, or an edited
+   * question — instead of recording the question again.
+   */
+  replyToMessageId: z.string().max(64).optional(),
 });
 
 type Body = z.infer<typeof schema>;
@@ -128,6 +146,10 @@ export const POST = withApi<Body>(
      * exist, so an id cannot be probed.
      */
     if (body.conversationId) await requireOwned(body.conversationId, user.id);
+
+    /* The composer's model choice, refused if it is outside the user's plan. */
+    const chosenModel = await resolveRequestedModel(user.id, body.modelId);
+    const replyToMessageId = body.conversationId ? (body.replyToMessageId ?? null) : null;
 
     /*
      * The file this turn works on: the one sent, or the one this conversation
@@ -296,7 +318,9 @@ export const POST = withApi<Body>(
         analysisHints: {
           intent: decision.intent.intent,
           mentioned: decision.intent.mentionedColumns,
+          ...(body.roles?.length ? { roles: body.roles } : {}),
         },
+        chosenModel,
       });
 
       /*
@@ -308,11 +332,13 @@ export const POST = withApi<Body>(
        * message payload is where a turn's non-text content already lives, so
        * this needs no migration.
        */
+      let messageIds: { userMessageId: string; assistantMessageId: string } | null = null;
       if (body.conversationId) {
-        await recordTurn({
+        messageIds = await recordReply({
           conversationId: body.conversationId,
           userId: user.id,
           userMessage: body.message,
+          replyToMessageId,
           assistantMessage: restatementOf(decision.intent.restatement, body.message) || ' ',
           /*
            * Written in the shape the chat already reads back.
@@ -331,6 +357,7 @@ export const POST = withApi<Body>(
            * than refusing to start.
            */
           logger.warn('chat.turnNotRecorded', { error: String(error).slice(0, 200) });
+          return null;
         });
       }
 
@@ -347,6 +374,7 @@ export const POST = withApi<Body>(
           task: { id: task.id, status: task.status },
           /* Shown while the plan is being built, so the wait is not silent. */
           restatement: restatementOf(decision.intent.restatement, body.message),
+          messageIds,
         },
         { status: 202 },
       );
@@ -388,6 +416,7 @@ export const POST = withApi<Body>(
       locale: requestLanguage,
       projectId: body.projectId ?? null,
       history: [],
+      chosenModel,
       /* Already built above — passed on rather than built a second time. */
       ...(contextPrompt ? { contextPrompt } : {}),
     };
@@ -402,15 +431,17 @@ export const POST = withApi<Body>(
      * as an empty one.
      */
     const keepTurn = async (assistantMessage: string) => {
-      if (!body.conversationId || !assistantMessage.trim()) return;
+      if (!body.conversationId || !assistantMessage.trim()) return null;
 
-      await recordTurn({
+      return recordReply({
         conversationId: body.conversationId,
         userId: user.id,
         userMessage: body.message,
         assistantMessage,
+        replyToMessageId,
       }).catch((error: unknown) => {
         logger.warn('chat.turnNotRecorded', { error: String(error).slice(0, 200) });
+        return null;
       });
     };
 
@@ -433,7 +464,9 @@ export const POST = withApi<Body>(
         analysisHints: {
           intent: decision.intent.intent,
           mentioned: decision.intent.mentionedColumns,
+          ...(body.roles?.length ? { roles: body.roles } : {}),
         },
+        chosenModel,
       });
 
       logger.info('chat.escalated', {
@@ -443,15 +476,16 @@ export const POST = withApi<Body>(
       });
 
       /* Recorded like any delegated task, so it survives a reload and the next turn sees it. */
-      await recordTaskTurn({
+      const messageIds = await recordTaskTurn({
         conversationId: body.conversationId ?? null,
         userId: user.id,
         userMessage: body.message,
         taskId: task.id,
         restatement: restatementOf(decision.intent.restatement, body.message),
+        replyToMessageId,
       });
 
-      return task;
+      return { task, messageIds };
     };
 
     if (body.stream) {
@@ -485,22 +519,24 @@ export const POST = withApi<Body>(
         const signal = detectEscalation(content, body.locale);
 
         if (signal) {
-          const task = await escalate(signal);
+          const { task, messageIds } = await escalate(signal);
           send({
             type: 'task',
             task: { id: task.id, status: task.status },
             restatement: restatementOf(decision.intent.restatement, body.message),
+            messageIds,
           });
           return;
         }
 
-        await keepTurn(content);
+        const messageIds = await keepTurn(content);
         logger.info('chat.stream.done', {
           ms: Date.now() - receivedAt,
           firstWordMs,
           chars: content.length,
         });
-        send({ type: 'done', routing });
+        /* The stored ids, so edit and regenerate work on this turn without a reload. */
+        send({ type: 'done', routing, messageIds });
       });
     }
 
@@ -522,7 +558,7 @@ export const POST = withApi<Body>(
     const escalation = detectEscalation(answer.content, body.locale);
 
     if (escalation) {
-      const task = await escalate(escalation);
+      const { task, messageIds } = await escalate(escalation);
 
       return ok(
         {
@@ -531,16 +567,18 @@ export const POST = withApi<Body>(
           restatement: restatementOf(decision.intent.restatement, body.message),
           /* Recorded so a wrong escalation can be traced from the response. */
           escalatedFrom: 'fast' as const,
+          messageIds,
         },
         { status: 202 },
       );
     }
 
-    await keepTurn(answer.content);
+    const messageIds = await keepTurn(answer.content);
 
     return ok({
       path: 'fast' as const,
       content: answer.content,
+      messageIds,
       /*
        * The routing decision travels with the answer.
        *

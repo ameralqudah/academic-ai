@@ -1883,7 +1883,7 @@ assertTrue(
 assertTrue(
   'and the router honours an explicit choice above its own reasoning',
   (await readFile('src/server/ai/model-router.ts', 'utf8')).includes(
-    'if (options.preferred)',
+    'const preferred = options.preferred ?? currentPreferredModel();',
   ),
 );
 assertTrue(

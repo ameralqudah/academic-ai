@@ -8,6 +8,7 @@
 
 import { logger } from '@/lib/logger';
 import { dispatchTask } from '@/server/jobs/dispatch';
+import { runForUser, type PreferredModel } from '@/server/ai/request-scope';
 import type { Task, TaskStep } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
@@ -69,7 +70,9 @@ export async function startTask(input: {
    * request to compare two columns reached the analysis with the words alone
    * and had to classify it again.
    */
-  analysisHints?: { intent: string; mentioned: string[] };
+  analysisHints?: { intent: string; mentioned: string[]; roles?: { column: string; role: string }[] };
+  /** A model the user chose, already checked against their plan. */
+  chosenModel?: PreferredModel | null;
   budget?: Partial<TaskBudget>;
   /**
    * What the request referred to without naming.
@@ -164,6 +167,7 @@ export async function startTask(input: {
         : {}),
       ...(input.userLanguage ? { userLanguage: input.userLanguage } : {}),
       ...(input.analysisHints ? { analysisHints: input.analysisHints } : {}),
+      ...(input.chosenModel ? { chosenModel: input.chosenModel } : {}),
     },
     budget: budget as unknown as Record<string, number>,
     spent: { modelCalls: 0, retries: 0 },
@@ -188,8 +192,20 @@ export async function startTask(input: {
  * leaving it RUNNING with nothing driving it.
  */
 export async function executeTask(taskId: string): Promise<void> {
+  const owner = await tasksRepo.findAny(taskId);
+  if (!owner) return;
+
   try {
-    await planAndRun(taskId);
+    /*
+     * Planning included, on behalf of the owner and with their chosen model. In
+     * a request this scope was inherited by the floating promise; a worker has
+     * no request, and without it the router cannot see the owner's plan.
+     */
+    await runForUser(
+      owner.userId,
+      () => planAndRun(taskId),
+      (owner.context.chosenModel as PreferredModel | undefined) ?? null,
+    );
   } catch (error) {
     logger.error('task.crashed', { taskId, error: String(error) });
 

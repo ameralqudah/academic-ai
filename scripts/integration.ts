@@ -6143,6 +6143,75 @@ async function main() {
     check('reactivation keeps the version', await version(), 4);
   }
 
+  /* ------------------------------------------------ P0.12 chat controls */
+  {
+    section('P0.12 — regenerate and edit answer the question once; roles and model reach the task');
+
+    const { recordReply, requireOwned: owned } = await import('@/server/services/chat.service');
+    const conversationsRepo = await import('@/server/repositories/conversations.repository');
+    void owned;
+
+    const person = await newUser('p012-chat');
+    const other = await newUser('p012-other');
+    const conversation = await chatRepo.create({ userId: person, mode: 'AGENT', title: 'controls' });
+
+    const first = await recordReply({ conversationId: conversation.id, userId: person, userMessage: 'What is alpha?', assistantMessage: 'First answer.' });
+    assertTrue('a new exchange returns both stored ids', Boolean(first.userMessageId && first.assistantMessageId));
+
+    const prepared = await prepareRegeneration({ conversationId: conversation.id, userId: person, messageId: first.assistantMessageId });
+    check('regeneration hands back the stored question', prepared.parentMessageId, first.userMessageId);
+
+    const again = await recordReply({
+      conversationId: conversation.id,
+      userId: person,
+      userMessage: prepared.prompt,
+      assistantMessage: 'Second answer.',
+      replyToMessageId: prepared.parentMessageId,
+    });
+
+    const all = await conversationsRepo.listMessagesOwned(conversation.id, person, 50);
+    check('the question is stored once', all.filter((message) => message.role === 'USER').length, 1);
+    check('with two answers under it', all.filter((message) => message.role === 'ASSISTANT' && message.parentMessageId === first.userMessageId).length, 2);
+    check('the reply ids name the existing question', again.userMessageId, first.userMessageId);
+
+    const thread = await getThread(conversation.id, person);
+    const shown = (thread as { messages?: { content: string }[] }).messages ?? (thread as unknown as { content: string }[]);
+    assertTrue('the active path shows the new answer', JSON.stringify(shown).includes('Second answer.') && !JSON.stringify(shown).includes('First answer.'));
+
+    /* Edit: the edited question is a new branch; the answer attaches to it. */
+    const edited = await editMessage({ conversationId: conversation.id, userId: person, messageId: first.userMessageId, content: 'What is omega?' });
+    await recordReply({ conversationId: conversation.id, userId: person, userMessage: 'What is omega?', assistantMessage: 'Omega answer.', replyToMessageId: edited.id });
+    const afterEdit = await conversationsRepo.listMessagesOwned(conversation.id, person, 50);
+    check('an edit stores the new question once', afterEdit.filter((message) => message.role === 'USER' && message.content === 'What is omega?').length, 1);
+
+    await expectAppError('a reply to an assistant message is refused', 'NOT_FOUND', () =>
+      recordReply({ conversationId: conversation.id, userId: person, userMessage: 'x', assistantMessage: 'y', replyToMessageId: first.assistantMessageId }),
+    );
+    await expectAppError('a reply into someone else\'s conversation is refused', 'NOT_FOUND', () =>
+      recordReply({ conversationId: conversation.id, userId: other, userMessage: 'x', assistantMessage: 'y', replyToMessageId: first.userMessageId }),
+    );
+
+    /* Roles and the chosen model travel in the task's context. */
+    const { startTask } = await import('@/server/services/task.service');
+    const task = await startTask({
+      userId: person,
+      request: 'compare scores between groups',
+      locale: 'en',
+      analysisHints: { intent: 'stats.compareGroups', mentioned: [], roles: [{ column: 'score', role: 'dependent' }] },
+      chosenModel: { provider: 'anthropic', model: 'test-model' },
+    } as Parameters<typeof startTask>[0]);
+    const stored = await tasksRepo.findAny(task.id);
+    const storedRoles = (stored?.context.analysisHints as { roles?: { column: string; role: string }[] })?.roles ?? [];
+    check('the picker\'s roles reach the task', storedRoles.map((row) => `${row.column}:${row.role}`).join(','), 'score:dependent');
+    const storedModel = stored?.context.chosenModel as { provider?: string; model?: string } | undefined;
+    check('and so does the chosen model', `${storedModel?.provider}/${storedModel?.model}`, 'anthropic/test-model');
+    await tasksRepo.setStatus(task.id, 'CANCELLED');
+
+    const { currentPreferredModel, runForUser } = await import('@/server/ai/request-scope');
+    const seen = await runForUser(person, async () => currentPreferredModel(), { provider: 'openai', model: 'x' });
+    check('the chosen model is visible to every model call in the scope', seen?.provider, 'openai');
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 

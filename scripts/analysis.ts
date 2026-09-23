@@ -5214,7 +5214,7 @@ console.log('\nunified chat endpoint');
   /* The interface no longer requires a mode. */
   const chatUi = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
 
-  assertTrue('an unselected mode routes on the server', chatUi.includes('void runRouted(trimmed)'));
+  assertTrue('an unselected mode routes on the server', chatUi.includes('void runRouted(trimmed, {'));
   assertTrue('through the unified endpoint', chatUi.includes("fetch('/api/chat'"));
 
   /* And the shortcuts survive for someone who wants them. */

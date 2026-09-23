@@ -207,4 +207,4 @@ Full report: `docs/phase1/P1D_REPORT.md`. Plan and audit: `docs/phase1/P1D_PLAN.
   - `test:tasks:db` (39);
   - e2e with the flags on and off;
   - smoke gates.
-- **Neon.** The RLS layer (role, policies, fail-closed probe) was verified on a Neon branch (`P1D_NEON_VERIFICATION.md`). Running the application's run path against Neon, and checking the production pooler and role, are still blocking items before `FF_RUNS` is enabled.
+- **Neon.** The RLS layer (role, policies, fail-closed probe through `neondb_owner`) was verified with SQL on a Neon branch, which was then deleted (`P1D_NEON_VERIFICATION.md`). The application-level test on Neon was **not** executed, because the network here is blocked. That test and the production pooler and role check still block enabling `FF_RUNS`.

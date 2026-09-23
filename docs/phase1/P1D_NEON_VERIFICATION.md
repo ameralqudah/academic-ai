@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-23 · **Neon project:** `academic-ai-eu` · **Branch:** `p1d-rls-verify` (`br-muddy-breeze-b2yfw4tj`), created from the default branch (`import`). The verification wrote only to this branch; production was neither read nor changed. · **Server:** PostgreSQL 18.6 · **Connected as:** `neondb_owner`
 
-**Result.** The RLS design of migrations 0014 and 0015 works on Neon, with the roles Neon provides. All checks below passed. `FF_RUNS` stays **off**: this verifies the database layer, and the remaining pre-production items in §4 are still open.
+**Result.** The RLS design of migrations 0014 and 0015 works on Neon, with the roles Neon provides; all the database-level checks below passed. **The application-level test (`test:runs:db` against Neon) could not be run from this environment and has not passed** (§4). `FF_RUNS` stays **off**. The verification branch has been deleted.
 
 ## 1. How it was run
 
@@ -53,14 +53,28 @@ The steps:
 
 The mapping from each failing probe to `503 UNAVAILABLE` (`reason: rls_unavailable`), with no fallback, is the application code in `db-scope.ts`. It is covered by `test:runs:db` ("if the role could bypass RLS, runs refuse to start (no application-only fallback)"). That code was not changed.
 
-## 4. Still open before `FF_RUNS` is enabled anywhere real (blocking)
+## 4. Application-level verification: not executed (still blocking)
 
-1. **Application connection.** Run the application's own run path (`postgres-js` over TCP, `withRunScope`) against a Neon branch. The simplest way is `npm run test:runs:db`, from a machine or CI job that can reach Neon. This session could not: TCP to Neon is blocked. The SQL it would issue was verified above, statement by statement.
-2. **Pooler.** Confirm the production `DATABASE_URL`:
-   - If it uses Neon's pooled (PgBouncer, transaction mode) host, the transaction-local `SET LOCAL ROLE` and `set_config(…, true)` are the correct pattern. Check 1 of item 1 above should still be run through the pooled URL.
-   - If the application connects as a role other than `neondb_owner`, that role must be the one migration 0015 grants `academic_app` to (the migration grants it to `current_user`). Re-run check 1 as that role.
-3. **Deploy order.** Apply migrations 0014 and 0015 to production through the normal migration step, with `FF_RUNS` **off**. Then run the probe (check 1) against production, read-only, before any flag change.
-4. **Clean-up.** The branch `p1d-rls-verify` holds a copy of the default branch's data plus the synthetic `p1dv-` rows. Delete it when this verification is no longer needed. It was not deleted automatically: deleting a branch is irreversible, so it waits for the owner's decision.
+The follow-up asked for the application's own run path (`npm run test:runs:db`: `postgres-js` over TCP, `withRunScope`, `assertRlsEnforced`) to be run against this branch. **It could not be executed from this environment, and it is not claimed as passed.**
+
+- **Network.** The session's network policy denies the branch's endpoints, both direct and pooled:
+  - `ep-bitter-mouse-b2465kju.c-6.eu-central-1.aws.neon.tech`
+  - `ep-bitter-mouse-b2465kju-pooler.c-6.eu-central-1.aws.neon.tech`
+
+  TCP 5432 fails to connect, and HTTPS is refused by the egress proxy (403). No database driver the application uses can reach Neon from here.
+- **The application's connection role.** This was confirmed on the branch:
+  - `neondb_owner` is the only login role;
+  - it owns the application tables (`users`, `research_runs`);
+  - it can `SET ROLE academic_app`.
+
+  The fail-closed probe in §3 (checks 1 and 7a–7d) therefore ran through the role the application connects as. It was **not** run through the pooled host.
+- **Clean-up.** The branch `p1d-rls-verify` was **deleted** after the verification, as instructed, and Neon listed it as gone. It held a copy of the default branch's data plus synthetic `p1dv-` rows. The project's `import` and `production` branches were not touched.
+
+## 5. Still blocking before `FF_RUNS` is enabled anywhere real
+
+1. **Application path on Neon.** Create a fresh Neon branch and run `npm run test:runs:db` against it, from a machine or CI job whose network can reach `*.neon.tech`. For this session, that would mean adding the host to the environment's allowed domains. Also run `npm run test:runs:db` through the **pooled** connection string, which exercises `SET LOCAL ROLE` behind PgBouncer's transaction mode. Delete the branch afterwards.
+2. **Production role and URL.** Confirm that the production `DATABASE_URL` connects as `neondb_owner` (or as whichever role ran migration 0015, which grants `academic_app` to `current_user`), and note whether it uses the pooled host.
+3. **Deploy order.** Apply migrations 0014 and 0015 to production with `FF_RUNS` **off**. Then run the probe (check 1), read-only, before any flag change.
 
 **What this does not claim.** It does not claim general "Neon support", nor that the whole application is RLS-protected. It shows that, on Neon PostgreSQL 18.6 with the `neondb_owner` role:
 
@@ -68,3 +82,5 @@ The mapping from each failing probe to `503 UNAVAILABLE` (`reason: rls_unavailab
 - the restricted role can be created and used;
 - the P1-D policies isolate projects;
 - the fail-closed probe detects every way enforcement can be lost.
+
+The application-level run on Neon is still outstanding.

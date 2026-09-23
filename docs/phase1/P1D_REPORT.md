@@ -307,9 +307,11 @@ Run on local PostgreSQL 16, on a freshly created and migrated database, mirrorin
    - cross-project, impersonating and viewer inserts are rejected;
    - the probe detects every way enforcement can be lost (RLS disabled, the role bypassing, missing or not granted).
 
-   **Still blocking before `FF_RUNS` is enabled anywhere real** (§4 of that document):
-   - running the application's own run path (`test:runs:db`) against Neon, which this session could not do because TCP to Neon is blocked here;
-   - confirming the pooler and the connecting role;
+   The application's connection role on Neon is `neondb_owner`: it is the only login role and it owns the tables. The probe was run through that role. The verification branch has since been deleted.
+
+   **Still blocking before `FF_RUNS` is enabled anywhere real** (§5 of that document):
+   - running the application's own run path (`test:runs:db`) against a Neon branch, directly and through the pooler. This was **not executed**: this environment's network policy denies the Neon endpoints;
+   - confirming the production `DATABASE_URL` role and host;
    - running the probe against production after migrating with the flag off.
 
    The fail-closed behaviour is unchanged: without enforceable RLS, every run is refused (`rls_unavailable`).

@@ -284,20 +284,37 @@ function TaskPanel({
     }
   }
 
-  async function resume() {
+  /*
+   * Continue a paused task, or retry a failed one (P1-D).
+   *
+   * They are different server actions: `resume` accepts only a paused task, so
+   * "Retry" used to be refused while the panel showed it running anyway. The
+   * panel now reflects the server's answer, not an optimistic guess.
+   */
+  async function resume(action: 'resume' | 'retry' = 'resume') {
     setSending(true);
+    setError(null);
 
     try {
-      await fetch(`/api/tasks/${taskId}`, {
+      const response = await fetch(`/api/tasks/${taskId}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'resume', additionalSteps: 20, additionalModelCalls: 40 }),
+        body: JSON.stringify(
+          action === 'retry' ? { action } : { action, additionalSteps: 20, additionalModelCalls: 40 },
+        ),
       });
+
+      if (!response.ok) {
+        setError(t('error.answerFailed'));
+        return;
+      }
 
       finished.current = false;
       setTask((current) =>
         current ? { ...current, status: 'RUNNING', pauseReasonKey: null, errorReasonKey: null } : current,
       );
+    } catch {
+      setError(t('error.answerFailed'));
     } finally {
       setSending(false);
     }
@@ -318,8 +335,10 @@ function TaskPanel({
   }, [displaysKey, onDisplays]);
 
   async function cancel() {
-    await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
-    setTask((current) => (current ? { ...current, status: 'CANCELLED' } : current));
+    const response = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+    const body = (await response.json().catch(() => null)) as { data?: { cancelled?: boolean } } | null;
+    /* A task that finished first stays finished (P1-D); the next poll shows it. */
+    if (body?.data?.cancelled) setTask((current) => (current ? { ...current, status: 'CANCELLED' } : current));
   }
 
   if (!task) {
@@ -457,7 +476,7 @@ function TaskPanel({
           </span>
           <button
             type="button"
-            onClick={() => void resume()}
+            onClick={() => void resume('retry')}
             disabled={sending}
             className="shrink-0 rounded-lg border border-line px-2 py-1 text-xs text-accent hover:border-accent disabled:opacity-50"
           >

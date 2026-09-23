@@ -208,6 +208,9 @@ export interface ReplanTrigger {
  * unrelated to its own work. Raising it helps only when the provider allows it,
  * which is why it is an option rather than a constant.
  */
+/** How often a running step checks whether its task was cancelled (P1-D). */
+const CANCEL_POLL_MS = 2_000;
+
 const DEFAULT_CONCURRENCY = 3;
 
 export interface RunOptions {
@@ -264,16 +267,18 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
    * will finish them, and they block everything downstream — a task that hangs
    * with no explanation is worse than one that repeats a step.
    */
-  const recovered = await tasksRepo.recoverStranded(taskId);
+  const recovered = await tasksRepo.recoverStranded(taskId, (id) => capabilityFor(id)?.maxAttempts ?? 1);
   if (recovered > 0) {
     logger.info('task.recoveredStranded', { taskId, steps: recovered });
   }
 
-  await tasksRepo.setStatus(taskId, 'RUNNING', {
+  /* Conditional: a task cancelled (or finished) meanwhile is left as it is (P1-D). */
+  const started = await tasksRepo.setStatus(taskId, 'RUNNING', {
     ...(task.startedAt ? {} : { startedAt: new Date() }),
     pendingQuestion: null,
     pauseReasonKey: null,
   });
+  if (!started) return;
 
   const budget = task.budget as unknown as TaskBudget;
   const startedAt = task.startedAt?.getTime() ?? Date.now();
@@ -443,7 +448,8 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
         if (!claimed) return null;
 
         const result = await executeStep(current, claimed, steps, capability.timeoutMs);
-        return { step: claimed, capability, result };
+        const claim = { startedAt: claimed.startedAt as Date };
+        return { step: claimed, capability, result, claim };
       }),
     );
 
@@ -460,7 +466,13 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
     for (const outcome of outcomes) {
       if (!outcome) continue;
 
-      const { step, capability, result } = outcome;
+      const { step, capability, result, claim } = outcome;
+
+      if (result.kind === 'cancelled') {
+        /* Stopped mid-step because the task was cancelled (P1-D): set aside, never a result. */
+        await tasksRepo.skipStep(step.id, 'task.step.cancelled', claim);
+        continue;
+      }
 
       if (result.kind === 'needs-input' && step.dynamic) {
         /*
@@ -474,7 +486,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
          * aside; only the work the researcher asked for may ask them anything.
          */
         logger.info('task.step.skippedForInput', { taskId, stepId: step.id, capability: step.capability });
-        await tasksRepo.skipStep(step.id, 'task.step.skippedForInput');
+        await tasksRepo.skipStep(step.id, 'task.step.skippedForInput', claim);
         continue;
       }
 
@@ -484,7 +496,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
          * than restarting. Its siblings keep whatever they achieved — a
          * question about one step is not a reason to discard another's work.
          */
-        await tasksRepo.awaitInput(step.id);
+        await tasksRepo.awaitInput(step.id, claim);
         needsInput = { question: result.question };
         continue;
       }
@@ -496,6 +508,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
           capability.retryable,
           capability.maxAttempts,
           result.observation as unknown as Record<string, unknown>,
+          claim,
         );
 
         await tasksRepo.recordSpend(taskId, { retries: willRetry ? 1 : 0 });
@@ -522,6 +535,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
           confidence: observation.confidence,
         } as unknown as Record<string, unknown>,
         observation.artifacts.map((artifact) => artifact.id),
+        claim,
       );
 
       await tasksRepo.recordSpend(taskId, { modelCalls: observation.modelCalls ?? 0 });
@@ -632,6 +646,7 @@ async function pauseAtLimit(taskId: string, limit: LimitReason): Promise<void> {
 }
 
 type Executed =
+  | { kind: 'cancelled' }
   | { kind: 'completed'; observation: Observation }
   | { kind: 'failed'; reasonKey: string; observation: Observation }
   | { kind: 'needs-input'; question: string; observation: Observation };
@@ -710,10 +725,40 @@ async function executeStep(
   };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  /*
+   * The timeout and a cancel both end the step for the executor (P1-D).
+   *
+   * Before, the timeout only raised the abort signal, which one handler read:
+   * a handler that ignored it held the task past its limit, and a cancel was
+   * noticed only after the whole batch had finished. Now the executor stops
+   * waiting at the limit or within seconds of a cancel; the signal still tells
+   * the handler to stop, and its late result, if any, is discarded because the
+   * step's claim no longer matches.
+   */
+  let stop: ((reason: 'timeout' | 'cancelled') => void) | undefined;
+  const stopped = new Promise<'timeout' | 'cancelled'>((resolve) => {
+    stop = resolve;
+  });
+  const timeout = setTimeout(() => {
+    controller.abort();
+    stop?.('timeout');
+  }, timeoutMs);
+  const watch = setInterval(() => {
+    void tasksRepo
+      .findAny(task.id)
+      .then((current) => {
+        if (current?.status === 'CANCELLED') {
+          controller.abort();
+          stop?.('cancelled');
+        }
+      })
+      .catch(() => undefined);
+  }, CANCEL_POLL_MS);
+  watch.unref?.();
 
   try {
-    const raw = await handler({
+    const running = handler({
       taskId: task.id,
       stepId: step.id,
       userId: task.userId,
@@ -725,6 +770,12 @@ async function executeStep(
       context: task.context,
       signal: controller.signal,
     });
+    running.catch(() => undefined);
+
+    const raced = await Promise.race([running.then((raw) => ({ raw })), stopped]);
+    if (raced === 'cancelled') return { kind: 'cancelled' };
+    if (raced === 'timeout') throw new Error('step timed out');
+    const raw = raced.raw;
 
     const observation = normalise(raw, producer);
 
@@ -792,6 +843,7 @@ async function executeStep(
     };
   } finally {
     clearTimeout(timeout);
+    clearInterval(watch);
   }
 }
 

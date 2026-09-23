@@ -83,6 +83,8 @@ jobs:
         run: npm run test:integration
       - name: Durable job suite
         run: npm run test:jobs
+      - name: Task-path hardening suite (P1-D)
+        run: npm run test:tasks:db
       - name: Research Graph suite
         run: npm run test:graph
       - name: Model Gateway suite (quota, metering, routing; mock providers)

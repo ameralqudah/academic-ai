@@ -23,6 +23,7 @@
     "test:knowledge": "tsx scripts/knowledge.ts",
     "worker": "tsx src/worker/main.ts",
     "test:jobs": "tsx scripts/jobs-integration.ts",
+    "test:tasks:db": "tsx scripts/tasks-hardening.ts",
     "test:graph": "tsx scripts/graph-integration.ts",
     "test:gateway": "tsx scripts/gateway.ts",
     "test:stats": "tsx scripts/stats-engine.ts",

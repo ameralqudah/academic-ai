@@ -15,9 +15,11 @@ import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { capabilityFor, DEFAULT_BUDGET, type TaskBudget } from '@/server/tasks/capabilities';
 import { runTask } from '@/server/tasks/executor';
 import { planAdditionalSteps, planTask } from '@/server/tasks/planner';
+import { applyAnswer, type ConfirmationState } from '@/server/tasks/model-confirmation';
 import { isActionable } from '@/server/tasks/recommendations';
 import { latestEarlierWork } from '@/server/agent/earlier-work';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
+import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
 
 /**
  * The reason behind a thrown error, where the message reveals one.
@@ -92,6 +94,14 @@ export async function startTask(input: {
     targetFormat?: string;
   };
 }): Promise<Task> {
+  /*
+   * The project and conversation are the caller's to link (P1-D). Both were
+   * stored as given and then used for metering, artifacts and context; a
+   * foreign id is refused here, before anything is created.
+   */
+  await assertProjectLink(input.userId, input.projectId);
+  await assertConversationLink(input.userId, input.conversationId);
+
   const active = (await tasksRepo.listForUser(input.userId, 20)).filter((task) =>
     ['QUEUED', 'PLANNING', 'RUNNING'].includes(task.status),
   );
@@ -501,9 +511,12 @@ export async function answerTask(input: {
       ...(((task.context.userAnswers as string[]) ?? [])),
       input.answer,
     ],
+    /* A pending model confirmation is settled only by an explicit yes (P1-D). */
+    ...(applyAnswer(task.context as ConfirmationState, input.answer) ?? {}),
   });
 
-  await tasksRepo.setStatus(input.taskId, 'RUNNING', { pendingQuestion: null });
+  const resumed = await tasksRepo.setStatus(input.taskId, 'RUNNING', { pendingQuestion: null });
+  if (!resumed) return;
 
   await dispatchTask(input.taskId);
 }
@@ -540,14 +553,43 @@ export async function resumeTask(input: {
   await dispatchTask(input.taskId);
 }
 
-export async function cancelTask(taskId: string, userId: string): Promise<void> {
+/**
+ * Cancels a task that has not finished (P1-D: monotonic).
+ *
+ * A finished task — completed, failed or already cancelled — is left exactly
+ * as it is and `false` is returned. A running step notices within seconds and
+ * is set aside; nothing it produces afterwards is kept.
+ */
+export async function cancelTask(taskId: string, userId: string): Promise<boolean> {
   const task = await tasksRepo.findOwned(taskId, userId);
 
   if (!task) {
     throw new AppError('NOT_FOUND', 'That task was not found.', 'لم يُعثر على هذه المهمة.');
   }
 
-  await tasksRepo.setStatus(taskId, 'CANCELLED');
+  return tasksRepo.setStatus(taskId, 'CANCELLED');
+}
+
+/**
+ * Tries a failed task again (P1-D).
+ *
+ * The failed and blocked steps return to pending with their attempts kept, so
+ * each gets one more try; completed steps keep their results. Only a FAILED
+ * task can be retried — the interface's "Retry" used to call `resume`, which
+ * accepts only a paused task, and silently did nothing.
+ */
+export async function retryTask(input: { taskId: string; userId: string }): Promise<void> {
+  const task = await tasksRepo.findOwned(input.taskId, input.userId);
+
+  if (!task) {
+    throw new AppError('NOT_FOUND', 'That task was not found.', 'لم يُعثر على هذه المهمة.');
+  }
+
+  if (!(await tasksRepo.reopenFailed(input.taskId))) {
+    throw new AppError('VALIDATION', 'Only a failed task can be retried.', 'لا يمكن إعادة المحاولة إلا لمهمة فشلت.');
+  }
+
+  await dispatchTask(input.taskId);
 }
 
 export interface TaskView {

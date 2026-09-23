@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { ok, withApi } from '@/server/http/api';
 import { ensureTasksReady } from '@/server/services/startup';
-import { answerTask, cancelTask, getTask, resumeTask } from '@/server/services/task.service';
+import { answerTask, cancelTask, getTask, resumeTask, retryTask } from '@/server/services/task.service';
 
 type Params = { id: string };
 
@@ -19,7 +19,7 @@ export const GET = withApi<undefined, Params>(
 );
 
 const actionSchema = z.object({
-  action: z.enum(['answer', 'resume']),
+  action: z.enum(['answer', 'resume', 'retry']),
   /** The answer, when the task was waiting for one. */
   answer: z.string().max(2000).optional(),
   /** Extra budget, when resuming from a limit. */
@@ -41,6 +41,8 @@ export const POST = withApi<ActionBody, Params>(
 
     if (body.action === 'answer') {
       await answerTask({ taskId: params.id, userId: user.id, answer: body.answer ?? '' });
+    } else if (body.action === 'retry') {
+      await retryTask({ taskId: params.id, userId: user.id });
     } else {
       await resumeTask({
         taskId: params.id,
@@ -57,6 +59,5 @@ export const POST = withApi<ActionBody, Params>(
 );
 
 export const DELETE = withApi<undefined, Params>({}, async ({ user, params }) => {
-  await cancelTask(params.id, user.id);
-  return ok({ cancelled: true });
+  return ok({ cancelled: await cancelTask(params.id, user.id) });
 });

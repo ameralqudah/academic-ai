@@ -28,6 +28,8 @@ interface WindowState {
 interface RateLimitStore {
   readonly name: 'memory' | 'redis';
   hit(key: string, windowSeconds: number): Promise<WindowState>;
+  /** The current window without counting a hit. */
+  peek(key: string): Promise<WindowState>;
 }
 
 /* ------------------------------- memory ---------------------------------- */
@@ -58,6 +60,13 @@ class MemoryStore implements RateLimitStore {
 
     existing.count += 1;
     return existing;
+  }
+
+  async peek(key: string): Promise<WindowState> {
+    const now = Date.now();
+    const existing = this.windows.get(key);
+    if (!existing || existing.resetAtMs <= now) return { count: 0, resetAtMs: now };
+    return { ...existing };
   }
 }
 
@@ -107,6 +116,29 @@ class UpstashStore implements RateLimitStore {
         error: error instanceof Error ? error.message : String(error),
       });
       return this.fallback.hit(key, windowSeconds);
+    }
+  }
+
+  async peek(key: string): Promise<WindowState> {
+    try {
+      const response = await fetch(`${this.url}/pipeline`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify([
+          ['GET', key],
+          ['PTTL', key],
+        ]),
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`Upstash responded ${response.status}`);
+      const results = (await response.json()) as { result?: string | number | null }[];
+      const ttlMs = Number(results[1]?.result ?? 0);
+      return { count: Number(results[0]?.result ?? 0) || 0, resetAtMs: Date.now() + (ttlMs > 0 ? ttlMs : 0) };
+    } catch (error) {
+      logger.warn('rateLimit.redis.unavailable', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return this.fallback.peek(key);
     }
   }
 }
@@ -166,8 +198,62 @@ export async function consume(
   return { allowed: true, remaining: max - state.count, retryAfterSeconds: 0 };
 }
 
-export function clientKey(request: Request, suffix: string): string {
+/**
+ * Whether a window is already at its limit, without counting this request.
+ *
+ * For limits that count only some outcomes — failed sign-ins — the check and
+ * the count are separate steps: a request is refused when the window is full,
+ * and counted only if it then fails.
+ */
+export async function isLimited(key: string, max: number): Promise<RateLimitResult> {
+  const state = await resolveStore().peek(key);
+  if (state.count >= max) {
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfterSeconds: Math.max(1, Math.ceil((state.resetAtMs - Date.now()) / 1000)),
+    };
+  }
+  return { allowed: true, remaining: max - state.count, retryAfterSeconds: 0 };
+}
+
+/** Counts one occurrence against a window, whatever its limit. */
+export async function recordHit(key: string, windowSeconds: number): Promise<void> {
+  await resolveStore().hit(key, windowSeconds);
+}
+
+/**
+ * The client's address, as the nearest trusted proxy saw it.
+ *
+ * `X-Forwarded-For` is a list each proxy appends to. The *first* entry is
+ * whatever the client sent, so trusting it lets anyone pick a fresh address
+ * per request and walk past every limit. The entry added by our own proxy —
+ * counted from the right, `TRUSTED_PROXY_HOPS` deep (Render and Vercel: 1) —
+ * is the one the client cannot forge. `X-Real-IP` is used only when the
+ * deployment says its proxy sets it.
+ */
+export function clientIp(request: Request): string {
+  const env = getEnv();
+
+  if (env.TRUST_X_REAL_IP) {
+    const real = request.headers.get('x-real-ip')?.trim();
+    if (real) return real;
+  }
+
   const forwarded = request.headers.get('x-forwarded-for');
-  const ip = forwarded?.split(',')[0]?.trim() ?? request.headers.get('x-real-ip') ?? 'unknown';
-  return `ratelimit:${suffix}:${ip}`;
+  if (forwarded) {
+    const hops = forwarded
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    const index = hops.length - env.TRUSTED_PROXY_HOPS;
+    const chosen = hops[Math.max(0, index)];
+    if (chosen) return chosen;
+  }
+
+  return 'unknown';
+}
+
+export function clientKey(request: Request, suffix: string): string {
+  return `ratelimit:${suffix}:${clientIp(request)}`;
 }

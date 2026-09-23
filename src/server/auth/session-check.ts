@@ -14,7 +14,6 @@
 
 import { eq } from 'drizzle-orm';
 
-import { db } from '@/server/db';
 import { users } from '@/server/db/schema';
 
 /** How long a token is trusted before the user's row is read again. */
@@ -67,6 +66,8 @@ export async function loadSessionUser(userId: string, now = Date.now()): Promise
   const hit = cache.get(userId);
   if (hit && now - hit.at < CACHE_MS) return hit.row;
 
+  /* Imported here so the pure decision above can be used without a database. */
+  const { db } = await import('@/server/db');
   const [row] = await db
     .select({
       role: users.role,

@@ -5064,5 +5064,71 @@ console.log('\nwhat a model costs');
   check('the jwt callback signs out a revoked session', authSource.includes("if (decision.action === 'revoke') return null;"), true);
 }
 
+/* -------------------------------------------------------------------------- */
+/*             P0.5 — password sign-in is rate-limited on failures            */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { resetEnvCache } = await import('@/config/env');
+  const saved = {
+    DATABASE_URL: process.env.DATABASE_URL,
+    AUTH_SECRET: process.env.AUTH_SECRET,
+    RATE_LIMIT_STORE: process.env.RATE_LIMIT_STORE,
+    TRUSTED_PROXY_HOPS: process.env.TRUSTED_PROXY_HOPS,
+  };
+  process.env.DATABASE_URL ??= 'postgresql://smoke@localhost/smoke';
+  process.env.AUTH_SECRET ??= 'smoke-secret-smoke-secret-smoke-secret';
+  process.env.RATE_LIMIT_STORE = 'memory';
+  delete process.env.TRUSTED_PROXY_HOPS;
+  resetEnvCache();
+
+  const { clientIp, resetRateLimitStore } = await import('@/server/http/rate-limit');
+  const { isFailedSignIn, loginBlocked, recordLoginFailure } = await import('@/server/auth/login-throttle');
+  resetRateLimitStore();
+
+  const request = (headers: Record<string, string>) => new Request('https://app.test/api/auth/callback/credentials', { method: 'POST', headers });
+
+  check('one proxy hop: the address it saw', clientIp(request({ 'x-forwarded-for': '203.0.113.7' })), '203.0.113.7');
+  check('a forged first entry is ignored', clientIp(request({ 'x-forwarded-for': '6.6.6.6, 203.0.113.7' })), '203.0.113.7');
+  check('X-Real-IP is not trusted by default', clientIp(request({ 'x-real-ip': '6.6.6.6' })), 'unknown');
+
+  process.env.TRUSTED_PROXY_HOPS = '2';
+  resetEnvCache();
+  check('two trusted hops read the second from the right', clientIp(request({ 'x-forwarded-for': '6.6.6.6, 198.51.100.4, 10.0.0.2' })), '198.51.100.4');
+  delete process.env.TRUSTED_PROXY_HOPS;
+  resetEnvCache();
+
+  const from = (ip: string) => request({ 'x-forwarded-for': ip });
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    check(`failure ${attempt + 1} for one account is allowed`, (await loginBlocked(from('203.0.113.10'), 'victim@example.test')).blocked, false);
+    await recordLoginFailure(from('203.0.113.10'), 'victim@example.test');
+  }
+  const eleventh = await loginBlocked(from('203.0.113.99'), 'Victim@Example.test');
+  check('the 11th guess at one account is refused, from any address', eleventh.blocked, true);
+  check('with a retry time', eleventh.retryAfterSeconds > 0, true);
+  check('another account from the same address is not affected', (await loginBlocked(from('203.0.113.10'), 'someone@example.test')).blocked, false);
+
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    await recordLoginFailure(from('192.0.2.50'), `spray-${attempt}@example.test`);
+  }
+  check('spraying 50 accounts from one address blocks that address', (await loginBlocked(from('192.0.2.50'), 'fresh@example.test')).blocked, true);
+  check('but not another address', (await loginBlocked(from('192.0.2.51'), 'fresh@example.test')).blocked, false);
+
+  check('a JSON redirect carrying an error is a failure', await isFailedSignIn(Response.json({ url: 'https://app.test/api/auth/signin?error=CredentialsSignin&code=credentials' })), true);
+  check('a JSON redirect without an error is a success', await isFailedSignIn(Response.json({ url: 'https://app.test/ar/chat' })), false);
+  check('a Location redirect carrying an error is a failure', await isFailedSignIn(new Response(null, { status: 302, headers: { location: '/api/auth/signin?error=CredentialsSignin' } })), true);
+
+  const route = await readFile('src/app/api/auth/[...nextauth]/route.ts', 'utf8');
+  check('the Auth.js POST handler is wrapped by the login gate', route.includes('loginBlocked(request, email)') && !route.includes('export const { GET, POST }'), true);
+
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  resetEnvCache();
+  resetRateLimitStore();
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

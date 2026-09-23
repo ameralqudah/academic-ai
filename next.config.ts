@@ -6,7 +6,7 @@ const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  serverExternalPackages: ['postgres', 'bcryptjs'],
+  serverExternalPackages: ['postgres', 'bcryptjs', 'pg-boss', 'pg'],
   experimental: {
     optimizePackageImports: ['lucide-react'],
   },

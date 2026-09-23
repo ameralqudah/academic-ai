@@ -20,6 +20,8 @@
  * and nothing else.
  */
 
+import { dispatchAnalysisJob } from '@/server/jobs/dispatch';
+import { numericColumns } from '@/analysis/numeric-columns';
 import {
   assessDiscriminantValidity,
   assessMeasurement,
@@ -44,7 +46,7 @@ import {
   CbSemError,
   type CbSemResult,
 } from '@/analysis/inference/cbsem/cfa';
-import { bootstrapPls, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
+import { bootstrapPlsAsync, type BootstrapResult } from '@/analysis/inference/pls/bootstrap';
 import { checkModelData, type DataIssue } from '@/analysis/inference/pls/data-checks';
 import { buildReport, type PlsReport } from '@/analysis/inference/pls/report';
 import { logger } from '@/lib/logger';
@@ -107,18 +109,7 @@ export async function runPls(input: {
 }): Promise<PlsAnalysis> {
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
-  const columns = new Map<string, number[]>();
-  for (const name of loaded.data.columns) {
-    const index = loaded.data.columns.indexOf(name);
-    columns.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  }
+  const columns = numericColumns(loaded.data);
 
   /*
    * The data is checked before the model is estimated, and the errors are
@@ -303,18 +294,7 @@ export async function runCbSem(input: {
 }): Promise<CbSemResult> {
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
-  const columns = new Map<string, number[]>();
-  for (const name of loaded.data.columns) {
-    const index = loaded.data.columns.indexOf(name);
-    columns.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  }
+  const columns = numericColumns(loaded.data);
 
   try {
     const result = confirmatoryFactorAnalysis(input.model, columns);
@@ -404,18 +384,7 @@ export async function startBootstrap(input: {
    * found a minute into a background run is a minute the user waited to learn
    * something knowable immediately.
    */
-  const jobColumns = new Map<string, number[]>();
-  for (const name of loaded.data.columns) {
-    const index = loaded.data.columns.indexOf(name);
-    jobColumns.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  }
+  const jobColumns = numericColumns(loaded.data);
 
   const preflight = checkModelData(input.model, jobColumns);
 
@@ -454,20 +423,13 @@ export async function startBootstrap(input: {
     },
   });
 
-  void runBootstrapJob(job.id).catch((error: unknown) => {
-    logger.error('pls.bootstrapJobCrashed', { jobId: job.id, error: String(error) });
-  });
+  /* Queued (durable) or, without a queue, run in this process — see `server/jobs/dispatch`. */
+  await dispatchAnalysisJob(job.id, 'pls.bootstrap');
 
   return job;
 }
 
-/**
- * Executes a queued bootstrap.
- *
- * Exported so a real worker process can call it later without this file
- * changing — moving the work off the web process is then a matter of who
- * invokes this, not of rewriting it.
- */
+/** Executes a queued bootstrap. Called by a worker, under the job's lease. */
 export async function runBootstrapJob(jobId: string): Promise<void> {
   const startedAt = Date.now();
 
@@ -486,18 +448,7 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
 
     const loaded = await loadForAnalysis(job.datasetId as string, job.userId);
 
-    const columns = new Map<string, number[]>();
-    for (const name of loaded.data.columns) {
-      const index = loaded.data.columns.indexOf(name);
-      columns.set(
-        name,
-        loaded.data.rows.map((row) => {
-          const value = row[index];
-          const parsed = typeof value === 'number' ? value : Number(value);
-          return Number.isFinite(parsed) ? parsed : Number.NaN;
-        }),
-      );
-    }
+    const columns = numericColumns(loaded.data);
 
     await jobsRepo.updateProgress(jobId, 0, 'estimating');
     const estimate = estimatePls(spec.model, columns);
@@ -513,7 +464,13 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
     let cancelled = false;
     let lastCheck = 0;
 
-    const result = bootstrapPls(spec.model, columns, estimate, {
+    /*
+     * The asynchronous runner yields to the event loop between batches of
+     * resamples, so the progress writes and the cancellation check below
+     * actually run — with the synchronous one they queued up behind the
+     * whole bootstrap, and cancel did nothing until it had finished.
+     */
+    const result = await bootstrapPlsAsync(spec.model, columns, estimate, {
       resamples: spec.resamples,
       confidenceLevel: spec.confidenceLevel,
       seed: spec.seed,

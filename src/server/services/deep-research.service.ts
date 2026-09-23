@@ -12,6 +12,7 @@
  * this too. A second table would duplicate all of that to store the same shape.
  */
 
+import { dispatchAnalysisJob } from '@/server/jobs/dispatch';
 import { logger } from '@/lib/logger';
 import type { AnalysisJob } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
@@ -71,25 +72,13 @@ export async function startDeepResearch(input: {
     },
   });
 
-  /*
-   * Started without being awaited, so the response reaches the client while the
-   * work continues. The rejection handler is not optional: an unhandled
-   * rejection from a floating promise takes down the process in Node.
-   */
-  void runResearchJob(job.id).catch((error: unknown) => {
-    logger.error('deepResearch.jobCrashed', { jobId: job.id, error: String(error) });
-  });
+  /* Queued (durable) or, without a queue, run in this process — see `server/jobs/dispatch`. */
+  await dispatchAnalysisJob(job.id, 'research.deep');
 
   return job;
 }
 
-/**
- * Executes a queued research job.
- *
- * Exported so a real worker process can drive it later without this file
- * changing — moving the work off the web process becomes a question of who
- * calls this, not of rewriting it.
- */
+/** Executes a queued research job. Called by a worker, under the job's lease. */
 export async function runResearchJob(jobId: string): Promise<void> {
   const startedAt = Date.now();
   const runId = jobId;

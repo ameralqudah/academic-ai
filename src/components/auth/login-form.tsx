@@ -11,12 +11,41 @@ import { Field, TextInput } from '@/components/ui/field';
 import { Link, useRouter } from '@/i18n/navigation';
 import { SIGNED_IN_HOME } from '@/config/home';
 
-export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
+/**
+ * The sentence for an error code Auth.js or our sign-in policy put in the URL
+ * or returned from `signIn()`. Unknown codes fall back to the generic message.
+ */
+function messageFor(code: string | undefined, t: ReturnType<typeof useTranslations>): string | null {
+  switch (code) {
+    case undefined:
+    case '':
+      return null;
+    case 'AccountSuspended':
+      return t('errors.accountSuspended');
+    case 'ProviderEmailUnverified':
+      return t('errors.providerEmailUnverified');
+    case 'LinkRequiresVerification':
+    case 'OAuthAccountNotLinked':
+      return t('errors.linkRequiresVerification');
+    case 'RateLimited':
+      return t('errors.rateLimitedLogin');
+    default:
+      return t('errors.invalidCredentials');
+  }
+}
+
+export function LoginForm({
+  googleEnabled,
+  initialErrorCode,
+}: {
+  googleEnabled: boolean;
+  initialErrorCode?: string;
+}) {
   const t = useTranslations('auth');
   const locale = useLocale();
   const router = useRouter();
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => messageFor(initialErrorCode, t));
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -31,7 +60,7 @@ export function LoginForm({ googleEnabled }: { googleEnabled: boolean }) {
     });
 
     if (result?.error) {
-      setError(t('errors.invalidCredentials'));
+      setError(messageFor(result.error === 'CredentialsSignin' ? 'invalid' : result.error, t));
       setPending(false);
       return;
     }

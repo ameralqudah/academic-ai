@@ -39,7 +39,7 @@ import {
   type ProducerContext,
 } from './contracts';
 import { blockedSteps, readySteps } from './planner';
-import { runForUser } from '@/server/ai/request-scope';
+import { runForUser, type PreferredModel } from '@/server/ai/request-scope';
 
 /**
  * What a capability handler receives and returns.
@@ -246,7 +246,11 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
    * Scoped to the task's owner. A task runs outside any request, so without
    * this the router could not tell a paying researcher's task from anyone's.
    */
-  return runForUser(owner.userId, () => runTaskScoped(taskId, options));
+  return runForUser(
+    owner.userId,
+    () => runTaskScoped(taskId, options),
+    (owner.context.chosenModel as PreferredModel | undefined) ?? null,
+  );
 }
 
 async function runTaskScoped(taskId: string, options: RunOptions): Promise<void> {

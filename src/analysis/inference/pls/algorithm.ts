@@ -114,6 +114,13 @@ export interface PlsEstimate {
   n: number;
   /** Rows dropped for missing values on any modelled indicator. */
   rowsDropped: number;
+  /**
+   * The row indices of the complete cases, in order — the rows `scores` are
+   * built from. Anything computed from raw indicator columns alongside the
+   * scores (HTMT, cross-loadings, VIF) must select exactly these rows, or it
+   * pairs one respondent's answers with another's score.
+   */
+  rows: number[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -390,6 +397,7 @@ export function estimatePls(
     converged,
     n,
     rowsDropped: rowCount - n,
+    rows: keep,
   };
 }
 

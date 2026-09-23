@@ -329,7 +329,26 @@ function assessFormative(
   };
 }
 
-/** VIF of one indicator against the others in its construct. */
+/**
+ * One indicator's values on the complete cases the estimate used.
+ *
+ * `slice(0, n)` took the first n raw rows instead, which are the complete
+ * cases only when nothing was dropped; after listwise deletion it paired one
+ * respondent's answers with another respondent's construct score.
+ */
+function completeColumn(data: Map<string, number[]>, name: string, estimate: PlsEstimate): number[] {
+  const values = data.get(name) ?? [];
+  return estimate.rows ? estimate.rows.map((row) => values[row] as number) : values.slice(0, estimate.n);
+}
+
+/**
+ * VIF of one indicator against the others in its construct: 1 / (1 − R²),
+ * with R² from regressing it on all its siblings at once.
+ *
+ * The previous largest pairwise r² understated R² whenever more than one
+ * sibling predicts the indicator — which is exactly the collinearity VIF is
+ * there to detect.
+ */
 function varianceInflation(
   indicator: string,
   siblings: string[],
@@ -339,20 +358,16 @@ function varianceInflation(
   const others = siblings.filter((name) => name !== indicator);
   if (others.length === 0) return 1;
 
-  const rows = estimate.n;
-  const target = (data.get(indicator) ?? []).slice(0, rows);
+  const target = completeColumn(data, indicator, estimate);
+  const predictors = others.map((name) => completeColumn(data, name, estimate));
 
-  /*
-   * R² from the correlations, which is exact for one predictor and a good
-   * approximation for several near-orthogonal ones. A full regression here
-   * would be more precise; the threshold is a rule of thumb at 5, so the
-   * precision this loses does not change any verdict.
-   */
-  let rSquared = 0;
-  for (const other of others) {
-    const r = pearson(target, (data.get(other) ?? []).slice(0, rows));
-    rSquared = Math.max(rSquared, r ** 2);
-  }
+  /* R² = b'r on standardised variables, b = R⁻¹r. */
+  const correlations = predictors.map((column) => pearson(target, column));
+  const matrix = predictors.map((row, i) =>
+    predictors.map((column, j) => (i === j ? 1 : pearson(row, column))),
+  );
+  const betas = solveSymmetric(matrix, correlations);
+  const rSquared = betas.reduce((sum, beta, index) => sum + beta * (correlations[index] as number), 0);
 
   return rSquared >= 1 ? Number.POSITIVE_INFINITY : 1 / (1 - rSquared);
 }
@@ -397,7 +412,7 @@ export function assessDiscriminantValidity(
     for (let j = i + 1; j < reflective.length; j += 1) {
       const a = reflective[i] as LatentConstruct;
       const b = reflective[j] as LatentConstruct;
-      const value = heterotraitMonotrait(a, b, data, estimate.n);
+      const value = heterotraitMonotrait(a, b, data, estimate);
 
       htmt.set(`${a.name} ↔ ${b.name}`, {
         key: 'htmt',
@@ -456,7 +471,7 @@ export function assessDiscriminantValidity(
 
   for (const construct of model.constructs) {
     for (const indicator of construct.indicators) {
-      const column = (data.get(indicator) ?? []).slice(0, estimate.n);
+      const column = completeColumn(data, indicator, estimate);
       const own = Math.abs(pearson(column, estimate.scores.get(construct.name) as number[]));
 
       for (const other of model.constructs) {
@@ -490,9 +505,9 @@ function heterotraitMonotrait(
   a: LatentConstruct,
   b: LatentConstruct,
   data: Map<string, number[]>,
-  rows: number,
+  estimate: PlsEstimate,
 ): number {
-  const column = (name: string) => (data.get(name) ?? []).slice(0, rows);
+  const column = (name: string) => completeColumn(data, name, estimate);
 
   let betweenSum = 0;
   let betweenCount = 0;

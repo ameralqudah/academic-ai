@@ -37,7 +37,7 @@ import {
   siblingModel,
   type ModelRequirements,
 } from './model-requirements';
-import { currentUserId } from './request-scope';
+import { currentUserId, currentPreferredModel } from './request-scope';
 import { resilient } from './resilient-provider';
 
 export { candidateOverride, candidatesFor, requirementsFor, shouldFailOver, type ModelRequirements };
@@ -163,12 +163,13 @@ export async function selectModel(
    * use it; answering with a different one would leave them unable to say
    * which produced their result.
    */
-  if (options.preferred) {
-    const provider = await resolveProvider(options.preferred);
+  const preferred = options.preferred ?? currentPreferredModel();
+  if (preferred) {
+    const provider = await resolveProvider(preferred);
 
     return {
       provider: guarded(provider, requirements.needsReasoning),
-      reason: `user selected ${options.preferred.provider}`,
+      reason: `user selected ${preferred.provider}`,
       driver: 'only-option',
     };
   }

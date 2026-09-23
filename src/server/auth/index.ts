@@ -1,6 +1,6 @@
 import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import bcrypt from 'bcryptjs';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import NextAuth, { type DefaultSession } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
@@ -9,7 +9,9 @@ import { getEnv } from '@/config/env';
 import { db } from '@/server/db';
 import { accounts, sessions, users, verificationTokens } from '@/server/db/schema';
 import { credentialsSchema } from '@/server/validation/auth';
-import { isOwnerEmail } from './owner';
+import { isVerifiedOwner } from './owner';
+import { decideOAuthSignIn, signInErrorCode } from './policy';
+import { evaluateToken, forgetSessionUser, loadSessionUser, needsCheck } from './session-check';
 
 declare module 'next-auth' {
   interface Session {
@@ -17,6 +19,8 @@ declare module 'next-auth' {
       id: string;
       role: 'USER' | 'ADMIN';
       locale: 'ar' | 'en';
+      /** Whether the account's email address has been proven. */
+      verified: boolean;
     } & DefaultSession['user'];
   }
 
@@ -24,6 +28,8 @@ declare module 'next-auth' {
     role?: 'USER' | 'ADMIN';
     locale?: 'ar' | 'en';
     status?: 'ACTIVE' | 'SUSPENDED';
+    emailVerified?: Date | null;
+    tokenVersion?: number;
   }
 }
 
@@ -86,21 +92,74 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           image: record.image,
           role: record.role,
           locale: record.locale,
+          emailVerified: record.emailVerified,
+          tokenVersion: record.tokenVersion,
         };
       },
     }),
   ],
   callbacks: {
+    /*
+     * Google sign-ins are checked before Auth.js links or creates anything.
+     * The decision itself is a pure function in `policy.ts`; this only
+     * gathers its inputs.
+     */
+    async signIn({ user, account, profile }) {
+      if (account?.provider !== 'google') return true;
+
+      const email = (user.email ?? profile?.email ?? '').toLowerCase();
+      const [linked] = await db
+        .select({ userId: accounts.userId })
+        .from(accounts)
+        .where(
+          and(
+            eq(accounts.provider, account.provider),
+            eq(accounts.providerAccountId, account.providerAccountId),
+          ),
+        )
+        .limit(1);
+
+      const [existing] = email
+        ? await db
+            .select({
+              id: users.id,
+              passwordHash: users.passwordHash,
+              emailVerified: users.emailVerified,
+              status: users.status,
+            })
+            .from(users)
+            .where(eq(users.email, email))
+            .limit(1)
+        : [];
+
+      const decision = decideOAuthSignIn({
+        providerEmailVerified: (profile as { email_verified?: boolean } | undefined)?.email_verified === true,
+        alreadyLinked: Boolean(linked),
+        existing: existing
+          ? {
+              hasPassword: Boolean(existing.passwordHash),
+              emailVerified: Boolean(existing.emailVerified),
+              suspended: existing.status === 'SUSPENDED',
+            }
+          : null,
+      });
+
+      if (decision.allow) return true;
+      return `/ar/login?error=${signInErrorCode(decision.reason)}`;
+    },
+
     async jwt({ token, user, trigger }) {
       if (user?.id) {
         token.sub = user.id;
         token.role = user.role ?? 'USER';
         token.locale = user.locale ?? 'ar';
+        token.ev = Boolean(user.emailVerified);
 
         // The owner is an administrator by configuration, not by a database
-        // row. Persisting it on sign-in keeps the admin list and role badges
+        // row — but only once their address is verified (see `owner.ts`).
+        // Persisting it on sign-in keeps the admin list and role badges
         // honest; access itself never depends on this write succeeding.
-        if (isOwnerEmail(user.email) && token.role !== 'ADMIN') {
+        if (isVerifiedOwner(user) && token.role !== 'ADMIN') {
           token.role = 'ADMIN';
           await db
             .update(users)
@@ -110,16 +169,33 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         }
       }
 
-      // Re-read role/locale after the user changes them in settings.
-      if (trigger === 'update' && token.sub) {
-        const [fresh] = await db
-          .select({ role: users.role, locale: users.locale, status: users.status })
-          .from(users)
-          .where(eq(users.id, token.sub))
-          .limit(1);
-        if (fresh) {
-          token.role = fresh.role;
-          token.locale = fresh.locale;
+      /*
+       * Re-validated against the database at most once a minute, and at once
+       * after the user updates their own settings. A suspended account, a
+       * missing one, or a token issued before the user's sessions were ended
+       * (password change, suspension, demotion) signs out: returning null
+       * clears the session cookie.
+       */
+      const now = Date.now();
+      if (token.sub && needsCheck(token, now, trigger === 'update' || Boolean(user?.id))) {
+        const signingIn = Boolean(user?.id);
+        if (trigger === 'update' || signingIn) forgetSessionUser(token.sub);
+        const fresh = await loadSessionUser(token.sub, now);
+
+        /*
+         * A sign-in is itself a fresh proof of identity, so it adopts the
+         * current version; only sessions issued *before* a bump are ended.
+         */
+        if (signingIn && fresh) token.tv = fresh.tokenVersion;
+
+        const decision = evaluateToken(token, fresh, now);
+
+        if (decision.action === 'revoke') return null;
+        if (decision.action === 'refresh') {
+          token.role = decision.patch.role;
+          token.locale = decision.patch.locale;
+          token.ev = decision.patch.ev;
+          token.checkedAt = decision.patch.checkedAt;
         }
       }
 
@@ -129,7 +205,25 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (token.sub) session.user.id = token.sub;
       session.user.role = (token.role as 'USER' | 'ADMIN') ?? 'USER';
       session.user.locale = (token.locale as 'ar' | 'en') ?? 'ar';
+      session.user.verified = token.ev === true;
       return session;
+    },
+  },
+  events: {
+    /*
+     * A Google account whose provider has verified the address counts as
+     * verified here too — the same proof, from a stronger source than an
+     * email link.
+     */
+    async signIn({ user, account, profile }) {
+      if (account?.provider !== 'google' || !user.id) return;
+      if ((profile as { email_verified?: boolean } | undefined)?.email_verified !== true) return;
+
+      await db
+        .update(users)
+        .set({ emailVerified: new Date() })
+        .where(and(eq(users.id, user.id), isNull(users.emailVerified)))
+        .catch(() => undefined);
     },
   },
 });

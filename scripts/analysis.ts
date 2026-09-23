@@ -5214,7 +5214,7 @@ console.log('\nunified chat endpoint');
   /* The interface no longer requires a mode. */
   const chatUi = await readFile('src/components/agent/agent-chat.tsx', 'utf8');
 
-  assertTrue('an unselected mode routes on the server', chatUi.includes('void runRouted(trimmed)'));
+  assertTrue('an unselected mode routes on the server', chatUi.includes('void runRouted(trimmed, {'));
   assertTrue('through the unified endpoint', chatUi.includes("fetch('/api/chat'"));
 
   /* And the shortcuts survive for someone who wants them. */
@@ -5449,9 +5449,20 @@ console.log('\nmodel routing');
   );
 
   /* Candidates are the providers with keys — a keyless model is not an option. */
+  /*
+   * Asserted on behaviour, not on the text of the check: the router filters by
+   * `isUsableApiKey`, the same rule the providers apply to themselves, so a
+   * blank or placeholder key is never a candidate.
+   */
+  const { isUsableApiKey } = await import('@/ai/key');
   assertTrue(
     'only configured providers are candidates',
-    routerSource.includes('ANTHROPIC_API_KEY') && routerSource.includes('key.trim().length > 0'),
+    routerSource.includes('ANTHROPIC_API_KEY') &&
+      routerSource.includes('isUsableApiKey(key)') &&
+      !isUsableApiKey('') &&
+      !isUsableApiKey('   ') &&
+      !isUsableApiKey('paste your key here') &&
+      isUsableApiKey('sk-ant-api03-' + 'x'.repeat(40)),
   );
 
   /* The reason is logged, and never the key. */
@@ -6005,6 +6016,338 @@ console.log('\nuploaded documents are attributed');
   check('and it is the file, not the paraphrase', kept[0]?.authority, 'user-document');
 }
 
+
+  /* ------------------------------------------ P0.6 missing values in SEM */
+  {
+    console.log('P0.6 — a blank cell is missing, not zero');
+
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+    const { estimatePls } = await import('@/analysis/inference/pls/algorithm');
+    const { readFile: read } = await import('node:fs/promises');
+
+    const cells = numericColumns({ columns: ['v'], rows: [[null], [''], [' 3 '], ['1,234'], ['٣'], ['n/a'], [5]] }).get('v') ?? [];
+    check(
+      'blank, empty and text cells become NaN, numbers parse',
+      JSON.stringify(cells.map((value) => (Number.isNaN(value) ? 'NaN' : value))),
+      JSON.stringify(['NaN', 'NaN', 3, 1234, 3, 'NaN', 5]),
+    );
+
+    /* The committed survey: 360 rows, 6% of them with one blank cell. */
+    const reference = JSON.parse(await read('evals/fixtures/references/cfa-survey-blanks.json', 'utf8'));
+    const survey = parseCsv(await read('evals/fixtures/datasets/survey_with_blanks.csv', 'utf8'), 'survey.csv');
+    const columns = numericColumns(survey);
+    const model = {
+      constructs: [
+        { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' as const },
+        { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' as const },
+        { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' as const },
+      ],
+      paths: [
+        { from: 'TRUST', to: 'ATT' },
+        { from: 'ATT', to: 'INT' },
+        { from: 'TRUST', to: 'INT' },
+      ],
+    };
+
+    const cfa = confirmatoryFactorAnalysis(model, columns);
+    check('CFA uses only the complete cases', cfa.n, reference.completeCases);
+    check('and reports the rows it dropped', cfa.rowsDropped, reference.blankRows);
+
+    /* The same data with the incomplete rows removed by hand, and with blanks zero-filled. */
+    const keep = survey.rows.map((_, row) => [...columns.values()].every((values) => Number.isFinite(values[row] as number)));
+    const filtered = new Map([...columns].map(([name, values]) => [name, values.filter((_, row) => keep[row])]));
+    const zeroFilled = new Map([...columns].map(([name, values]) => [name, values.map((value) => (Number.isFinite(value) ? value : 0))]));
+
+    const pls = estimatePls(model, columns);
+    const plsFiltered = estimatePls(model, filtered);
+    const plsZero = estimatePls(model, zeroFilled);
+    check('PLS uses only the complete cases', pls.n, reference.completeCases);
+    close('PLS on data with blanks equals PLS on the complete cases', pls.pathCoefficients.get('TRUST→ATT') ?? 0, plsFiltered.pathCoefficients.get('TRUST→ATT') ?? 1, 1e-12);
+    assertTrue('and differs from treating blanks as zero', Math.abs((pls.pathCoefficients.get('TRUST→ATT') ?? 0) - (plsZero.pathCoefficients.get('TRUST→ATT') ?? 0)) > 1e-4);
+
+    const services = await Promise.all(['src/server/services/pls.service.ts', 'src/server/services/data-analysis.service.ts'].map((file) => read(file, 'utf8')));
+    assertTrue('no analysis service converts cells with Number()', services.every((text) => !text.includes(': Number(value);')));
+  }
+
+  /* ------------------------------ P0.7 / P0.8 CFA against lavaan references */
+  {
+    console.log('P0.7/P0.8 — CFA estimates, standard errors and fit match lavaan');
+
+    const { readFile: read } = await import('node:fs/promises');
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+
+    type Ref = {
+      n: number;
+      fit: { chisq: number; df: number; cfi: number; tli: number; rmsea: number; srmr: number };
+      loadings: { lhs: string; rhs: string; est: number; se: number }[];
+      residuals: { lhs: string; est: number; se: number }[];
+      factorCorrelations: { lhs: string; rhs: string; 'est.std': number; se: number }[];
+    };
+
+    const cases: { file: string; data: string; model: Parameters<typeof confirmatoryFactorAnalysis>[0] }[] = [
+      {
+        file: 'cfa-hs1939.json',
+        data: 'holzinger_swineford_1939.csv',
+        model: {
+          constructs: [
+            { name: 'visual', indicators: ['x1', 'x2', 'x3'], mode: 'reflective' },
+            { name: 'textual', indicators: ['x4', 'x5', 'x6'], mode: 'reflective' },
+            { name: 'speed', indicators: ['x7', 'x8', 'x9'], mode: 'reflective' },
+          ],
+          paths: [],
+        } as never,
+      },
+      {
+        file: 'cfa-survey-blanks.json',
+        data: 'survey_with_blanks.csv',
+        model: {
+          constructs: [
+            { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' },
+            { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' },
+            { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' },
+          ],
+          paths: [],
+        } as never,
+      },
+    ];
+
+    for (const entry of cases) {
+      const reference = JSON.parse(await read(`evals/fixtures/references/${entry.file}`, 'utf8')) as Ref;
+      const data = numericColumns(parseCsv(await read(`evals/fixtures/datasets/${entry.data}`, 'utf8'), entry.data));
+      const result = confirmatoryFactorAnalysis(entry.model, data);
+      const tag = entry.file.replace('.json', '');
+
+      check(`${tag}: n`, result.n, reference.n);
+      check(`${tag}: df`, result.fit.df, reference.fit.df);
+      close(`${tag}: χ² (Wishart)`, result.fit.chiSquare, reference.fit.chisq, reference.fit.chisq * 1e-5);
+      close(`${tag}: CFI`, result.fit.cfi, reference.fit.cfi, 1e-5);
+      close(`${tag}: TLI`, result.fit.tli, reference.fit.tli, 1e-5);
+      close(`${tag}: RMSEA`, result.fit.rmsea, reference.fit.rmsea, 1e-5);
+      close(`${tag}: SRMR`, result.fit.srmr, reference.fit.srmr, 1e-4);
+
+      for (const expected of reference.loadings) {
+        const actual = result.loadings.find((row) => row.indicator === expected.rhs);
+        close(`${tag}: loading ${expected.rhs}`, actual?.estimate ?? Number.NaN, expected.est, 1e-4);
+        close(`${tag}: SE of loading ${expected.rhs}`, actual?.standardError ?? Number.NaN, expected.se, Math.max(1e-6, expected.se * 0.005));
+      }
+      for (const expected of reference.residuals) {
+        const at = result.loadings.find((row) => row.indicator === expected.lhs);
+        close(`${tag}: residual variance ${expected.lhs}`, at?.residualVariance ?? Number.NaN, expected.est, 1e-4);
+      }
+      for (const expected of reference.factorCorrelations) {
+        const actual = result.factorCorrelations.find((row) => row.first === expected.lhs && row.second === expected.rhs);
+        close(`${tag}: factor correlation ${expected.lhs}~${expected.rhs}`, actual?.estimate ?? Number.NaN, expected['est.std'], 1e-4);
+        close(`${tag}: its SE (delta method)`, actual?.standardError ?? Number.NaN, expected.se, expected.se * 0.005);
+      }
+    }
+
+    /* A standard error must shrink with the sample: doubling the rows scales it by √((n−1)/(2n−1)). */
+    const hs = numericColumns(parseCsv(await read('evals/fixtures/datasets/holzinger_swineford_1939.csv', 'utf8'), 'hs.csv'));
+    const doubled = new Map([...hs].map(([name, values]) => [name, [...values, ...values]]));
+    const hsModel = cases[0]?.model as Parameters<typeof confirmatoryFactorAnalysis>[0];
+    const once = confirmatoryFactorAnalysis(hsModel, hs);
+    const twice = confirmatoryFactorAnalysis(hsModel, doubled);
+    const ratio = (twice.loadings.find((row) => row.indicator === 'x2')?.standardError ?? 0) / (once.loadings.find((row) => row.indicator === 'x2')?.standardError ?? 1);
+    close('SEs scale with 1/√(n − 1), not with the number of indicators', ratio, Math.sqrt(300 / 601), 1e-6);
+    check('a reference loading has no standard error', once.loadings.find((row) => row.indicator === 'x1')?.standardError, 0);
+
+    /*
+     * The exact null model, recomputed independently: CFI from χ²₀ =
+     * (n − 1)·(Σ ln sᵢᵢ − ln|S|), with |S| by Cholesky. Twelve items at r ≈ .5
+     * is where the old pairwise approximation overstated χ²₀ most.
+     */
+    {
+      const p = 12;
+      const n = 300;
+      let seed = 7;
+      const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+      const normal = () => Math.sqrt(-2 * Math.log(random() + 1e-12)) * Math.cos(2 * Math.PI * random());
+      const common = Array.from({ length: n }, normal);
+      /* Two factors, so the one-factor model misfits and CFI is informative (not ~1). */
+      const second = Array.from({ length: n }, normal);
+      const columns = new Map(
+        Array.from({ length: p }, (_, j) => [
+          `q${j}`,
+          Array.from({ length: n }, (_, i) => 0.7 * (common[i] as number) + (j < 6 ? 0.4 : -0.4) * (second[i] as number) + 0.55 * normal()),
+        ] as [string, number[]]),
+      );
+      const oneFactor = { constructs: [{ name: 'F', indicators: [...columns.keys()], mode: 'reflective' }], paths: [] } as never;
+      const fit = confirmatoryFactorAnalysis(oneFactor, columns).fit;
+
+      const values = [...columns.values()];
+      const means = values.map((column) => column.reduce((sum, x) => sum + x, 0) / n);
+      const cov = values.map((a, i) => values.map((b, j) => a.reduce((sum, x, k) => sum + (x - (means[i] as number)) * ((b[k] as number) - (means[j] as number)), 0) / (n - 1)));
+      /* ln|S| by Cholesky. */
+      const L = cov.map(() => new Array(p).fill(0) as number[]);
+      let logDet = 0;
+      for (let i = 0; i < p; i += 1) {
+        for (let j = 0; j <= i; j += 1) {
+          let sum = (cov[i] as number[])[j] as number;
+          for (let k = 0; k < j; k += 1) sum -= ((L[i] as number[])[k] as number) * ((L[j] as number[])[k] as number);
+          if (i === j) {
+            (L[i] as number[])[i] = Math.sqrt(sum);
+            logDet += 2 * Math.log(Math.sqrt(sum));
+          } else (L[i] as number[])[j] = sum / ((L[j] as number[])[j] as number);
+        }
+      }
+      const nullChi = (n - 1) * (cov.reduce((sum, row, i) => sum + Math.log(row[i] as number), 0) - logDet);
+      const nullDf = (p * (p - 1)) / 2;
+      const d = Math.max(0, fit.chiSquare - fit.df);
+      const expectedCfi = 1 - d / Math.max(d, nullChi - nullDf);
+      const expectedTli = (nullChi / nullDf - fit.chiSquare / fit.df) / (nullChi / nullDf - 1);
+      close('CFI uses the exact independence-model χ²', fit.cfi, expectedCfi, 1e-9);
+      close('and so does TLI', fit.tli, expectedTli, 1e-9);
+      assertTrue('a two-factor structure fit as one factor is not reported as good', fit.cfi < 0.95);
+    }
+
+    /* Three indicators on one factor: six moments, six parameters. */
+    {
+      const three = new Map(['a', 'b', 'c'].map((name, k) => [name, (hs.get(`x${k + 1}`) ?? []).slice()]));
+      const result = confirmatoryFactorAnalysis({ constructs: [{ name: 'F', indicators: ['a', 'b', 'c'], mode: 'reflective' }], paths: [] } as never, three);
+      check('a just-identified model reports df = 0, not 1', result.fit.df, 0);
+      assertTrue('and says its fit cannot be tested', result.warnings.some((warning) => warning.code === 'just-identified'));
+      assertTrue('with no χ² p-value', Number.isNaN(result.fit.pValue));
+    }
+
+    /* A Heywood case: r12 = r13 = .8, r23 = .4 puts λ₁² = .8·.8/.4 = 1.6 above 1. */
+    {
+      let seed = 11;
+      const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+      const normal = () => Math.sqrt(-2 * Math.log(random() + 1e-12)) * Math.cos(2 * Math.PI * random());
+      const n = 500;
+      /* Cholesky factor of [[1,.8,.8],[.8,1,.4],[.8,.4,1]]. */
+      const l21 = 0.8, l22 = 0.6, l31 = 0.8, l32 = (0.4 - 0.64) / 0.6, l33 = Math.sqrt(1 - 0.64 - ((0.4 - 0.64) / 0.6) ** 2);
+      const z = Array.from({ length: n }, () => [normal(), normal(), normal()]);
+      const columns = new Map([
+        ['h1', z.map((row) => row[0] as number)],
+        ['h2', z.map((row) => l21 * (row[0] as number) + l22 * (row[1] as number))],
+        ['h3', z.map((row) => l31 * (row[0] as number) + l32 * (row[1] as number) + l33 * (row[2] as number))],
+      ]);
+      const result = confirmatoryFactorAnalysis({ constructs: [{ name: 'H', indicators: ['h1', 'h2', 'h3'], mode: 'reflective' }], paths: [] } as never, columns);
+      assertTrue('a Heywood case is detected, no longer hidden by the residual floor', result.warnings.some((warning) => warning.code === 'heywood-case'));
+    }
+  }
+
+  /* --------------------------- P0.9 PLS rows aligned after listwise deletion */
+  {
+    console.log('P0.9 — HTMT, cross-loadings and VIF use the complete cases');
+
+    const { readFile: read } = await import('node:fs/promises');
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+    const { estimatePls } = await import('@/analysis/inference/pls/algorithm');
+    const { assessDiscriminantValidity, assessMeasurement } = await import('@/analysis/inference/pls/assessment');
+
+    const reference = JSON.parse(await read('evals/fixtures/references/cfa-survey-blanks.json', 'utf8')) as {
+      htmt: { constructs: string[]; matrix: number[][] };
+      vifTrust: Record<string, number>;
+    };
+    const data = numericColumns(parseCsv(await read('evals/fixtures/datasets/survey_with_blanks.csv', 'utf8'), 'survey.csv'));
+    const reflective = {
+      constructs: [
+        { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' as const },
+        { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' as const },
+        { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' as const },
+      ],
+      paths: [
+        { from: 'TRUST', to: 'ATT' },
+        { from: 'ATT', to: 'INT' },
+        { from: 'TRUST', to: 'INT' },
+      ],
+    };
+
+    const estimate = estimatePls(reflective, data);
+    check('the estimate records its complete-case rows', estimate.rows.length, estimate.n);
+    const measurement = assessMeasurement(reflective, estimate, data);
+    const discriminant = assessDiscriminantValidity(reflective, estimate, data, measurement);
+
+    /* semTools::htmt on the complete cases (arithmetic mean of absolute correlations). */
+    const names = reference.htmt.constructs;
+    for (const [a, b] of [['TRUST', 'ATT'], ['TRUST', 'INT'], ['ATT', 'INT']] as const) {
+      const expected = (reference.htmt.matrix[names.indexOf(b)] as number[])[names.indexOf(a)] as number;
+      close(`HTMT ${a}–${b} equals semTools on the complete cases`, discriminant.htmt.get(`${a} ↔ ${b}`)?.value ?? Number.NaN, expected, 1e-10);
+    }
+
+    /* Cross-loadings recomputed by hand on the aligned rows. */
+    const scoreOf = (name: string) => estimate.scores.get(name) as number[];
+    const itemOf = (name: string) => estimate.rows.map((row) => (data.get(name) as number[])[row] as number);
+    const handIssues: string[] = [];
+    for (const construct of reflective.constructs) {
+      for (const indicator of construct.indicators) {
+        const own = Math.abs(pearson(itemOf(indicator), scoreOf(construct.name)));
+        for (const other of reflective.constructs) {
+          if (other.name !== construct.name && Math.abs(pearson(itemOf(indicator), scoreOf(other.name))) > own) {
+            handIssues.push(`${indicator}>${other.name}`);
+            break;
+          }
+        }
+      }
+    }
+    check('cross-loading issues match a hand computation on the aligned rows', JSON.stringify(discriminant.crossLoadingIssues.map((row) => `${row.indicator}>${row.higherWith}`)), JSON.stringify(handIssues));
+
+    /* Formative VIF: 1/(1 − R²) from lm(item ~ siblings) in R, on the complete cases. */
+    const formative = { ...reflective, constructs: reflective.constructs.map((construct) => (construct.name === 'TRUST' ? { ...construct, mode: 'formative' as const } : construct)) };
+    const formativeEstimate = estimatePls(formative, data);
+    const trust = assessMeasurement(formative, formativeEstimate, data).find((row) => row.construct === 'TRUST');
+    close('formative VIF uses the multiple R², as lm() does', (trust as { maxVif?: { value: number } } | undefined)?.maxVif?.value ?? Number.NaN, Math.max(...Object.values(reference.vifTrust)), 1e-9);
+
+    /* The failure the fix addresses: blanks at the top misalign slice(0, n). */
+    const shifted = new Map([...data].map(([name, values]) => [name, [...new Array(40).fill(Number.NaN), ...values]]));
+    const shiftedEstimate = estimatePls(reflective, shifted);
+    const shiftedDiscriminant = assessDiscriminantValidity(reflective, shiftedEstimate, shifted, assessMeasurement(reflective, shiftedEstimate, shifted));
+    close('forty blank rows in front change nothing', shiftedDiscriminant.htmt.get('TRUST ↔ ATT')?.value ?? Number.NaN, discriminant.htmt.get('TRUST ↔ ATT')?.value ?? 0, 1e-12);
+  }
+
+  /* ------------------------------------------ P0.10 asynchronous bootstrap */
+  {
+    console.log('P0.10 — the bootstrap yields to the event loop and can be stopped');
+
+    const { readFile: read } = await import('node:fs/promises');
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+    const { estimatePls } = await import('@/analysis/inference/pls/algorithm');
+    const { bootstrapPls, bootstrapPlsAsync } = await import('@/analysis/inference/pls/bootstrap');
+
+    const data = numericColumns(parseCsv(await read('evals/fixtures/datasets/survey_with_blanks.csv', 'utf8'), 'survey.csv'));
+    const model = {
+      constructs: [
+        { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' as const },
+        { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' as const },
+        { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' as const },
+      ],
+      paths: [
+        { from: 'TRUST', to: 'ATT' },
+        { from: 'ATT', to: 'INT' },
+        { from: 'TRUST', to: 'INT' },
+      ],
+    };
+    const estimate = estimatePls(model, data);
+
+    const sync = bootstrapPls(model, data, estimate, { resamples: 200, seed: 99 });
+    const asyncResult = await bootstrapPlsAsync(model, data, estimate, { resamples: 200, seed: 99 });
+    check(
+      'the asynchronous bootstrap gives identical intervals for the same seed',
+      JSON.stringify(asyncResult.paths),
+      JSON.stringify(sync.paths),
+    );
+
+    /* The event loop runs between batches: a timer fires while the bootstrap is in progress. */
+    let ticks = 0;
+    const timer = setInterval(() => (ticks += 1), 1);
+    await bootstrapPlsAsync(model, data, estimate, { resamples: 300, seed: 5 });
+    clearInterval(timer);
+    assertTrue('other work runs while it resamples', ticks > 0);
+
+    /* Cancellation set from outside, as the job's database check does, stops it mid-run. */
+    let stop = false;
+    const stopped = await bootstrapPlsAsync(model, data, estimate, {
+      resamples: 1000,
+      seed: 7,
+      onProgress: (percent) => {
+        if (percent >= 10) setImmediate(() => (stop = true));
+      },
+      shouldStop: () => stop,
+    });
+    assertTrue('a stop requested mid-run ends it early', stopped.resamples + stopped.failed < 1000);
+  }
 
 console.log(
     failed === 0

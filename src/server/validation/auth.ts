@@ -50,3 +50,10 @@ export const resetPasswordSchema = z
 
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
+
+export const verifyEmailSchema = z.object({
+  uid: z.string().min(1).max(64),
+  token: z.string().length(64),
+});
+
+export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;

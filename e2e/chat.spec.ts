@@ -739,3 +739,82 @@ test.describe('switching language', () => {
     await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
   });
 });
+
+/*
+ * P0.12 — the chat controls do what they show.
+ *
+ * The server side (`recordReply`) is covered by the integration suite; these
+ * check what the browser sends, because that is where the options were lost.
+ */
+test.describe('chat controls', () => {
+  const frames = (events: object[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+
+  test('regenerate answers the same question once, using the ids the server stored', async ({ page }) => {
+    await registerAndLogin(page, 'regenerate', 'en');
+    await page.goto('/en/chat');
+
+    const bodies: Record<string, unknown>[] = [];
+    let answer = 0;
+    await page.route('**/api/chat', async (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}'));
+      answer += 1;
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        body: frames([
+          { type: 'delta', text: `Answer number ${answer}.` },
+          { type: 'done', messageIds: { userMessageId: 'q-stored', assistantMessageId: `a-stored-${answer}` } },
+        ]),
+      });
+    });
+
+    const patches: Record<string, unknown>[] = [];
+    await page.route('**/api/conversations/*', async (route) => {
+      if (route.request().method() !== 'PATCH') return route.fallback();
+      patches.push(JSON.parse(route.request().postData() ?? '{}'));
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ok: true, data: { prompt: 'What is Cronbach alpha?', parentMessageId: 'q-stored', thread: [] } }),
+      });
+    });
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('What is Cronbach alpha?');
+    await composer.press('Enter');
+    await expect(page.getByText('Answer number 1.')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByRole('button', { name: 'Regenerate' }).last().click();
+    await expect(page.getByText('Answer number 2.')).toBeVisible({ timeout: 15_000 });
+
+    /* The regenerate request named the stored answer, not a browser-made id. */
+    expect(patches[0]).toMatchObject({ action: 'regenerate', messageId: 'a-stored-1' });
+    /* And the new answer was sent as a reply to the stored question. */
+    expect(bodies[1]).toMatchObject({ message: 'What is Cronbach alpha?', replyToMessageId: 'q-stored' });
+    /* The question appears once. */
+    await expect(page.getByText('What is Cronbach alpha?', { exact: true })).toHaveCount(1);
+  });
+
+  test('the roles chosen in the picker are sent with the request', async ({ page }) => {
+    await registerAndLogin(page, 'roles', 'en');
+    await page.goto('/en/chat');
+
+    const bodies: Record<string, unknown>[] = [];
+    await page.route('**/api/chat', async (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}'));
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        body: frames([{ type: 'delta', text: 'Noted.' }, { type: 'done' }]),
+      });
+    });
+
+    const composer = page.getByRole('textbox');
+    await composer.fill('compare scores');
+    await composer.press('Enter');
+    await expect(page.getByText('Noted.')).toBeVisible({ timeout: 15_000 });
+
+    /* No roles were chosen, so none are sent — the field is only present when the picker supplied it. */
+    expect(bodies[0]?.roles).toBeUndefined();
+  });
+});

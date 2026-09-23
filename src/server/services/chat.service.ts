@@ -422,16 +422,72 @@ export async function recordTaskTurn(input: {
   userMessage: string;
   taskId: string;
   restatement?: string;
-}): Promise<void> {
-  if (!input.conversationId) return;
+  replyToMessageId?: string | null;
+}): Promise<RecordedIds | null> {
+  if (!input.conversationId) return null;
 
-  await recordTurn({
+  return recordReply({
     conversationId: input.conversationId,
     userId: input.userId,
     userMessage: input.userMessage,
     assistantMessage: input.restatement?.trim() || ' ',
     payload: { results: [{ kind: 'task', runId: input.taskId, payload: null }] },
+    replyToMessageId: input.replyToMessageId ?? null,
   }).catch((error: unknown) => {
     logger.warn('chat.taskTurnNotRecorded', { error: String(error).slice(0, 200) });
+    return null;
   });
+}
+
+/** The stored ids of a recorded exchange, so the client can refer to them. */
+export interface RecordedIds {
+  userMessageId: string;
+  assistantMessageId: string;
+}
+
+/**
+ * Records an answer: a new exchange, or — for a regeneration or an edited
+ * question — an answer under a question already in the thread.
+ *
+ * `replyToMessageId` is the fix for regenerate and edit writing the question a
+ * second time. The question it names must be a user message in this
+ * conversation; the new answer becomes its child, next to any earlier answers,
+ * which is exactly what the branch switcher shows.
+ */
+export async function recordReply(input: {
+  conversationId: string;
+  userId: string;
+  userMessage: string;
+  assistantMessage: string;
+  payload?: Record<string, unknown> | null;
+  replyToMessageId?: string | null;
+}): Promise<RecordedIds> {
+  if (input.replyToMessageId) {
+    await requireOwned(input.conversationId, input.userId);
+    const question = await chatRepo.findMessage(input.replyToMessageId, input.conversationId);
+
+    if (!question || question.role !== 'USER') {
+      throw new AppError('NOT_FOUND', 'That message was not found.', 'لم يُعثر على الرسالة.');
+    }
+
+    const answer = await recordRegeneratedAnswer({
+      conversationId: input.conversationId,
+      userId: input.userId,
+      parentMessageId: question.id,
+      content: input.assistantMessage,
+      payload: input.payload ?? null,
+    });
+
+    return { userMessageId: question.id, assistantMessageId: answer.id };
+  }
+
+  const recorded = await recordTurn({
+    conversationId: input.conversationId,
+    userId: input.userId,
+    userMessage: input.userMessage,
+    assistantMessage: input.assistantMessage,
+    payload: input.payload ?? null,
+  });
+
+  return { userMessageId: recorded.user.id, assistantMessageId: recorded.assistant?.id as string };
 }

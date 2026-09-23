@@ -12,6 +12,7 @@
  * decide, it says what it found and asks one question.
  */
 
+import { numericColumns } from '@/analysis/numeric-columns';
 import { planCleaning } from '@/analysis';
 import { descriptiveTables } from '@/analysis/descriptives';
 import { inferRoles, isGrouping, isQuantitative, itemGroups, type AnalysisIntent } from '@/analysis/infer-roles';
@@ -246,20 +247,7 @@ export async function analyseDataRequest(input: {
 
 /** Every numeric column's values, for the figures that need the raw numbers. */
 function numbersByColumn(loaded: { data: { columns: string[]; rows: unknown[][] } }): Map<string, number[]> {
-  const values = new Map<string, number[]>();
-
-  loaded.data.columns.forEach((name, index) => {
-    values.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  });
-
-  return values;
+  return numericColumns(loaded.data);
 }
 
 /**

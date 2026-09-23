@@ -29,11 +29,15 @@
  * honest response for badly non-normal data is PLS rather than a CB-SEM run
  * with a caveat nobody reads.
  *
- * Validated against published benchmark results and mathematical properties.
- * Not benchmarked against AMOS, LISREL or lavaan; nothing here claims to match
- * them.
+ * **Validated against lavaan** (0.6-17; `likelihood = "wishart"`,
+ * `information = "expected"`, marker-variable identification) on the
+ * Holzinger & Swineford (1939) data and a simulated survey — estimates,
+ * standard errors, χ², CFI, TLI, RMSEA and SRMR. The reference outputs are
+ * committed under `evals/fixtures/references/` and checked on every run of
+ * the analysis suite. χ² is (N − 1)·F, the Wishart convention AMOS uses.
  */
 
+import { chiSquareSf, normalSf } from '../../distributions';
 import { mean, pearson, standardDeviation } from '../../stats-core';
 
 import type { LatentConstruct, PlsModel } from '../pls/schema';
@@ -229,7 +233,30 @@ export function confirmatoryFactorAnalysis(
     });
   }
 
-  const fitted = estimateByML(constructs, indicators, observed);
+  const layout = parameterLayout(constructs, indicators);
+
+  /*
+   * The pattern search finds the neighbourhood of the optimum reliably from
+   * any start; Fisher scoring then lands on it exactly, which is what makes
+   * the estimates and standard errors agree with a dedicated package.
+   */
+  const quick = estimateByML(constructs, indicators, observed, WARM_START_ITERATIONS);
+  let refined = refineByScoring(constructs, indicators, observed, quick, layout);
+
+  /* A start too rough for scoring to converge from gets the full search first. */
+  if (!refined.scored) {
+    const searched = estimateByML(constructs, indicators, observed);
+    refined = refineByScoring(constructs, indicators, observed, searched, layout);
+  }
+  const fitted = refined.fitted;
+
+  const df = (p * (p + 1)) / 2 - parameters;
+  if (df < 0) {
+    throw new CbSemError('analysis.cbsem.error.underIdentified', { df, parameters });
+  }
+  if (df === 0) {
+    warnings.push({ code: 'just-identified', severity: 'warning', params: { parameters } });
+  }
 
   if (!fitted.converged) {
     warnings.push({ code: 'did-not-converge', severity: 'error', params: { iterations: MAX_ITERATIONS } });
@@ -244,7 +271,12 @@ export function confirmatoryFactorAnalysis(
    * silently clamped: a clamped Heywood case produces a model that reports
    * clean fit and is not identified.
    */
-  const heywood = fitted.residuals.filter((value) => value <= 0);
+  /*
+   * At or below zero. Scoring does not floor the residuals, so a negative one
+   * shows up as negative, and one pinned at the search's lower bound is the
+   * same improper solution approached from above.
+   */
+  const heywood = fitted.residuals.filter((value) => value <= HEYWOOD_BOUND);
 
   if (heywood.length > 0) {
     warnings.push({
@@ -255,11 +287,18 @@ export function confirmatoryFactorAnalysis(
   }
 
   const implied = impliedCovariance(constructs, indicators, fitted);
-  const fit = fitIndices(observed, implied, n, p, parameters);
+  const fit = fitIndices(observed, implied, n, p, df);
+
+  /*
+   * Standard errors from the expected information matrix of the Wishart
+   * likelihood: Cov(θ̂) = [ (n − 1)/2 · tr(Σ⁻¹ ∂Σ/∂θᵢ Σ⁻¹ ∂Σ/∂θⱼ) ]⁻¹. They
+   * scale with 1/√(n − 1), as a standard error must.
+   */
+  const covariance = parameterCovariance(constructs, indicators, fitted, layout, n);
 
   return {
-    loadings: buildLoadings(constructs, indicators, fitted, observed),
-    factorCorrelations: buildFactorCorrelations(constructs, fitted, n),
+    loadings: buildLoadings(constructs, indicators, fitted, observed, layout, covariance),
+    factorCorrelations: buildFactorCorrelations(constructs, fitted, layout, covariance),
     fit,
     reliability: buildReliability(constructs, indicators, fitted, observed),
     n,
@@ -269,6 +308,272 @@ export function confirmatoryFactorAnalysis(
     converged: fitted.converged,
     warnings,
   };
+}
+
+/**
+ * Pattern-search iterations before scoring takes over. Enough to leave the
+ * arbitrary starting values; scoring then converges in a few dozen steps,
+ * where the search alone would take seconds on a thirty-indicator model.
+ */
+const WARM_START_ITERATIONS = 15;
+
+/** Residual variances at or below this are an improper (Heywood) solution. */
+const HEYWOOD_BOUND = 1e-5;
+
+/* -------------------------------------------------------------------------- */
+/*                 Parameters, derivatives and the information                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Where each free parameter lives, in one fixed order: the free loadings (the
+ * first indicator of each factor is fixed to 1), then every residual
+ * variance, then the factor variances and covariances (upper triangle).
+ */
+interface ParameterLayout {
+  /** Indicator index for each free loading. */
+  loadings: number[];
+  /** Factor of each indicator. */
+  factorOf: number[];
+  /** (a, b) with a ≤ b for each factor (co)variance. */
+  phi: [number, number][];
+  size: number;
+}
+
+function parameterLayout(constructs: LatentConstruct[], indicators: string[]): ParameterLayout {
+  const index = new Map(indicators.map((name, position) => [name, position]));
+  const factorOf: number[] = new Array(indicators.length).fill(0);
+  const loadings: number[] = [];
+
+  constructs.forEach((construct, factor) => {
+    construct.indicators.forEach((indicator, position) => {
+      const at = index.get(indicator) as number;
+      factorOf[at] = factor;
+      if (position > 0) loadings.push(at);
+    });
+  });
+
+  const phi: [number, number][] = [];
+  for (let a = 0; a < constructs.length; a += 1) {
+    for (let b = a; b < constructs.length; b += 1) phi.push([a, b]);
+  }
+
+  return { loadings, factorOf, phi, size: loadings.length + indicators.length + phi.length };
+}
+
+function readParameters(fitted: FittedModel, layout: ParameterLayout): number[] {
+  return [
+    ...layout.loadings.map((at) => fitted.loadings[at] as number),
+    ...fitted.residuals,
+    ...layout.phi.map(([a, b]) => (fitted.factorCovariance[a] as number[])[b] as number),
+  ];
+}
+
+function writeParameters(base: FittedModel, layout: ParameterLayout, theta: number[]): FittedModel {
+  const loadings = [...base.loadings];
+  layout.loadings.forEach((at, k) => (loadings[at] = theta[k] as number));
+
+  const offset = layout.loadings.length;
+  const residuals = base.residuals.map((_, i) => theta[offset + i] as number);
+
+  const factorCovariance = base.factorCovariance.map((row) => [...row]);
+  const phiOffset = offset + base.residuals.length;
+  layout.phi.forEach(([a, b], k) => {
+    const value = theta[phiOffset + k] as number;
+    (factorCovariance[a] as number[])[b] = value;
+    (factorCovariance[b] as number[])[a] = value;
+  });
+
+  return { ...base, loadings, residuals, factorCovariance };
+}
+
+/** ∂Σ/∂θ for every free parameter, as dense p × p matrices. */
+function derivatives(fitted: FittedModel, layout: ParameterLayout): number[][][] {
+  const p = fitted.loadings.length;
+  const zero = () => Array.from({ length: p }, () => new Array(p).fill(0) as number[]);
+  const phi = (a: number, b: number) => (fitted.factorCovariance[a] as number[])[b] as number;
+  const result: number[][][] = [];
+
+  /* Loading t on factor f: Σ gains e_t v' + v e_t', v_j = λ_j φ(f, f(j)). */
+  for (const t of layout.loadings) {
+    const d = zero();
+    const f = layout.factorOf[t] as number;
+    for (let j = 0; j < p; j += 1) {
+      const v = (fitted.loadings[j] as number) * phi(f, layout.factorOf[j] as number);
+      (d[t] as number[])[j] = ((d[t] as number[])[j] as number) + v;
+      (d[j] as number[])[t] = ((d[j] as number[])[t] as number) + v;
+    }
+    result.push(d);
+  }
+
+  /* Residual variance t: e_t e_t'. */
+  for (let t = 0; t < p; t += 1) {
+    const d = zero();
+    (d[t] as number[])[t] = 1;
+    result.push(d);
+  }
+
+  /* Factor (co)variance φ(a, b): λλ' restricted to the indicators of a and b. */
+  for (const [a, b] of layout.phi) {
+    const d = zero();
+    for (let i = 0; i < p; i += 1) {
+      for (let j = 0; j < p; j += 1) {
+        const fi = layout.factorOf[i];
+        const fj = layout.factorOf[j];
+        const hit = a === b ? fi === a && fj === a : (fi === a && fj === b) || (fi === b && fj === a);
+        if (hit) (d[i] as number[])[j] = (fitted.loadings[i] as number) * (fitted.loadings[j] as number);
+      }
+    }
+    result.push(d);
+  }
+
+  return result;
+}
+
+function multiply(a: number[][], b: number[][]): number[][] {
+  const n = a.length;
+  const m = (b[0] as number[]).length;
+  const inner = b.length;
+  const out: number[][] = Array.from({ length: n }, () => new Array(m).fill(0) as number[]);
+  for (let i = 0; i < n; i += 1) {
+    const row = a[i] as number[];
+    const target = out[i] as number[];
+    for (let k = 0; k < inner; k += 1) {
+      const value = row[k] as number;
+      if (value === 0) continue;
+      const other = b[k] as number[];
+      for (let j = 0; j < m; j += 1) target[j] = (target[j] as number) + value * (other[j] as number);
+    }
+  }
+  return out;
+}
+
+/** tr(AB) without forming the product. */
+function traceOfProduct(a: number[][], b: number[][]): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const row = a[i] as number[];
+    for (let k = 0; k < row.length; k += 1) sum += (row[k] as number) * ((b[k] as number[])[i] as number);
+  }
+  return sum;
+}
+
+/**
+ * The gradient of F and its expected Hessian, both from Σ⁻¹∂Σ/∂θ:
+ *   g_i = tr((I − Σ⁻¹S) Σ⁻¹ ∂ᵢΣ)       H_ij = tr(Σ⁻¹∂ᵢΣ Σ⁻¹∂ⱼΣ)
+ */
+function scoreAndInformation(
+  observed: number[][],
+  implied: number[][],
+  derivs: number[][][],
+): { gradient: number[]; information: number[][] } | null {
+  const inverse = invert(implied);
+  if (!inverse) return null;
+
+  const p = observed.length;
+  const weights = multiply(inverse, observed).map((row, i) => row.map((value, j) => (i === j ? 1 : 0) - value));
+  const scaled = derivs.map((d) => multiply(inverse, d));
+
+  const gradient = scaled.map((a) => traceOfProduct(weights, a));
+  const information = scaled.map((a, i) => scaled.map((b, j) => (j < i ? 0 : traceOfProduct(a, b))));
+  for (let i = 0; i < scaled.length; i += 1) {
+    for (let j = 0; j < i; j += 1) (information[i] as number[])[j] = (information[j] as number[])[i] as number;
+  }
+
+  void p;
+  return { gradient, information };
+}
+
+/**
+ * Fisher scoring from the pattern-search solution.
+ *
+ * θ ← θ − H⁻¹g with step halving: a step is taken only if Σ stays positive
+ * definite, the factor variances stay positive, and F does not increase. When
+ * scoring cannot improve the start (a degenerate model) the start is kept, so
+ * this can only ever make the fit better.
+ */
+function refineByScoring(
+  constructs: LatentConstruct[],
+  indicators: string[],
+  observed: number[][],
+  start: FittedModel,
+  layout: ParameterLayout,
+): { fitted: FittedModel; scored: boolean } {
+  let current = start;
+  let theta = readParameters(current, layout);
+  let value = discrepancy(observed, impliedCovariance(constructs, indicators, current));
+  /* Decided by scoring itself; the search's own verdict is only a fallback. */
+  let converged = false;
+  let iterations = start.iterations;
+
+  for (let step = 0; step < 100; step += 1) {
+    const implied = impliedCovariance(constructs, indicators, current);
+    const parts = scoreAndInformation(observed, implied, derivatives(current, layout));
+    if (!parts) break;
+
+    const inverse = invert(parts.information);
+    if (!inverse) break;
+
+    const direction = inverse.map((row) => -row.reduce((sum, h, j) => sum + h * (parts.gradient[j] as number), 0));
+    const largest = Math.max(...parts.gradient.map(Math.abs));
+    if (largest < 1e-10) {
+      converged = true;
+      break;
+    }
+
+    let accepted = false;
+    for (let scale = 1; scale > 1e-6; scale /= 2) {
+      const candidateTheta = theta.map((x, i) => x + scale * (direction[i] as number));
+      const candidate = writeParameters(current, layout, candidateTheta);
+      const variancesPositive = constructs.every((_, f) => ((candidate.factorCovariance[f] as number[])[f] as number) > 0);
+      if (!variancesPositive) continue;
+
+      const next = discrepancy(observed, impliedCovariance(constructs, indicators, candidate));
+      if (Number.isFinite(next) && next <= value + 1e-14) {
+        const improvement = value - next;
+        current = candidate;
+        theta = candidateTheta;
+        value = next;
+        accepted = true;
+        iterations += 1;
+        if (improvement < 1e-13) converged = true;
+        break;
+      }
+    }
+
+    if (!accepted) {
+      converged = largest < 1e-6;
+      break;
+    }
+    if (converged) break;
+  }
+
+  return {
+    fitted: { ...current, discrepancy: value, iterations, converged: converged || start.converged },
+    scored: converged,
+  };
+}
+
+/** Cov(θ̂) = 2/(n − 1) · H⁻¹, or null when the information is singular. */
+function parameterCovariance(
+  constructs: LatentConstruct[],
+  indicators: string[],
+  fitted: FittedModel,
+  layout: ParameterLayout,
+  n: number,
+): number[][] | null {
+  const implied = impliedCovariance(constructs, indicators, fitted);
+  const parts = scoreAndInformation(implied, implied, derivatives(fitted, layout));
+  if (!parts) return null;
+  const inverse = invert(parts.information);
+  if (!inverse) return null;
+  const factor = 2 / (n - 1);
+  return inverse.map((row) => row.map((value) => value * factor));
+}
+
+function varianceAt(covariance: number[][] | null, index: number): number {
+  if (!covariance) return Number.NaN;
+  const value = (covariance[index] as number[])[index] as number;
+  return value > 0 ? value : Number.NaN;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -305,6 +610,7 @@ function estimateByML(
   constructs: LatentConstruct[],
   indicators: string[],
   observed: number[][],
+  maxIterations = MAX_ITERATIONS,
 ): FittedModel {
   const indicatorIndex = new Map(indicators.map((name, index) => [name, index]));
   const factorOf = new Map<number, number>();
@@ -348,7 +654,7 @@ function estimateByML(
   let iterations = 0;
   let converged = false;
 
-  for (; iterations < MAX_ITERATIONS; iterations += 1) {
+  for (; iterations < maxIterations; iterations += 1) {
     let improved = false;
 
     /* Loadings, except the fixed reference of each factor. */
@@ -539,25 +845,25 @@ function fitIndices(
   implied: number[][],
   n: number,
   p: number,
-  parameters: number,
+  df: number,
 ): FitIndices {
   const f = discrepancy(observed, implied);
   const chiSquare = Math.max(0, (n - 1) * f);
-  const df = Math.max(1, (p * (p + 1)) / 2 - parameters);
 
   /*
    * The null model: every indicator independent, variances free.
    *
    * CFI and TLI are both "how far from the null model toward perfect fit", so
-   * they need a null χ² to measure against. Computing it from the observed
-   * correlations rather than refitting is exact for this model.
+   * they need a null χ² to measure against. For this model the ML solution is
+   * closed-form — Σ = diag(S) — so no refitting is needed.
    */
   const nullChiSquare = nullModelChiSquare(observed, n, p);
   const nullDf = (p * (p - 1)) / 2;
 
   const delta = Math.max(0, chiSquare - df);
-  const nullDelta = Math.max(0, nullChiSquare - nullDf);
+  const nullDelta = Math.max(0, nullChiSquare - nullDf, delta);
 
+  /* As lavaan: a just-identified model (df = 0) fits exactly; CFI and TLI are 1, RMSEA 0. */
   const cfi = nullDelta > 0 ? 1 - delta / nullDelta : 1;
 
   const tli =
@@ -565,7 +871,7 @@ function fitIndices(
       ? (nullChiSquare / nullDf - chiSquare / df) / (nullChiSquare / nullDf - 1)
       : 1;
 
-  const rmsea = Math.sqrt(Math.max(0, (chiSquare - df) / (df * (n - 1))));
+  const rmsea = df > 0 ? Math.sqrt(Math.max(0, (chiSquare - df) / (df * (n - 1)))) : 0;
 
   /* SRMR: the average standardised residual, which is read directly. */
   let sum = 0;
@@ -601,7 +907,7 @@ function fitIndices(
   return {
     chiSquare,
     df,
-    pValue: chiSquareSurvival(chiSquare, df),
+    pValue: df > 0 ? chiSquareSf(chiSquare, df) : Number.NaN,
     normedChiSquare: df > 0 ? chiSquare / df : Number.NaN,
     cfi: Math.min(1, Math.max(0, cfi)),
     tli: Math.min(1, tli),
@@ -611,25 +917,24 @@ function fitIndices(
   };
 }
 
-/** χ² for the model where every indicator is independent of every other. */
+/**
+ * χ² for the model where every indicator is independent of every other.
+ *
+ * Its ML solution is Σ = diag(S), so F reduces to −ln|R| with R the observed
+ * correlation matrix: χ²₀ = (n − 1)·(Σ ln sᵢᵢ − ln|S|). This used to sum
+ * −ln(1 − r²) over pairs, which overstates χ²₀ whenever the items correlate
+ * with each other — as a measurement model's items do by design — and so
+ * inflated CFI and TLI (0.953 against the correct 0.931 on the Holzinger &
+ * Swineford data).
+ */
 function nullModelChiSquare(observed: number[][], n: number, p: number): number {
-  /* n scales the sum below; p bounds the loops. */
-  let sum = 0;
+  const logDet = Math.log(determinant(observed));
+  if (!Number.isFinite(logDet)) return Number.NaN;
 
-  for (let i = 0; i < p; i += 1) {
-    for (let j = i + 1; j < p; j += 1) {
-      const covariance = (observed[i] as number[])[j] as number;
-      const scale = Math.sqrt(
-        ((observed[i] as number[])[i] as number) * ((observed[j] as number[])[j] as number),
-      );
-      const r = scale > 0 ? covariance / scale : 0;
+  let logDiagonal = 0;
+  for (let i = 0; i < p; i += 1) logDiagonal += Math.log((observed[i] as number[])[i] as number);
 
-      /* Fisher's approximation, summed over the independent pairs. */
-      if (Math.abs(r) < 1) sum += -Math.log(1 - r * r);
-    }
-  }
-
-  return Math.max(0, (n - 1) * sum);
+  return Math.max(0, (n - 1) * (logDiagonal - logDet));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -641,6 +946,8 @@ function buildLoadings(
   indicators: string[],
   fitted: FittedModel,
   observed: number[][],
+  layout: ParameterLayout,
+  covariance: number[][] | null,
 ): CbSemLoading[] {
   const indicatorIndex = new Map(indicators.map((name, index) => [name, index]));
   const result: CbSemLoading[] = [];
@@ -662,19 +969,14 @@ function buildLoadings(
         totalVariance > 0 ? (loading * Math.sqrt(factorVariance)) / Math.sqrt(totalVariance) : 0;
 
       /*
-       * Standard errors approximated from the residual rather than from the
-       * information matrix.
-       *
-       * The exact version inverts the Hessian of the discrepancy function,
-       * which this optimiser does not compute. The approximation is adequate
-       * for judging significance — loadings in a working model are far from
-       * zero — and the limitation is stated rather than hidden. A borderline
-       * z-value here should not be the basis of a decision.
+       * The reference loading is fixed to 1 to set the factor's scale, so it has
+       * no standard error and no test — the same as AMOS and lavaan report.
        */
-      const standardError =
-        Math.sqrt(Math.max(residual, 1e-8) / Math.max(factorVariance, 1e-8)) / Math.sqrt(observed.length);
-
-      const z = standardError > 0 ? loading / standardError : 0;
+      const isReference = position === 0;
+      const standardError = isReference
+        ? 0
+        : Math.sqrt(varianceAt(covariance, layout.loadings.indexOf(index)));
+      const z = isReference || !(standardError > 0) ? Number.NaN : loading / standardError;
 
       result.push({
         construct: construct.name,
@@ -682,11 +984,11 @@ function buildLoadings(
         estimate: loading,
         standardError,
         zValue: z,
-        pValue: 2 * (1 - normalCdf(Math.abs(z))),
+        pValue: Number.isFinite(z) ? 2 * normalSf(Math.abs(z)) : Number.NaN,
         standardised,
         residualVariance: residual,
         rSquared: standardised ** 2,
-        isReference: position === 0,
+        isReference,
       });
     });
   });
@@ -694,25 +996,51 @@ function buildLoadings(
   return result;
 }
 
+/**
+ * Factor correlations, with standard errors by the delta method.
+ *
+ * r = φ_ab / √(φ_aa φ_bb), so its variance comes from the joint covariance of
+ * the three estimates. The previous 1/√(n − 3) is the standard error of an
+ * *observed* correlation and ignores that these are between latent factors
+ * estimated with error.
+ */
 function buildFactorCorrelations(
   constructs: LatentConstruct[],
   fitted: FittedModel,
-  n: number,
+  layout: ParameterLayout,
+  covariance: number[][] | null,
 ): CbSemResult['factorCorrelations'] {
   const result: CbSemResult['factorCorrelations'] = [];
+  const offset = layout.loadings.length + fitted.residuals.length;
+  const at = (a: number, b: number) =>
+    offset + layout.phi.findIndex(([x, y]) => (x === Math.min(a, b) && y === Math.max(a, b)));
 
   for (let i = 0; i < constructs.length; i += 1) {
     for (let j = i + 1; j < constructs.length; j += 1) {
-      const covariance = (fitted.factorCovariance[i] as number[])[j] as number;
+      const covarianceIJ = (fitted.factorCovariance[i] as number[])[j] as number;
       const varianceI = (fitted.factorCovariance[i] as number[])[i] as number;
       const varianceJ = (fitted.factorCovariance[j] as number[])[j] as number;
 
       const scale = Math.sqrt(varianceI * varianceJ);
-      const r = scale > 0 ? covariance / scale : 0;
+      const r = scale > 0 ? covarianceIJ / scale : 0;
 
-      /* Fisher's z transform gives the standard error of a correlation. */
-      const standardError = n > 3 ? 1 / Math.sqrt(n - 3) : Number.NaN;
-      const z = Math.abs(r) < 1 ? 0.5 * Math.log((1 + r) / (1 - r)) / standardError : 0;
+      let standardError = Number.NaN;
+      if (covariance && scale > 0) {
+        const indices = [at(i, j), at(i, i), at(j, j)];
+        const gradient = [1 / scale, -r / (2 * varianceI), -r / (2 * varianceJ)];
+        let variance = 0;
+        for (let x = 0; x < 3; x += 1) {
+          for (let y = 0; y < 3; y += 1) {
+            variance +=
+              (gradient[x] as number) *
+              (gradient[y] as number) *
+              ((covariance[indices[x] as number] as number[])[indices[y] as number] as number);
+          }
+        }
+        standardError = variance > 0 ? Math.sqrt(variance) : Number.NaN;
+      }
+
+      const z = standardError > 0 ? r / standardError : Number.NaN;
 
       result.push({
         first: constructs[i]?.name as string,
@@ -720,7 +1048,7 @@ function buildFactorCorrelations(
         estimate: r,
         standardError,
         zValue: z,
-        pValue: 2 * (1 - normalCdf(Math.abs(z))),
+        pValue: Number.isFinite(z) ? 2 * normalSf(Math.abs(z)) : Number.NaN,
       });
     }
   }
@@ -897,84 +1225,6 @@ function shape(values: number[]): { skew: number; kurtosis: number } {
   }
 
   return { skew: third / n, kurtosis: fourth / n - 3 };
-}
-
-/** The normal CDF, to the accuracy a p-value needs. */
-function normalCdf(z: number): number {
-  const t = 1 / (1 + 0.2316419 * Math.abs(z));
-  const d = 0.3989422804014327 * Math.exp((-z * z) / 2);
-  const probability =
-    d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-
-  return z > 0 ? 1 - probability : probability;
-}
-
-/**
- * The upper tail of the χ² distribution.
- *
- * By the regularised incomplete gamma function, series expansion below the
- * mean and continued fraction above — the standard split, because each
- * converges quickly on one side and slowly on the other.
- */
-function chiSquareSurvival(x: number, df: number): number {
-  if (x <= 0) return 1;
-  if (df <= 0) return Number.NaN;
-
-  const k = df / 2;
-  const half = x / 2;
-
-  if (half < k + 1) {
-    let term = 1 / k;
-    let sum = term;
-
-    for (let i = 1; i < 500; i += 1) {
-      term *= half / (k + i);
-      sum += term;
-      if (Math.abs(term) < Math.abs(sum) * 1e-14) break;
-    }
-
-    return 1 - sum * Math.exp(-half + k * Math.log(half) - logGamma(k));
-  }
-
-  let b = half + 1 - k;
-  let c = 1e300;
-  let d = 1 / b;
-  let h = d;
-
-  for (let i = 1; i < 500; i += 1) {
-    const an = -i * (i - k);
-    b += 2;
-    d = an * d + b;
-    if (Math.abs(d) < 1e-300) d = 1e-300;
-    c = b + an / c;
-    if (Math.abs(c) < 1e-300) c = 1e-300;
-    d = 1 / d;
-    const delta = d * c;
-    h *= delta;
-    if (Math.abs(delta - 1) < 1e-14) break;
-  }
-
-  return Math.exp(-half + k * Math.log(half) - logGamma(k)) * h;
-}
-
-/** Lanczos approximation. */
-function logGamma(x: number): number {
-  const coefficients = [
-    76.18009172947146, -86.50532032941678, 24.01409824083091,
-    -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5,
-  ];
-
-  let y = x;
-  let temp = x + 5.5;
-  temp -= (x + 0.5) * Math.log(temp);
-  let series = 1.000000000190015;
-
-  for (const coefficient of coefficients) {
-    y += 1;
-    series += coefficient / y;
-  }
-
-  return -temp + Math.log((2.5066282746310005 * series) / x);
 }
 
 export { covarianceMatrix, discrepancy, impliedCovariance, MIN_CASES, CASES_PER_PARAMETER };

@@ -141,6 +141,32 @@ const serverSchema = z.object({
    * public sign-up form on the open internet.
    */
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
+  /**
+   * Failed password sign-ins allowed per 15 minutes: per account, and per IP.
+   *
+   * Only failures count, so a class signing in from one campus address is not
+   * blocked by its own successful logins; the per-account limit is what stops
+   * guessing one person's password, the per-IP one what stops spraying many.
+   */
+  LOGIN_FAILURES_PER_EMAIL: z.coerce.number().int().positive().default(10),
+  LOGIN_FAILURES_PER_IP: z.coerce.number().int().positive().default(50),
+  /** Proxies in front of the app that append to X-Forwarded-For (Render, Vercel: 1). */
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(1).max(5).default(1),
+  /** Use X-Real-IP only where the platform's proxy sets it and strips client copies. */
+  TRUST_X_REAL_IP: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  /**
+   * Where background work runs (agent tasks, deep research, PLS bootstrap).
+   *
+   * - `inline`: queued in PostgreSQL (pg-boss) and executed by the web process
+   *   itself. Durable and single-service — the default outside Vercel.
+   * - `worker`: queued; executed only by `npm run worker`, a separate service.
+   * - `direct`: the previous in-process promises, no queue. Rollback switch,
+   *   and the default on Vercel, whose functions cannot host a worker.
+   */
+  JOB_RUNNER: z.enum(['inline', 'worker', 'direct']).optional(),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

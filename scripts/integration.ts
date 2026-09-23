@@ -16,6 +16,13 @@
 
 import 'dotenv/config';
 
+/*
+ * Background work runs in-process here, as it always did in this suite: no
+ * worker consumes a queue in this process. The queued path has its own suite,
+ * scripts/jobs-integration.ts.
+ */
+process.env.JOB_RUNNER ??= 'direct';
+
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -727,6 +734,25 @@ async function main() {
   resetEnvCache();
 
   const ownerId = await newUser('owner');
+
+  /*
+   * P0.3: the address alone grants nothing. Whoever registers the owner
+   * address first has not proven they hold it — only a verified address
+   * carries owner rights.
+   */
+  const unverifiedPlan = await resolvePlanForUser(ownerId);
+  check('an unverified owner address stays on the free plan', unverifiedPlan.plan.code, 'FREE');
+  assertTrue('an unverified owner address is not flagged owner', !unverifiedPlan.isOwner);
+  {
+    const { hasAdminAccess } = await import('@/server/auth/owner');
+    assertTrue('an unverified owner address has no admin access', !hasAdminAccess({ email: ownerEmail, role: 'USER', emailVerified: false }));
+    const { requestEmailVerification, verifyEmail } = await import('@/server/services/account.service');
+    const request = await requestEmailVerification(ownerId, 'en');
+    const token = new URL(request.devUrl as string).searchParams.get('token') as string;
+    await verifyEmail({ userId: ownerId, token });
+    assertTrue('a verified owner has admin access', hasAdminAccess({ email: ownerEmail, role: 'USER', emailVerified: true }));
+  }
+
   const ownerPlan = await resolvePlanForUser(ownerId);
 
   check('the owner lands on the paid plan', ownerPlan.plan.code, 'PRO');
@@ -5995,6 +6021,195 @@ async function main() {
       'the planner distinguishes tables from documents',
       plannerSource.includes('AN UPLOADED FILE IS EITHER A TABLE OR A DOCUMENT'),
     );
+  }
+
+  /* ------------------------------------------------ P0.2 conversation IDOR */
+  {
+    section('P0.2 — a conversation is readable only by its owner');
+
+    const conversationsRepo = await import('@/server/repositories/conversations.repository');
+    const { requireOwned } = await import('@/server/services/chat.service');
+
+    const owner = await newUser('p02-owner');
+    const intruder = await newUser('p02-intruder');
+
+    const conversation = await chatRepo.create({ userId: owner, mode: 'AGENT', title: 'private' });
+    await conversationsRepo.addMessage({ conversationId: conversation.id, role: 'USER', content: 'secret research idea' });
+    await conversationsRepo.addMessage({ conversationId: conversation.id, role: 'ASSISTANT', content: 'secret answer' });
+
+    const own = await conversationsRepo.listMessagesOwned(conversation.id, owner, 6);
+    check('the owner reads their messages', own.map((message) => message.content), ['secret research idea', 'secret answer']);
+
+    const foreign = await conversationsRepo.listMessagesOwned(conversation.id, intruder, 6);
+    check('another user reads nothing', foreign.length, 0);
+
+    const limited = await conversationsRepo.listMessagesOwned(conversation.id, owner, 1);
+    check('the limit keeps the latest message', limited.map((message) => message.content), ['secret answer']);
+
+    await expectAppError('the chat route refuses a foreign conversation id', 'NOT_FOUND', () =>
+      requireOwned(conversation.id, intruder),
+    );
+    await expectAppError('and an unknown one the same way', 'NOT_FOUND', () =>
+      requireOwned('00000000-0000-0000-0000-000000000000', intruder),
+    );
+  }
+
+  /* ------------------------------------------------ P0.3 email verification */
+  {
+    section('P0.3 — email verification');
+
+    const { requestEmailVerification, verifyEmail } = await import('@/server/services/account.service');
+    const usersRepo = await import('@/server/repositories/users.repository');
+    const tokensRepo = await import('@/server/repositories/tokens.repository');
+    const { createHash } = await import('node:crypto');
+
+    const id = await newUser('p03-verify');
+    check('a new account starts unverified', (await usersRepo.findById(id))?.emailVerified ?? null, null);
+
+    const first = await requestEmailVerification(id, 'en');
+    const firstToken = new URL(first.devUrl as string).searchParams.get('token') as string;
+    const second = await requestEmailVerification(id, 'ar');
+    const secondToken = new URL(second.devUrl as string).searchParams.get('token') as string;
+
+    await expectAppError('asking again invalidates the earlier link', 'CONFLICT', () =>
+      verifyEmail({ userId: id, token: firstToken }),
+    );
+    await expectAppError('a wrong token is refused', 'CONFLICT', () =>
+      verifyEmail({ userId: id, token: 'f'.repeat(64) }),
+    );
+
+    /* The refused attempts above consumed nothing that belongs to the live link. */
+    const third = await requestEmailVerification(id, 'en');
+    const liveToken = new URL(third.devUrl as string).searchParams.get('token') as string;
+    void secondToken;
+    await verifyEmail({ userId: id, token: liveToken });
+    assertTrue('the link verifies the address', Boolean((await usersRepo.findById(id))?.emailVerified));
+
+    await expectAppError('a used link does not work twice', 'CONFLICT', () =>
+      verifyEmail({ userId: id, token: liveToken }),
+    );
+    check('a verified account is not sent another link', (await requestEmailVerification(id, 'en')).alreadyVerified, true);
+
+    /* An expired link is refused even with the right token. */
+    const late = await newUser('p03-expired');
+    const expiredToken = 'a'.repeat(64);
+    await tokensRepo.put(
+      `email-verify:${late}`,
+      createHash('sha256').update(expiredToken).digest('hex'),
+      new Date(Date.now() - 1000),
+    );
+    await expectAppError('an expired link is refused', 'CONFLICT', () =>
+      verifyEmail({ userId: late, token: expiredToken }),
+    );
+    check('and the address stays unverified', (await usersRepo.findById(late))?.emailVerified ?? null, null);
+  }
+
+  /* ------------------------------------------------ P0.4 session invalidation */
+  {
+    section('P0.4 — ending sessions');
+
+    const usersRepo = await import('@/server/repositories/users.repository');
+    const { changePassword, requestPasswordReset, resetPassword } = await import('@/server/services/account.service');
+    const { setUserRole, setUserStatus } = await import('@/server/services/admin.service');
+    const { evaluateToken, loadSessionUser } = await import('@/server/auth/session-check');
+
+    const id = await newUser('p04-sessions');
+    const version = async () => (await usersRepo.findById(id))?.tokenVersion ?? -1;
+    check('a new account starts at version 0', await version(), 0);
+
+    /* A session issued now, and what the re-check says about it after each change. */
+    const session = { tv: 0 };
+
+    await changePassword(id, 'Passw0rd123', 'NewPassw0rd456');
+    check('a password change ends open sessions', await version(), 1);
+    check('the old session is refused', evaluateToken(session, await loadSessionUser(id, Date.now() + 60_000), Date.now()).action, 'revoke');
+
+    const email = (await usersRepo.findById(id))?.email as string;
+    const reset = await requestPasswordReset(email, 'en');
+    const token = new URL(reset.devUrl as string).searchParams.get('token') as string;
+    await resetPassword({ userId: id, token, password: 'Another1Passw0rd' });
+    check('a password reset ends open sessions too', await version(), 2);
+
+    const admin = await newUser('p04-admin');
+    await setUserRole(admin, id, 'ADMIN');
+    check('a promotion does not end sessions', await version(), 2);
+    await setUserRole(admin, id, 'USER');
+    check('a demotion does', await version(), 3);
+
+    await setUserStatus(admin, id, 'SUSPENDED');
+    check('a suspension does', await version(), 4);
+    check('and a suspended account is refused on re-check', evaluateToken({ tv: 4 }, await loadSessionUser(id, Date.now() + 60_000), Date.now()), { action: 'revoke', reason: 'suspended' });
+    await setUserStatus(admin, id, 'ACTIVE');
+    check('reactivation keeps the version', await version(), 4);
+  }
+
+  /* ------------------------------------------------ P0.12 chat controls */
+  {
+    section('P0.12 — regenerate and edit answer the question once; roles and model reach the task');
+
+    const { recordReply, requireOwned: owned } = await import('@/server/services/chat.service');
+    const conversationsRepo = await import('@/server/repositories/conversations.repository');
+    void owned;
+
+    const person = await newUser('p012-chat');
+    const other = await newUser('p012-other');
+    const conversation = await chatRepo.create({ userId: person, mode: 'AGENT', title: 'controls' });
+
+    const first = await recordReply({ conversationId: conversation.id, userId: person, userMessage: 'What is alpha?', assistantMessage: 'First answer.' });
+    assertTrue('a new exchange returns both stored ids', Boolean(first.userMessageId && first.assistantMessageId));
+
+    const prepared = await prepareRegeneration({ conversationId: conversation.id, userId: person, messageId: first.assistantMessageId });
+    check('regeneration hands back the stored question', prepared.parentMessageId, first.userMessageId);
+
+    const again = await recordReply({
+      conversationId: conversation.id,
+      userId: person,
+      userMessage: prepared.prompt,
+      assistantMessage: 'Second answer.',
+      replyToMessageId: prepared.parentMessageId,
+    });
+
+    const all = await conversationsRepo.listMessagesOwned(conversation.id, person, 50);
+    check('the question is stored once', all.filter((message) => message.role === 'USER').length, 1);
+    check('with two answers under it', all.filter((message) => message.role === 'ASSISTANT' && message.parentMessageId === first.userMessageId).length, 2);
+    check('the reply ids name the existing question', again.userMessageId, first.userMessageId);
+
+    const thread = await getThread(conversation.id, person);
+    const shown = (thread as { messages?: { content: string }[] }).messages ?? (thread as unknown as { content: string }[]);
+    assertTrue('the active path shows the new answer', JSON.stringify(shown).includes('Second answer.') && !JSON.stringify(shown).includes('First answer.'));
+
+    /* Edit: the edited question is a new branch; the answer attaches to it. */
+    const edited = await editMessage({ conversationId: conversation.id, userId: person, messageId: first.userMessageId, content: 'What is omega?' });
+    await recordReply({ conversationId: conversation.id, userId: person, userMessage: 'What is omega?', assistantMessage: 'Omega answer.', replyToMessageId: edited.id });
+    const afterEdit = await conversationsRepo.listMessagesOwned(conversation.id, person, 50);
+    check('an edit stores the new question once', afterEdit.filter((message) => message.role === 'USER' && message.content === 'What is omega?').length, 1);
+
+    await expectAppError('a reply to an assistant message is refused', 'NOT_FOUND', () =>
+      recordReply({ conversationId: conversation.id, userId: person, userMessage: 'x', assistantMessage: 'y', replyToMessageId: first.assistantMessageId }),
+    );
+    await expectAppError('a reply into someone else\'s conversation is refused', 'NOT_FOUND', () =>
+      recordReply({ conversationId: conversation.id, userId: other, userMessage: 'x', assistantMessage: 'y', replyToMessageId: first.userMessageId }),
+    );
+
+    /* Roles and the chosen model travel in the task's context. */
+    const { startTask } = await import('@/server/services/task.service');
+    const task = await startTask({
+      userId: person,
+      request: 'compare scores between groups',
+      locale: 'en',
+      analysisHints: { intent: 'stats.compareGroups', mentioned: [], roles: [{ column: 'score', role: 'dependent' }] },
+      chosenModel: { provider: 'anthropic', model: 'test-model' },
+    } as Parameters<typeof startTask>[0]);
+    const stored = await tasksRepo.findAny(task.id);
+    const storedRoles = (stored?.context.analysisHints as { roles?: { column: string; role: string }[] })?.roles ?? [];
+    check('the picker\'s roles reach the task', storedRoles.map((row) => `${row.column}:${row.role}`).join(','), 'score:dependent');
+    const storedModel = stored?.context.chosenModel as { provider?: string; model?: string } | undefined;
+    check('and so does the chosen model', `${storedModel?.provider}/${storedModel?.model}`, 'anthropic/test-model');
+    await tasksRepo.setStatus(task.id, 'CANCELLED');
+
+    const { currentPreferredModel, runForUser } = await import('@/server/ai/request-scope');
+    const seen = await runForUser(person, async () => currentPreferredModel(), { provider: 'openai', model: 'x' });
+    check('the chosen model is visible to every model call in the scope', seen?.provider, 'openai');
   }
 
   /* --------------------------------------------------------------- cleanup */

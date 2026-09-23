@@ -55,3 +55,33 @@ services:
         value: "5"
       - key: LOG_LEVEL
         value: info
+      # --- background jobs (P0.10) ---
+      # inline: the web process queues AND runs agent tasks, deep research and
+      # PLS bootstraps from a durable PostgreSQL queue (pg-boss). No extra
+      # service needed. Switch to "worker" when you add the worker below.
+      - key: JOB_RUNNER
+        value: inline
+
+  # --- optional: a dedicated background worker --------------------------------
+  # Uncomment to run background jobs outside the web process (set JOB_RUNNER to
+  # "worker" on BOTH services). Creating it adds a billed Render service.
+  #
+  # - type: worker
+  #   name: academic-ai-worker
+  #   runtime: node
+  #   plan: starter
+  #   region: frankfurt
+  #   branch: main
+  #   buildCommand: npm ci
+  #   startCommand: npm run worker
+  #   envVars:
+  #     - key: NODE_VERSION
+  #       value: "22"
+  #     - key: JOB_RUNNER
+  #       value: worker
+  #     - key: DATABASE_URL
+  #       sync: false
+  #     - key: AUTH_SECRET
+  #       sync: false
+  #     - key: ANTHROPIC_API_KEY
+  #       sync: false

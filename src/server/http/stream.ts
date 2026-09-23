@@ -21,7 +21,13 @@ import { AppError } from './errors';
 export type StreamEvent =
   | { type: 'delta'; text: string }
   | { type: 'notice'; kind: 'failover' | 'retry' }
-  | { type: 'task'; task: { id: string; status: string }; restatement?: string }
+  | {
+      type: 'task';
+      task: { id: string; status: string };
+      restatement?: string;
+      /** The stored message ids of this turn, when it was recorded. */
+      messageIds?: { userMessageId: string; assistantMessageId: string } | null;
+    }
   | { type: 'done'; [key: string]: unknown }
   | { type: 'error'; code: string; message: string; messageAr: string };
 

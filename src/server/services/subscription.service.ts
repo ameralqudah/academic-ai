@@ -2,7 +2,7 @@ import type { SubscriptionPlan } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as plansRepo from '@/server/repositories/plans.repository';
 import * as usersRepo from '@/server/repositories/users.repository';
-import { isOwnerEmail, ownerOverrideEnabled } from '@/server/auth/owner';
+import { isVerifiedOwner, ownerOverrideEnabled } from '@/server/auth/owner';
 
 export const UNLIMITED = -1;
 
@@ -116,7 +116,7 @@ async function ownerPlan(userId: string): Promise<ResolvedPlan | null> {
   if (!ownerOverrideEnabled()) return null;
 
   const user = await usersRepo.findById(userId);
-  if (!isOwnerEmail(user?.email)) return null;
+  if (!user || !isVerifiedOwner(user)) return null;
 
   const plan = (await plansRepo.findTopPlan()) ?? (await plansRepo.findDefaultPlan());
   if (!plan) return null;

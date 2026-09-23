@@ -1883,7 +1883,7 @@ assertTrue(
 assertTrue(
   'and the router honours an explicit choice above its own reasoning',
   (await readFile('src/server/ai/model-router.ts', 'utf8')).includes(
-    'if (options.preferred)',
+    'const preferred = options.preferred ?? currentPreferredModel();',
   ),
 );
 assertTrue(
@@ -4918,6 +4918,216 @@ console.log('\nwhat a model costs');
   check('but an English sentence does', decideConversationLanguage({ request: 'Please write a full review of the literature on resilience', history: ['اوصفلي بيانات'], interfaceLocale: 'en' }), 'en');
   check('and someone writing English is not', decideConversationLanguage({ request: 'run SmartPLS', history: ['describe my data'], interfaceLocale: 'en' }), 'en');
   check('with no history, the interface decides a mixed message', decideConversationLanguage({ request: 'حلل SmartPLS', interfaceLocale: 'en' }), 'en');
+}
+
+/* -------------------------------------------------------------------------- */
+/*          P0.1 — patched transitive dependencies still work in use          */
+/* -------------------------------------------------------------------------- */
+
+{
+  /*
+   * `uuid` and `image-size` are pinned by `overrides` to their patched majors.
+   * Both are used only deep inside exceljs and pptxgenjs, so a break would show
+   * up only when a researcher exports — this exercises exactly those paths.
+   */
+  const { generatePptx, validateArtifactBytes } = await import('@/server/generators/documents');
+  const { generateXlsx } = await import('@/server/generators/spreadsheet');
+  const ExcelJS = (await import('exceljs')).default;
+
+  const deck = await generatePptx('P0 check', [{ title: 'Slide', bullets: ['one', 'two'] }]);
+  check('a PowerPoint file is still produced after the override', (await validateArtifactBytes(deck, 'pptx')).valid, true);
+
+  const sheet = await generateXlsx([{ name: 'Data', headers: ['a', 'b'], rows: [[1, 2]] }]);
+  check('a workbook is still produced after the override', (await validateArtifactBytes(sheet, 'xlsx')).valid, true);
+
+  /* The data-bar extension is the one exceljs path that calls uuid.v4(). */
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('cf');
+  ws.addRow([1]);
+  ws.addRow([2]);
+  ws.addConditionalFormatting({
+    ref: 'A1:A2',
+    rules: [{ type: 'dataBar', priority: 1, cfvo: [{ type: 'min' }, { type: 'max' }] } as never],
+  });
+  const written = new Uint8Array(await workbook.xlsx.writeBuffer());
+  check('exceljs writes a rule that needs uuid', written.byteLength > 1000, true);
+}
+
+/* -------------------------------------------------------------------------- */
+/*             P0.2 — no unscoped reads of conversation messages              */
+/* -------------------------------------------------------------------------- */
+
+{
+  /*
+   * `listMessages` reads any conversation by id. Every caller now goes through
+   * `listMessagesOwned`, which carries the user in the query; a new caller of
+   * the unscoped reader is the bug this guards against.
+   */
+  const { readdir } = await import('node:fs/promises');
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (/\.(ts|tsx)$/.test(entry.name)) files.push(path);
+    }
+  };
+  await walk('src');
+
+  const offenders: string[] = [];
+  for (const file of files) {
+    if (file.endsWith('conversations.repository.ts')) continue;
+    const text = await readFile(file, 'utf8');
+    if (/\.listMessages\(/.test(text)) offenders.push(file);
+  }
+  check('no module reads conversation messages without the owner', offenders, []);
+
+  const route = await readFile('src/app/api/chat/route.ts', 'utf8');
+  check('the chat route refuses a conversation that is not the caller\'s', route.includes('await requireOwned(body.conversationId, user.id)'), true);
+}
+
+/* -------------------------------------------------------------------------- */
+/*          P0.3 — owner rights need a verified address; safe linking         */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { hasAdminAccess, isVerifiedOwner } = await import('@/server/auth/owner');
+  const { decideOAuthSignIn } = await import('@/server/auth/policy');
+  const { resetEnvCache } = await import('@/config/env');
+
+  /* The smoke suite runs without a real environment; owner lookup reads it. */
+  const saved = { OWNER_EMAIL: process.env.OWNER_EMAIL, DATABASE_URL: process.env.DATABASE_URL, AUTH_SECRET: process.env.AUTH_SECRET };
+  process.env.DATABASE_URL ??= 'postgresql://smoke@localhost/smoke';
+  process.env.AUTH_SECRET ??= 'smoke-secret-smoke-secret-smoke-secret';
+  process.env.OWNER_EMAIL = 'owner@example.test';
+  resetEnvCache();
+
+  check('owner address, unverified: no admin', hasAdminAccess({ email: 'owner@example.test', role: 'USER', emailVerified: false }), false);
+  check('owner address, verified: admin', hasAdminAccess({ email: 'owner@example.test', role: 'USER', emailVerified: true }), true);
+  check('owner address, verified date: admin', hasAdminAccess({ email: 'OWNER@example.test', role: 'USER', emailVerified: new Date() }), true);
+  check('other address, verified: no admin', hasAdminAccess({ email: 'x@example.test', role: 'USER', emailVerified: true }), false);
+  check('stored ADMIN role: admin regardless', hasAdminAccess({ email: 'x@example.test', role: 'ADMIN', emailVerified: false }), true);
+  check('verified owner needs both parts', isVerifiedOwner({ email: 'owner@example.test', emailVerified: null }), false);
+
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  resetEnvCache();
+
+  const decide = (providerEmailVerified: boolean, alreadyLinked: boolean, existing: Parameters<typeof decideOAuthSignIn>[0]['existing']) =>
+    decideOAuthSignIn({ providerEmailVerified, alreadyLinked, existing });
+
+  check('google, new user, verified by Google: allowed', decide(true, false, null), { allow: true });
+  check('google, address not verified by Google: refused', decide(false, false, null), { allow: false, reason: 'provider-email-unverified' });
+  check('google, already linked: allowed', decide(true, true, { hasPassword: true, emailVerified: false, suspended: false }), { allow: true });
+  check(
+    'google into an unverified password account: refused (pre-account takeover)',
+    decide(true, false, { hasPassword: true, emailVerified: false, suspended: false }),
+    { allow: false, reason: 'local-account-unverified' },
+  );
+  check('google into a verified password account: allowed', decide(true, false, { hasPassword: true, emailVerified: true, suspended: false }), { allow: true });
+  check('google into an OAuth-only account: allowed', decide(true, false, { hasPassword: false, emailVerified: false, suspended: false }), { allow: true });
+  check('google into a suspended account: refused', decide(true, true, { hasPassword: false, emailVerified: true, suspended: true }), { allow: false, reason: 'suspended' });
+
+  const { passwordResetEmail, emailVerificationEmail } = await import('@/server/email/templates');
+  const hostile = '<img src=x onerror=alert(1)>';
+  check('a user name is escaped in the reset email', passwordResetEmail({ to: 'a@b.c', name: hostile, url: 'https://x', locale: 'en', expiresMinutes: 30 }).html.includes('<img'), false);
+  check('and in the verification email', emailVerificationEmail({ to: 'a@b.c', name: hostile, url: 'https://x', locale: 'ar', expiresHours: 24 }).html.includes('<img'), false);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                P0.4 — sessions end when the account changes                */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { evaluateToken, needsCheck, REVALIDATE_MS } = await import('@/server/auth/session-check');
+  const now = 1_000_000_000;
+  const active = { role: 'USER' as const, status: 'ACTIVE' as const, locale: 'en' as const, emailVerified: null, tokenVersion: 2 };
+
+  check('a token checked a moment ago is not re-read', needsCheck({ checkedAt: now - 1000 }, now), false);
+  check('a token checked a minute ago is re-read', needsCheck({ checkedAt: now - REVALIDATE_MS }, now), true);
+  check('a token never checked is re-read', needsCheck({}, now), true);
+  check('a settings update forces a read', needsCheck({ checkedAt: now }, now, true), true);
+
+  check('a deleted user is signed out', evaluateToken({ tv: 2 }, null, now), { action: 'revoke', reason: 'missing' });
+  check('a suspended user is signed out', evaluateToken({ tv: 2 }, { ...active, status: 'SUSPENDED' }, now), { action: 'revoke', reason: 'suspended' });
+  check('a session from before a password change is signed out', evaluateToken({ tv: 1 }, active, now), { action: 'revoke', reason: 'version' });
+  check('a pre-P0 session (no version) survives while the version is 0', evaluateToken({}, { ...active, tokenVersion: 0 }, now).action, 'refresh');
+  check('a demoted admin loses the role on refresh', evaluateToken({ tv: 2 }, active, now), {
+    action: 'refresh',
+    patch: { role: 'USER', locale: 'en', ev: false, checkedAt: now },
+  });
+  check('verification reaches the session on refresh', evaluateToken({ tv: 2 }, { ...active, emailVerified: new Date() }, now).action === 'refresh' && (evaluateToken({ tv: 2 }, { ...active, emailVerified: new Date() }, now) as { patch: { ev: boolean } }).patch.ev, true);
+
+  const authSource = await readFile('src/server/auth/index.ts', 'utf8');
+  check('the jwt callback signs out a revoked session', authSource.includes("if (decision.action === 'revoke') return null;"), true);
+}
+
+/* -------------------------------------------------------------------------- */
+/*             P0.5 — password sign-in is rate-limited on failures            */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { resetEnvCache } = await import('@/config/env');
+  const saved = {
+    DATABASE_URL: process.env.DATABASE_URL,
+    AUTH_SECRET: process.env.AUTH_SECRET,
+    RATE_LIMIT_STORE: process.env.RATE_LIMIT_STORE,
+    TRUSTED_PROXY_HOPS: process.env.TRUSTED_PROXY_HOPS,
+  };
+  process.env.DATABASE_URL ??= 'postgresql://smoke@localhost/smoke';
+  process.env.AUTH_SECRET ??= 'smoke-secret-smoke-secret-smoke-secret';
+  process.env.RATE_LIMIT_STORE = 'memory';
+  delete process.env.TRUSTED_PROXY_HOPS;
+  resetEnvCache();
+
+  const { clientIp, resetRateLimitStore } = await import('@/server/http/rate-limit');
+  const { isFailedSignIn, loginBlocked, recordLoginFailure } = await import('@/server/auth/login-throttle');
+  resetRateLimitStore();
+
+  const request = (headers: Record<string, string>) => new Request('https://app.test/api/auth/callback/credentials', { method: 'POST', headers });
+
+  check('one proxy hop: the address it saw', clientIp(request({ 'x-forwarded-for': '203.0.113.7' })), '203.0.113.7');
+  check('a forged first entry is ignored', clientIp(request({ 'x-forwarded-for': '6.6.6.6, 203.0.113.7' })), '203.0.113.7');
+  check('X-Real-IP is not trusted by default', clientIp(request({ 'x-real-ip': '6.6.6.6' })), 'unknown');
+
+  process.env.TRUSTED_PROXY_HOPS = '2';
+  resetEnvCache();
+  check('two trusted hops read the second from the right', clientIp(request({ 'x-forwarded-for': '6.6.6.6, 198.51.100.4, 10.0.0.2' })), '198.51.100.4');
+  delete process.env.TRUSTED_PROXY_HOPS;
+  resetEnvCache();
+
+  const from = (ip: string) => request({ 'x-forwarded-for': ip });
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    check(`failure ${attempt + 1} for one account is allowed`, (await loginBlocked(from('203.0.113.10'), 'victim@example.test')).blocked, false);
+    await recordLoginFailure(from('203.0.113.10'), 'victim@example.test');
+  }
+  const eleventh = await loginBlocked(from('203.0.113.99'), 'Victim@Example.test');
+  check('the 11th guess at one account is refused, from any address', eleventh.blocked, true);
+  check('with a retry time', eleventh.retryAfterSeconds > 0, true);
+  check('another account from the same address is not affected', (await loginBlocked(from('203.0.113.10'), 'someone@example.test')).blocked, false);
+
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    await recordLoginFailure(from('192.0.2.50'), `spray-${attempt}@example.test`);
+  }
+  check('spraying 50 accounts from one address blocks that address', (await loginBlocked(from('192.0.2.50'), 'fresh@example.test')).blocked, true);
+  check('but not another address', (await loginBlocked(from('192.0.2.51'), 'fresh@example.test')).blocked, false);
+
+  check('a JSON redirect carrying an error is a failure', await isFailedSignIn(Response.json({ url: 'https://app.test/api/auth/signin?error=CredentialsSignin&code=credentials' })), true);
+  check('a JSON redirect without an error is a success', await isFailedSignIn(Response.json({ url: 'https://app.test/ar/chat' })), false);
+  check('a Location redirect carrying an error is a failure', await isFailedSignIn(new Response(null, { status: 302, headers: { location: '/api/auth/signin?error=CredentialsSignin' } })), true);
+
+  const route = await readFile('src/app/api/auth/[...nextauth]/route.ts', 'utf8');
+  check('the Auth.js POST handler is wrapped by the login gate', route.includes('loginBlocked(request, email)') && !route.includes('export const { GET, POST }'), true);
+
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  resetEnvCache();
+  resetRateLimitStore();
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

@@ -299,13 +299,20 @@ Run on local PostgreSQL 16, on a freshly created and migrated database, mirrorin
 
 ## 11. Known limitations
 
-1. **Neon role creation is not verified.** RLS was proven on local PostgreSQL 16, and migration 0015 applies on CI's PostgreSQL 16:
-   - the role can be created and granted;
-   - `SET LOCAL ROLE` works;
-   - isolation holds;
-   - the role reverts after the transaction.
+1. **Neon: the database layer is verified; the pre-production items still block.** Migrations 0014 and 0015 were applied on a Neon branch (PostgreSQL 18.6, role `neondb_owner`); see `P1D_NEON_VERIFICATION.md`. The checks showed that:
+   - `academic_app` can be created and granted there;
+   - it has no superuser, BYPASSRLS or login;
+   - the fail-closed probe passes;
+   - projects are isolated, and no rows are visible without a user;
+   - cross-project, impersonating and viewer inserts are rejected;
+   - the probe detects every way enforcement can be lost (RLS disabled, the role bypassing, missing or not granted).
 
-   It has not been run against the production Neon database. If Neon's migrating role cannot create or grant `academic_app`, migration 0015 warns and **every run is refused** (`rls_unavailable`); nothing falls back. Before `FF_RUNS` is turned on in production, apply the migrations to a Neon branch and start one run.
+   **Still blocking before `FF_RUNS` is enabled anywhere real** (§4 of that document):
+   - running the application's own run path (`test:runs:db`) against Neon, which this session could not do because TCP to Neon is blocked here;
+   - confirming the pooler and the connecting role;
+   - running the probe against production after migrating with the flag off.
+
+   The fail-closed behaviour is unchanged: without enforceable RLS, every run is refused (`rls_unavailable`).
 2. **RLS covers only the run tables.** Graph and statistics writes made by tools are authorised in the application, by the P1-A/P1-C services (as approved). The whole app is not RLS-protected.
 3. **Completing a step spans services and is not atomic.** A tool's effect (a P1-C run, a node) and the step's `SUCCEEDED` row are written in separate transactions. A crash between the two is handled by idempotency: the retry returns the existing effect. It does not produce a second one.
 4. **Some decisions are settled as the run owner.** When a project OWNER who is not the run owner rejects an approval, the server settles the run's rows under the run owner's RLS scope. The OWNER's own rights were checked first.

@@ -10,7 +10,7 @@ Each step gets a section when it is merged.
 | P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`) | [#30](https://github.com/ameralqudah/academic-ai/pull/30) |
 | P1-B Model Gateway | ✅ merged (`P1B_PLAN.md`, `P1B_REPORT.md`) | [#31](https://github.com/ameralqudah/academic-ai/pull/31) |
 | P1-C Deterministic statistics engine + graph integration (re-scoped) | ✅ merged (`P1C_PLAN.md`, `P1C_REPORT.md`); CI green on the merged head | [#32](https://github.com/ameralqudah/academic-ai/pull/32) |
-| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | 🔍 in review (`P1D_PLAN.md`, `P1D_REPORT.md`); not merged | PR pending |
+| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | 🔍 in review (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); not merged | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
 
 ---
 
@@ -207,4 +207,4 @@ Full report: `docs/phase1/P1D_REPORT.md`. Plan and audit: `docs/phase1/P1D_PLAN.
   - `test:tasks:db` (39);
   - e2e with the flags on and off;
   - smoke gates.
-- **Known limitation.** Creating the role on Neon has not been verified. Check it on a Neon branch before turning on `FF_RUNS`.
+- **Neon.** The RLS layer (role, policies, fail-closed probe) was verified on a Neon branch (`P1D_NEON_VERIFICATION.md`). Running the application's run path against Neon, and checking the production pooler and role, are still blocking items before `FF_RUNS` is enabled.

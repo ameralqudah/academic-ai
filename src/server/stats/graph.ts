@@ -149,10 +149,10 @@ export async function recordRunInGraph(runId: string): Promise<string | null> {
     ...(spec && spec.hypothesisIds.length && primary?.(e) ? { tests: spec.hypothesisIds } : {}),
   }));
   tables.forEach((table) =>
-    results.push({ key: `table:${table.position}`, type: 'result_table', label: table.title.slice(0, 200), data: { title: table.title, kind: table.kind, tableId: table.id, keys: table.keys }, showsValues: table.keys.filter((key) => keptKeys.has(key)) }),
+    results.push({ key: `table:${table.position}`, type: 'result_table', label: table.title.slice(0, 200), data: { key: `table:${table.position}`, title: table.title, kind: table.kind, tableId: table.id, keys: table.keys }, showsValues: table.keys.filter((key) => keptKeys.has(key)) }),
   );
   figures.forEach((figure) =>
-    results.push({ key: `figure:${figure.position}`, type: 'figure', label: figure.title.slice(0, 200), data: { title: figure.title, kind: figure.kind, figureId: figure.id, keys: figure.keys }, showsValues: figure.keys.filter((key) => keptKeys.has(key)) }),
+    results.push({ key: `figure:${figure.position}`, type: 'figure', label: figure.title.slice(0, 200), data: { key: `figure:${figure.position}`, title: figure.title, kind: figure.kind, figureId: figure.id, keys: figure.keys }, showsValues: figure.keys.filter((key) => keptKeys.has(key)) }),
   );
 
   const recorded = await graph.recordRun(projectId, actor, {

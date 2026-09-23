@@ -1711,10 +1711,10 @@ export const statEstimates = pgTable(
     runId: text('run_id')
       .notNull()
       .references(() => statRuns.id, { onDelete: 'cascade' }),
-    key: varchar('key', { length: 300 }).notNull(),
-    label: varchar('label', { length: 400 }).notNull(),
+    key: varchar('key', { length: 1000 }).notNull(),
+    label: varchar('label', { length: 1000 }).notNull(),
     family: varchar('family', { length: 40 }).notNull(),
-    term: varchar('term', { length: 300 }),
+    term: varchar('term', { length: 1000 }),
     stat: varchar('stat', { length: 40 }).notNull(),
     estimate: doublePrecision('estimate').notNull(),
     se: doublePrecision('se'),

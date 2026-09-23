@@ -15,7 +15,9 @@
  *   on the old schema stay pinned to the old version.
  */
 
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+
+import { and, asc, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { applyCleaning } from '@/analysis/clean';
@@ -79,6 +81,7 @@ export async function requireDataset(datasetId: string, actor: StatsActor, need:
   if (row && row.deletedAt) throw new AppError('NOT_FOUND', 'The dataset was not found.', 'لم يُعثر على مجموعة البيانات.');
   await authorise(row, actor, need, 'dataset');
   sameProject(row!, projectId, 'dataset');
+  if (row!.mimeType !== 'text/csv') throw new AppError('VALIDATION', 'Only tabular datasets have versions.', 'مجموعات البيانات الجدولية فقط لها إصدارات.');
   return row!;
 }
 
@@ -86,6 +89,9 @@ export async function requireVersion(versionId: string, actor: StatsActor, need:
   const [row] = await db.select().from(datasetVersions).where(eq(datasetVersions.id, versionId)).limit(1);
   await authorise(row, actor, need, 'dataset version');
   sameProject(row!, projectId, 'dataset version');
+  /* A deleted dataset's versions stay as records (their hashes back the runs), but they are not analysed again. */
+  const [dataset] = row!.datasetId ? await db.select({ deletedAt: datasets.deletedAt }).from(datasets).where(eq(datasets.id, row!.datasetId)).limit(1) : [];
+  if (!dataset || dataset.deletedAt) throw new AppError('NOT_FOUND', 'The dataset of this version was deleted.', 'حُذفت مجموعة بيانات هذا الإصدار.', { reason: 'dataset_deleted' });
   return row!;
 }
 
@@ -260,6 +266,22 @@ export async function listProjectDatasets(actor: StatsActor, projectId: string) 
   return rows.map((row) => ({ ...row, versions: versions.filter((v) => v.datasetId === row.id).sort((a, b) => a.versionNo - b.versionNo) }));
 }
 
+/** Stored files of a dataset's later versions (version 1 shares the upload's key), for deletion. */
+export async function versionObjectKeys(datasetIds: string[], except: string[]): Promise<string[]> {
+  if (datasetIds.length === 0) return [];
+  const rows = await db.select({ key: datasetVersions.storageKey }).from(datasetVersions).where(and(inArray(datasetVersions.datasetId, datasetIds), except.length ? ne(datasetVersions.storageKey, except[0]!) : undefined));
+  return [...new Set(rows.map((row) => row.key).filter((key) => !except.includes(key)))];
+}
+
+/** Succeeded statistics runs on a dataset's versions: what stops being reproducible if its files go. */
+export async function verifiedRunCount(datasetId: string): Promise<number> {
+  const { statRuns } = await import('@/server/db/schema');
+  const versions = await db.select({ id: datasetVersions.id }).from(datasetVersions).where(eq(datasetVersions.datasetId, datasetId));
+  if (versions.length === 0) return 0;
+  const runs = await db.select({ id: statRuns.id }).from(statRuns).where(and(inArray(statRuns.datasetVersionId, versions.map((v) => v.id)), eq(statRuns.status, 'succeeded')));
+  return runs.length;
+}
+
 export async function listVersions(actor: StatsActor, datasetId: string, projectId?: string | null) {
   const row = await requireDataset(datasetId, actor, 'VIEWER', projectId);
   await ensureInitialVersion(row);
@@ -339,7 +361,8 @@ export async function transformVersion(actor: StatsActor, versionId: string, inp
       const bytes = new TextEncoder().encode(toCsv(cleaned));
       const reread = parseCsv(new TextDecoder().decode(bytes), 'cleaned', ',');
       const columns = reread.columns.map((name) => schema.find((column) => column.name === name) ?? { name, type: 'text' as const });
-      const key = datasetVersionKey({ userId: dataset.userId, datasetId: dataset.id, versionNo });
+      /* A key no other write can use: two concurrent transformations can never overwrite each other's file (P1-C review). */
+      const key = datasetVersionKey({ userId: dataset.userId, datasetId: dataset.id, versionNo, unique: randomUUID() });
       await storageProvider().put(key, bytes, 'text/csv');
       const { cleanedAt: _clock, ...deterministicReport } = report;
       const version = await insertVersion(

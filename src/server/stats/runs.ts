@@ -23,7 +23,7 @@ import { ENGINE, type Issue } from '@/analysis/engine/types';
 import { validateDataset, validateSpec } from '@/analysis/engine/validate';
 import { logger } from '@/lib/logger';
 import { db } from '@/server/db';
-import { datasetVersions, graphNodes, statEstimates, statFigures, statRuns, statSpecs, statTables, type StatRun } from '@/server/db/schema';
+import { analysisJobs, datasets, datasetVersions, graphNodes, statEstimates, statFigures, statRuns, statSpecs, statTables, type StatRun } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 
 import { authorise, hashOf, sameProject, type StatsActor } from './access';
@@ -136,6 +136,8 @@ function cost(spec: MethodSpec, rows: number): number {
   return rows * columns * resamples * heavy;
 }
 export const INLINE_COST_LIMIT = 8_000_000;
+/** Queued or running background analyses per user, across PLS bootstraps and stats runs. */
+const MAX_ACTIVE_JOBS = 3;
 
 export interface StartRunInput {
   projectId?: string | null;
@@ -152,6 +154,11 @@ export async function startRun(actor: StatsActor, specId: string, input: StartRu
   if (input.supersedesRunId) {
     const previous = await requireRun(input.supersedesRunId, actor, 'EDITOR', spec.projectId);
     if (previous.status !== 'succeeded') throw new AppError('CONFLICT', 'Only a succeeded run can be superseded.', 'يمكن استبدال تشغيل ناجح فقط.');
+    /* A re-run replaces a run of the same analysis on the same dataset (any of its versions), never an unrelated one. */
+    const [previousVersion] = await db.select({ datasetId: datasetVersions.datasetId }).from(datasetVersions).where(eq(datasetVersions.id, previous.datasetVersionId)).limit(1);
+    if (previous.analysisType !== spec.analysisType || !previousVersion?.datasetId || previousVersion.datasetId !== version!.datasetId) {
+      throw new AppError('VALIDATION', 'A run can only be replaced by a run of the same analysis on the same dataset.', 'يُستبدل التشغيل بتشغيل للتحليل نفسه على مجموعة البيانات نفسها فقط.', { reason: 'unrelated_supersede' });
+    }
     /*
      * Replacing a recorded run invalidates what reported it. The Impact Report is
      * checked before anything is computed, so the user confirms first and a run
@@ -200,9 +207,14 @@ export async function startRun(actor: StatsActor, specId: string, input: StartRu
   }
 
   const execution = input.execution ?? 'auto';
+  /* Heavy work always goes to the queue: a caller cannot force it into the request (P1-C review). */
   const heavy = cost(spec.spec as unknown as MethodSpec, version!.rowCount) > INLINE_COST_LIMIT;
-  if (execution === 'job' || (execution === 'auto' && heavy)) {
+  if (execution === 'job' || heavy) {
     const jobs = await import('@/server/repositories/analysis-jobs.repository');
+    if ((await jobs.countActive(actor.userId)) >= MAX_ACTIVE_JOBS) {
+      await db.update(statRuns).set({ status: 'refused', finishedAt: new Date(), error: { code: 'too_many_jobs', message: 'Too many analyses are running.' } }).where(eq(statRuns.id, run.id));
+      throw new AppError('VALIDATION', `You already have ${MAX_ACTIVE_JOBS} analyses running. Wait for one to finish.`, `لديك ${MAX_ACTIVE_JOBS} تحليلات قيد التنفيذ. انتظر انتهاء أحدها.`, { reason: 'too_many_jobs' });
+    }
     const job = await jobs.create({ userId: actor.userId, datasetId: version!.datasetId, projectId: spec.projectId, kind: 'stats.run', status: 'QUEUED', spec: { runId: run.id } });
     await db.update(statRuns).set({ jobId: job.id }).where(eq(statRuns.id, run.id));
     const { dispatchAnalysisJob } = await import('@/server/jobs/dispatch');
@@ -267,16 +279,41 @@ export async function executeRun(runId: string, options: { reclaim?: boolean } =
   const result = outcome.result;
   const tables = tablesFor(result);
   const figures = figuresFor(result);
+
+  /* Keys must be unique and fit the record; a clash is a failed run, never a silently truncated key. */
+  const keys = result.estimates.map((e) => e.key);
+  if (new Set(keys).size !== keys.length || keys.some((key) => key.length > 1000)) {
+    await finish({ status: 'failed', error: { code: 'estimate-keys', message: 'The result has duplicate or over-long value keys (for example two constructs with the same name).' } });
+    return 'failed';
+  }
+
+  /*
+   * A replacing run: the Impact Report may have changed while it computed
+   * (someone cited the old run meanwhile). Re-checked before anything is kept,
+   * so the relational record and the graph never disagree about what replaced what.
+   */
+  if (claimed.supersedesRunId && claimed.projectId) {
+    const [previous] = await db.select({ graphRunNodeId: statRuns.graphRunNodeId }).from(statRuns).where(eq(statRuns.id, claimed.supersedesRunId)).limit(1);
+    if (previous?.graphRunNodeId) {
+      const { previewRerun } = await import('@/server/graph/service');
+      const report = await previewRerun(claimed.projectId, { userId: claimed.userId }, previous.graphRunNodeId);
+      if (report.requiresAcknowledgement && report.hash !== claimed.impactAcknowledged) {
+        await finish({ status: 'failed', error: { code: 'impact_changed', message: 'What depends on the replaced run changed while this run computed; review the Impact Report again and re-run.' } });
+        return 'failed';
+      }
+    }
+  }
+
   try {
     await db.transaction(async (tx) => {
       if (result.estimates.length) {
         await tx.insert(statEstimates).values(
           result.estimates.map((e) => ({
             runId,
-            key: e.key.slice(0, 300),
-            label: e.label.slice(0, 400),
+            key: e.key,
+            label: e.label.slice(0, 1000),
             family: e.family,
-            term: e.term?.slice(0, 300) ?? null,
+            term: e.term?.slice(0, 1000) ?? null,
             stat: e.stat,
             estimate: e.estimate,
             se: e.se ?? null,
@@ -319,7 +356,10 @@ export async function executeRun(runId: string, options: { reclaim?: boolean } =
     });
   } catch (error) {
     if (error instanceof RunCancelled) return 'cancelled';
-    throw error;
+    /* Never left "running": a run whose results could not be saved has failed, with nothing kept. */
+    logger.error('stats.run.persistFailed', { runId, error: error instanceof Error ? error.message : String(error) });
+    await finish({ status: 'failed', error: { code: 'persist-failed', message: 'The results could not be saved.' } });
+    return 'failed';
   }
 
   if (claimed.projectId) {
@@ -369,9 +409,58 @@ export async function runStatsJob(jobId: string): Promise<void> {
   }
 }
 
+/** An inline run older than this without an outcome belonged to a process that died. */
+const INLINE_STALE_MS = 15 * 60_000;
+
+/**
+ * Settles runs that can no longer finish: their job was failed or cancelled,
+ * or (no job) they were claimed or queued inline longer ago than any inline
+ * run takes. Called by the jobs reaper. Nothing is computed; they become
+ * `failed` (or `cancelled`) with no results.
+ */
+export async function reapStatRuns(now = new Date()): Promise<number> {
+  const open = await db
+    .select({ id: statRuns.id, jobId: statRuns.jobId, queuedAt: statRuns.queuedAt, startedAt: statRuns.startedAt, jobStatus: analysisJobs.status })
+    .from(statRuns)
+    .leftJoin(analysisJobs, eq(analysisJobs.id, statRuns.jobId))
+    .where(inArray(statRuns.status, ['queued', 'running']))
+    .limit(500);
+  let settled = 0;
+  for (const run of open) {
+    const since = (run.startedAt ?? run.queuedAt).getTime();
+    const status = run.jobId
+      ? run.jobStatus === 'CANCELLED'
+        ? 'cancelled'
+        : run.jobStatus === 'FAILED' || run.jobStatus === null
+          ? 'failed'
+          : null
+      : now.getTime() - since > INLINE_STALE_MS
+        ? 'failed'
+        : null;
+    if (!status) continue;
+    const rows = await db
+      .update(statRuns)
+      .set({ status, finishedAt: now, error: { code: 'interrupted', message: 'The run could not finish (its worker stopped); nothing was kept. Run it again.' } })
+      .where(and(eq(statRuns.id, run.id), inArray(statRuns.status, ['queued', 'running'])))
+      .returning({ id: statRuns.id });
+    settled += rows.length;
+  }
+  return settled;
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                   Reading                                  */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The run that replaced this one, if any. A replacement counts once it is
+ * recorded where this run is: in the graph when this run is in the graph.
+ */
+export async function supersedingRun(run: StatRun): Promise<string | null> {
+  const rows = await db.select({ id: statRuns.id, graphRunNodeId: statRuns.graphRunNodeId }).from(statRuns).where(and(eq(statRuns.supersedesRunId, run.id), eq(statRuns.status, 'succeeded')));
+  const replacement = rows.find((row) => !run.graphRunNodeId || row.graphRunNodeId);
+  return replacement?.id ?? null;
+}
 
 export async function getRun(actor: StatsActor, runId: string, projectId?: string | null) {
   const run = await requireRun(runId, actor, 'VIEWER', projectId);
@@ -379,8 +468,12 @@ export async function getRun(actor: StatsActor, runId: string, projectId?: strin
   const estimates = await db.select().from(statEstimates).where(eq(statEstimates.runId, runId));
   const tables = await db.select().from(statTables).where(eq(statTables.runId, runId)).orderBy(asc(statTables.position));
   const figures = await db.select().from(statFigures).where(eq(statFigures.runId, runId)).orderBy(asc(statFigures.position));
-  const [superseded] = await db.select({ id: statRuns.id }).from(statRuns).where(and(eq(statRuns.supersedesRunId, runId), eq(statRuns.status, 'succeeded'))).limit(1);
-  return { run, spec: spec!, estimates, tables, figures, supersededBy: superseded?.id ?? null, verified: run.status === 'succeeded' && !superseded };
+  const superseded = await supersedingRun(run);
+  /* The data is still there to re-run from: its dataset is not deleted and the version's file loads (checked lazily by the UI via provenance). */
+  const [version] = await db.select({ datasetId: datasetVersions.datasetId }).from(datasetVersions).where(eq(datasetVersions.id, run.datasetVersionId)).limit(1);
+  const [dataset] = version?.datasetId ? await db.select({ deletedAt: datasets.deletedAt }).from(datasets).where(eq(datasets.id, version.datasetId)).limit(1) : [];
+  const reproducible = Boolean(dataset && !dataset.deletedAt);
+  return { run, spec: spec!, estimates, tables, figures, supersededBy: superseded, verified: run.status === 'succeeded' && !superseded, reproducible };
 }
 
 export async function listRuns(actor: StatsActor, projectId: string) {

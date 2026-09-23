@@ -1,5 +1,5 @@
 {
-  "id": "8dbce9f6-1b6b-4c03-9a39-c8754df68e6c",
+  "id": "f0f1265a-8ff4-466d-adac-a192848e3df0",
   "prevId": "24cc8afd-5956-49e1-8c34-5d01eb02b279",
   "version": "7",
   "dialect": "postgresql",
@@ -4419,13 +4419,13 @@
         },
         "key": {
           "name": "key",
-          "type": "varchar(300)",
+          "type": "varchar(1000)",
           "primaryKey": false,
           "notNull": true
         },
         "label": {
           "name": "label",
-          "type": "varchar(400)",
+          "type": "varchar(1000)",
           "primaryKey": false,
           "notNull": true
         },
@@ -4437,7 +4437,7 @@
         },
         "term": {
           "name": "term",
-          "type": "varchar(300)",
+          "type": "varchar(1000)",
           "primaryKey": false,
           "notNull": false
         },

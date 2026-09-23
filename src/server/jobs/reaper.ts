@@ -122,9 +122,17 @@ export async function reap(): Promise<ReapResult> {
       return 0;
     });
 
+  /* P1-C: statistics runs whose job failed, or whose inline process died, are settled (never left running). */
+  const statRunsSettled = await import('@/server/stats/runs')
+    .then(({ reapStatRuns }) => reapStatRuns())
+    .catch((error: unknown) => {
+      logger.warn('jobs.statRunSweepFailed', { error: String(error).slice(0, 200) });
+      return 0;
+    });
+
   const result = { tasksRequeued, jobsRequeued, jobsFailed };
-  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased > 0) {
-    logger.info('jobs.reaped', { ...result, reservationsReleased });
+  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased + statRunsSettled > 0) {
+    logger.info('jobs.reaped', { ...result, reservationsReleased, statRunsSettled });
   }
   return result;
 }

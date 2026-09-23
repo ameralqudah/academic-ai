@@ -14,12 +14,13 @@
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { formatNumber, formatP } from '@/analysis/engine/tables';
+import { tokensIn, untracedNumbers, VALUE_TOKEN } from '@/lib/statistics-text';
 import { db } from '@/server/db';
-import { statEstimates, statRuns, type StatEstimate } from '@/server/db/schema';
+import { statEstimates, type StatEstimate } from '@/server/db/schema';
 import * as graph from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
 
-import { requireRun } from './runs';
+import { requireRun, supersedingRun } from './runs';
 import type { StatsActor } from './access';
 
 type Formattable = Pick<StatEstimate, 'stat' | 'label' | 'estimate' | 'se' | 'statistic' | 'statisticName' | 'df' | 'df2' | 'p' | 'ciLow' | 'ciHigh' | 'ciLevel' | 'ciMethod' | 'n'>;
@@ -47,26 +48,13 @@ export function formatEstimate(e: Formattable): string {
 /*                                   Tokens                                   */
 /* -------------------------------------------------------------------------- */
 
-const TOKEN = /\{\{value:([^{}]{1,300})\}\}/g;
-
-/** Statistic-like text: "p < .05", "r = 0.4", "t(12) = 3.1", "β = .2", "95% CI", any decimal number. */
-const STATISTIC = /(\b(p|r|t|F|b|B|z|d|n|N|M|SD|SE|CI|df|R2|R²|η²|ω²|α|β|ρ|χ²|chi2?)\s*(\(\s*\d[\d.,\s]*\))?\s*[=<>≤≥]\s*[-−]?\.?\d)|(\d+\.\d+)|(\.\d+)|(\b\d+(\.\d+)?\s*%)/u;
-
-export function tokensIn(text: string): string[] {
-  return [...text.matchAll(TOKEN)].map((match) => match[1]!.trim());
-}
-
-/** Spans that look like statistics but are not tokens: free-typed numbers. */
-export function untracedStatistics(text: string): string[] {
-  const outside = text.replace(TOKEN, ' ');
-  const found: string[] = [];
-  const global = new RegExp(STATISTIC.source, 'gu');
-  for (const match of outside.matchAll(global)) found.push(match[0].trim());
-  return found;
+/** Statistic-like text outside tokens (Arabic-Indic digits, comma decimals, β/χ² symbols included). */
+export function untracedStatistics(text: string, options: { strict?: boolean } = {}): string[] {
+  return untracedNumbers(text, options);
 }
 
 export function renderTokens(text: string, estimates: Map<string, Formattable>): string {
-  return text.replace(TOKEN, (_whole, raw: string) => {
+  return text.replace(VALUE_TOKEN, (_whole, raw: string) => {
     const estimate = estimates.get(raw.trim());
     if (!estimate) throw new AppError('VALIDATION', `Unknown value "${raw}" in the text.`, 'قيمة غير معروفة في النص.', { reason: 'unknown_value', key: raw });
     return formatEstimate(estimate);
@@ -88,8 +76,8 @@ export interface InsertClaimInput {
 export async function insertClaim(actor: StatsActor, projectId: string, runId: string, input: InsertClaimInput) {
   const run = await requireRun(runId, actor, 'EDITOR', projectId);
   if (run.status !== 'succeeded') throw new AppError('CONFLICT', 'Only a succeeded run can be cited.', 'يمكن الاستشهاد بتشغيل ناجح فقط.');
-  const [superseded] = await db.select({ id: statRuns.id }).from(statRuns).where(and(eq(statRuns.supersedesRunId, runId), eq(statRuns.status, 'succeeded'))).limit(1);
-  if (superseded) throw new AppError('CONFLICT', 'This run has been replaced; cite the current one.', 'استُبدل هذا التشغيل؛ استشهد بالحالي.', { reason: 'superseded', current: superseded.id });
+  const superseded = await supersedingRun(run);
+  if (superseded) throw new AppError('CONFLICT', 'This run has been replaced; cite the current one.', 'استُبدل هذا التشغيل؛ استشهد بالحالي.', { reason: 'superseded', current: superseded });
   if (!run.graphRunNodeId) throw new AppError('CONFLICT', 'The run is not recorded in the Research Graph yet.', 'التشغيل غير مسجّل في مخطط البحث بعد.', { reason: 'not_recorded' });
 
   const keys = [...new Set([...input.keys, ...(input.text ? tokensIn(input.text) : [])])];
@@ -110,8 +98,14 @@ export async function insertClaim(actor: StatsActor, projectId: string, runId: s
     text = keys.map((key) => `${byKey.get(key)!.label}: ${formatEstimate(byKey.get(key)!)}`).join('; ');
   }
 
-  const claim = await graph.createNode(projectId, { userId: actor.userId }, { type: 'claim', label: text.slice(0, 200), data: { text: text.slice(0, 5000) }, status: 'active' });
-  for (const key of keys) await graph.link(projectId, { userId: actor.userId }, { srcId: claim.id, rel: 'reports', dstId: byKey.get(key)!.graphNodeId! });
-  if (input.blockId) await graph.link(projectId, { userId: actor.userId }, { srcId: input.blockId, rel: 'asserts', dstId: claim.id });
+  /* One transaction: the claim exists with all of its evidence, or not at all. */
+  const claim = await graph.createClaim(projectId, { userId: actor.userId }, {
+    text: text.slice(0, 5000),
+    label: text.slice(0, 200),
+    reportIds: keys.map((key) => byKey.get(key)!.graphNodeId!),
+    blockId: input.blockId ?? null,
+  });
   return { claim, text, keys };
 }
+
+export { tokensIn };

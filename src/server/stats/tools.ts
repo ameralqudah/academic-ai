@@ -30,6 +30,7 @@ import { statEstimates } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 
 import type { StatsActor } from './access';
+import { STATS_TOOL_NAMES } from './tool-names';
 import { formatEstimate, renderTokens, tokensIn, untracedStatistics } from './manuscript';
 import { createSpec, getProvenance, getRun, startRun, validateSpecRecord } from './runs';
 import { requireVersion } from './versions';
@@ -45,7 +46,10 @@ export const STATS_TOOLS = [
   defineTool('generateTableFromResult', 'The formatted tables generated from a run’s stored estimates.', z.object({ runId: id }).strict()),
   defineTool('generateFigureFromResult', 'The figures generated from a run’s stored estimates.', z.object({ runId: id }).strict()),
 ];
-export const STATS_TOOL_NAMES = STATS_TOOLS.map((tool) => tool.name);
+export { STATS_TOOL_NAMES };
+if (STATS_TOOLS.map((tool) => tool.name).join() !== STATS_TOOL_NAMES.join()) {
+  throw new Error('stats tools differ from the declared allow-list (tool-names.ts)');
+}
 
 /** Executes one validated tool call on the user's behalf, inside their project authorisation. */
 export async function executeStatsTool(actor: StatsActor, projectId: string, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -114,7 +118,7 @@ export async function runAssistant(actor: StatsActor, projectId: string, dataset
     for (let round = 0; round < 4; round += 1) {
       const response = await gateway().toolCall(
         { purpose: 'stats.assistant', system: `${RULES}\n${SPEC_SHAPES}`, messages, maxOutputTokens: 2000, temperature: 0, needsReasoning: true, countsAsRequest: round === 0 },
-        { tools: STATS_TOOLS, permittedTools: STATS_TOOL_NAMES },
+        { tools: STATS_TOOLS, permittedTools: [...STATS_TOOL_NAMES] },
       );
       if (response.toolCalls.length === 0) {
         finalText = response.text;
@@ -141,8 +145,9 @@ export async function runAssistant(actor: StatsActor, projectId: string, dataset
       messages.push({ role: 'user', content: results });
     }
     /* The model's own words are not a source of numbers: text with free-typed statistics is withheld. */
-    const untraced = untracedStatistics(finalText);
-    return { steps, text: untraced.length ? null : finalText, withheld: untraced.length ? { reason: 'untraced_statistics', spans: untraced.slice(0, 10) } : null };
+    /* Model-written text: any digit outside a {{value:…}} token is a number the model produced itself. */
+    const untraced = untracedStatistics(finalText, { strict: true });
+    return { steps, text: untraced.length ? null : finalText, withheld: untraced.length ? { reason: 'untraced_statistics', count: untraced.length } : null };
   });
 }
 
@@ -159,7 +164,7 @@ export async function explainRun(actor: StatsActor, projectId: string, runId: st
   const listing = estimates.slice(0, 150).map((e) => `${e.key} — ${e.label}: ${formatEstimate(e)}`).join('\n');
   const system = [
     'Explain these verified statistical results for a researcher, in ' + (locale === 'ar' ? 'Arabic' : 'English') + '.',
-    'Do not write any number, statistic, p-value or interval yourself. Refer to each value only as {{value:KEY}} using a key from the list.',
+    'Do not write any digit yourself — no number, statistic, p-value, interval, count or hypothesis number. Refer to each value only as {{value:KEY}} using a key from the list, and to hypotheses by their wording.',
     'Do not claim causality the design cannot support; mention the reported warnings.',
   ].join(' ');
   const issues = (run.issues as { code: string; severity: string; message: string }[]).filter((issue) => issue.severity !== 'INFO').map((issue) => `${issue.severity}: ${issue.message}`).join('\n');
@@ -169,7 +174,7 @@ export async function explainRun(actor: StatsActor, projectId: string, runId: st
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const response = await gateway().generate({ purpose: 'stats.explain', system, messages, maxOutputTokens: 1500, temperature: 0.2, countsAsRequest: attempt === 0, continuation: attempt > 0 });
       const text = response.text.trim();
-      const untraced = untracedStatistics(text);
+      const untraced = untracedStatistics(text, { strict: true });
       const unknown = tokensIn(text).filter((key) => !byKey.has(key));
       if (!untraced.length && !unknown.length) {
         return { text: renderTokens(text, byKey), template: text, keys: [...new Set(tokensIn(text))], verified };

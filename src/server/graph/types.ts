@@ -165,7 +165,7 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       p: z.number().min(0).max(1).optional(),
       ci: z.tuple([z.number(), z.number()]).optional(),
       /* P1-C: the engine estimate this value is (stable key within its run), with its inference. */
-      key: z.string().max(300).optional(),
+      key: z.string().max(1000).optional(),
       estimateId: z.string().max(64).optional(),
       se: z.number().optional(),
       statistic: z.number().optional(),
@@ -181,7 +181,9 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       title: z.string().trim().max(300).optional(),
       kind: z.string().max(40).optional(),
       tableId: z.string().max(64).optional(),
-      keys: z.array(z.string().max(300)).max(2000).optional(),
+      /* P1-C: the output's stable key within its run ("table:<position>"). */
+      key: z.string().max(40).optional(),
+      keys: z.array(z.string().max(1000)).max(2000).optional(),
     })
     .strict(),
   figure: z
@@ -190,7 +192,8 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       title: z.string().trim().max(300).optional(),
       kind: z.string().max(40).optional(),
       figureId: z.string().max(64).optional(),
-      keys: z.array(z.string().max(300)).max(2000).optional(),
+      key: z.string().max(40).optional(),
+      keys: z.array(z.string().max(1000)).max(2000).optional(),
     })
     .strict(),
   source: z

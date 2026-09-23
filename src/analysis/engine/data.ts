@@ -27,9 +27,15 @@ export function column(dataset: EngineDataset, name: string): { schema: ColumnSc
   return index < 0 ? null : { schema: dataset.columns[index]!, index };
 }
 
+/** A declared missing code matches the cell as text, or as a number when both are numbers ("99.0" is 99). */
 function isMissingCode(schema: ColumnSchema, cell: Cell): boolean {
   if (!schema.missingCodes?.length || cell === null) return false;
-  return schema.missingCodes.some((code) => String(code).trim() === String(cell).trim());
+  const cellNumber = typeof cell === 'number' ? cell : toNumber(cell);
+  return schema.missingCodes.some((code) => {
+    if (String(code).trim() === String(cell).trim()) return true;
+    const codeNumber = typeof code === 'number' ? code : toNumber(code);
+    return codeNumber !== null && cellNumber !== null && codeNumber === cellNumber;
+  });
 }
 
 export function numeric(dataset: EngineDataset, name: string): NumericColumn {

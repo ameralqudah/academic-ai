@@ -7,6 +7,8 @@
  * the researcher must see what was flagged.
  */
 
+import { normaliseDigits } from '@/lib/statistics-text';
+
 export type GuardrailFlag =
   | 'UNVERIFIED_CITATION'
   | 'DOI_PRESENT'
@@ -93,12 +95,13 @@ export function numberSpellings(values: Iterable<number>): Set<string> {
 }
 
 /** Decimal numbers and statistic assignments in a text, with the number each carries. */
-const NUMBER_IN_STATISTIC = /(?:\b(?:p|r|t|F|b|β|B|z|d|M|SD|SE|R2|R²|η²|α|χ2|χ²)\s*(?:\(\s*[\d.,\s]+\))?\s*[=<>≤≥]\s*)?([-−]?\d*\.\d+|[-−]?\d+(?:\.\d+)?(?=\s?%))/gu;
+const NUMBER_IN_STATISTIC = /(?:(?<![\p{L}\p{N}])(?:p|r|t|F|b|β|B|z|d|M|SD|SE|R2|R²|η²|α|χ2|χ²|OR)\s*(?:\(\s*[\d.,\s]+\))?\s*[=<>≤≥]\s*)?([-−]?\d*[.,]\d+|[-−]?\d+(?:[.,]\d+)?(?=\s?%))/gu;
 
 function untraced(text: string, verified: ReadonlySet<string>, limit = 5): GuardrailFinding[] {
   const findings: GuardrailFinding[] = [];
-  for (const match of text.matchAll(NUMBER_IN_STATISTIC)) {
-    const number = (match[1] ?? '').replace('−', '-');
+  /* Arabic-Indic digits and the Arabic decimal mark are numbers too (P1-C review). */
+  for (const match of normaliseDigits(text).matchAll(NUMBER_IN_STATISTIC)) {
+    const number = (match[1] ?? '').replace('−', '-').replace(',', '.');
     if (!number || verified.has(number) || verified.has(number.replace(/^-/, ''))) continue;
     findings.push({ flag: 'UNTRACED_STATISTIC', sample: sample(match[0]) });
     if (findings.length >= limit) break;

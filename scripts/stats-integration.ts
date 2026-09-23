@@ -26,19 +26,19 @@ import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { createGateway } from '@/server/ai/gateway/gateway';
 import { runForUser } from '@/server/ai/request-scope';
 import { db } from '@/server/db';
-import { aiToolCalls, analysisJobs, datasetTransformations, datasetVersions, graphEdges, graphNodes, projectMembers, statEstimates, statRuns, statSpecs, statTables } from '@/server/db/schema';
+import { aiToolCalls, analysisJobs, datasetTransformations, datasetVersions, graphEdges, graphNodes, projectMembers, statEstimates, statFigures, statRuns, statSpecs, statTables } from '@/server/db/schema';
 import * as graph from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
-import { saveCleanedCopy, saveUpload } from '@/server/services/dataset.service';
+import { deleteFileOnly, saveCleanedCopy, saveUpload } from '@/server/services/dataset.service';
 import { runAnalysis } from '@/server/services/statistics.service';
 import { hashOf } from '@/server/stats/access';
 import { previewReplacement, recordRunInGraph, replaceVersion } from '@/server/stats/graph';
 import { insertClaim, untracedStatistics } from '@/server/stats/manuscript';
-import { cancelRun, createSpec, executeRun, getProvenance, getRun, startRun, validateSpecRecord } from '@/server/stats/runs';
+import { cancelRun, createSpec, executeRun, getProvenance, getRun, reapStatRuns, startRun, validateSpecRecord } from '@/server/stats/runs';
 import { executeStatsTool, explainRun, runAssistant, STATS_TOOL_NAMES } from '@/server/stats/tools';
 import { listVersions, loadVersion, qualityReport, transformVersion } from '@/server/stats/versions';
 
@@ -218,13 +218,17 @@ async function main() {
   check('after the data is replaced, a claim on a run over the old data is not current', (await graph.assess(P, me, freshClaim.claim.id)).effective !== 'current', true);
   const onNewData = await createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'regression', outcome: 'y', predictors: ['x', 'm', 'bin'] } });
   const rerunNew = await startRun(me, onNewData.id, { projectId: P });
-  check('a run on the new version is current evidence', [rerunNew.status, rerunNew.datasetVersionId === v3.id], ['succeeded', true]);
+  check('a run on the new version is current evidence, recorded in the graph', [rerunNew.status, rerunNew.datasetVersionId === v3.id, Boolean(rerunNew.graphRunNodeId)], ['succeeded', true, true]);
+  check('… even though the new version was derived from the one it replaced', (await graph.assess(P, me, rerunNew.graphRunNodeId ?? '')).effective, 'current');
+  const siblingVersion = (await transformVersion(me, v2.id, { operation: 'clean', actions: [{ kind: 'drop-rows-missing', columns: ['m'] }] }, P)).version;
+  const onSibling = await startRun(me, (await createSpec(me, { projectId: P, datasetVersionId: siblingVersion.id, spec: { analysisType: 'descriptives', variables: ['x'] } })).id, { projectId: P });
+  check('a version derived from the replaced data (not its replacement) is not current evidence', [onSibling.status, onSibling.graphRunNodeId], ['succeeded', null]);
 
   /* ------------------------------------------------------------------ */
   section('Guardrails, jobs and cancellation');
   const constant = await createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'cfa', constructs: [{ name: 'T', indicators: ['T1', 'T2'] }] } });
   const tiny = await transformVersion(me, v3.id, { operation: 'clean', actions: [{ kind: 'drop-rows-missing', columns: ['score'] }] }, P);
-  check('a transformation chain can continue', tiny.version.versionNo, 4);
+  check('a transformation chain can continue', tiny.version.versionNo, 5);
   const refused = await startRun(me, constant.id, { projectId: P });
   const refusedDetail = await getRun(me, refused.id, P);
   check('an under-identified CFA is refused with an ERROR, before any number is computed', [refused.status, (refused.issues as { code: string }[]).some((i) => i.code === 'under-identified')], ['refused', true]);
@@ -311,6 +315,38 @@ async function main() {
   const [afterRace] = await db.select({ status: analysisJobs.status }).from(analysisJobs).where(eq(analysisJobs.id, raceJob!.id));
   check('a job finishing after it was cancelled cannot overwrite the cancel', [completed, afterRace?.status], [false, 'CANCELLED']);
   check('a cancelled job cannot be claimed again', await jobsRepo.markRunning(raceJob!.id), false);
+
+  /* ------------------------------------------------------------------ */
+  section('Review hardening');
+  check('a claim with an integer after a Greek symbol is refused', await outcome(() => insertClaim(me, P, rerunNew.id, { keys: ['coef:x'], text: 'X predicted Y, β = 1 ({{value:coef:x}}).' })), 'VALIDATION');
+  check('… and one with Arabic-Indic digits', await outcome(() => insertClaim(me, P, rerunNew.id, { keys: ['coef:x'], text: 'تنبأ X بـ Y (ب = ٠٫٣١) {{value:coef:x}}' })), 'VALIDATION');
+  const claimsBefore = (await db.select({ id: graphNodes.id }).from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'claim')))).length;
+  const currentValue = (await getRun(me, rerunNew.id, P)).estimates.find((e) => e.key === 'coef:x')!.graphNodeId!;
+  check('a claim citing a current and an out-of-date value is refused …', await outcome(() => graph.createClaim(P, me, { text: 'mixed', reportIds: [currentValue, valueNode] })), 'CONFLICT');
+  const claimsAfter = (await db.select({ id: graphNodes.id }).from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'claim')))).length;
+  check('… and leaves no claim behind without its evidence (one transaction)', claimsAfter, claimsBefore);
+  check('a run cannot replace a run of a different analysis', await outcome(() => startRun(me, onNewData.id, { projectId: P, supersedesRunId: queued.id })), 'VALIDATION');
+  const heavySpec = await createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'mediation', x: 'x', m: 'm', y: 'y', bootstrap: { resamples: 10000 } } });
+  const heavyInline = await startRun(me, heavySpec.id, { projectId: P, execution: 'inline' });
+  check('asking for heavy work inline still sends it to the job queue', Boolean(heavyInline.jobId), true);
+  const [failedJob] = await db.insert(analysisJobs).values({ userId: owner, kind: 'stats.run', status: 'FAILED', spec: {} }).returning();
+  const [orphan] = await db.insert(statRuns).values({ specId: mediationSpec.id, userId: owner, projectId: P, datasetVersionId: v3.id, datasetContentHash: v3.contentHash, specHash: mediationSpec.specHash, analysisType: 'mediation', engine: 'academic-ai-ts-core', engineVersion: '1.0.0', runtime: 'test', status: 'queued', jobId: failedJob!.id }).returning();
+  await reapStatRuns();
+  const [reaped] = await db.select().from(statRuns).where(eq(statRuns.id, orphan!.id));
+  check('a run whose job failed is settled as failed by the reaper, with no results', [reaped?.status, reaped?.resultHash, Boolean(reaped?.finishedAt)], ['failed', null, true]);
+  check('a run cannot be inserted already succeeded', await databaseRefuses(() => db.insert(statRuns).values({ specId: phantomSpec.id, userId: owner, projectId: P, datasetVersionId: v2.id, datasetContentHash: v2.contentHash, specHash: phantomSpec.specHash, analysisType: 'descriptives', engine: 'x', engineVersion: '1', runtime: 'x', status: 'succeeded', resultHash: 'x', finishedAt: new Date() })), true);
+  const figureCount = async () => (await db.select({ id: statFigures.id }).from(statFigures)).length;
+  const figuresBefore = await figureCount();
+  check('results cannot be truncated', await databaseRefuses(() => db.execute(sql`truncate stat_figures`)), true);
+  check('… and are all still there', await figureCount(), figuresBefore);
+  const [tableRow] = await db.select().from(statTables).where(eq(statTables.runId, rerunNew.id)).limit(1);
+  const [tableNode] = await db.select().from(graphNodes).where(eq(graphNodes.id, tableRow?.graphNodeId ?? ''));
+  check('a table node carries its stable key, so a retried recording can find it', (tableNode?.data as { key?: string }).key, `table:${tableRow?.position}`);
+  const doomed = await saveUpload({ userId: owner, projectId: P, file: { name: 'd.csv', bytes: bytes('a,b\n1,2\n3,4\n5,6\n') } });
+  const [doomedV1] = await db.select().from(datasetVersions).where(eq(datasetVersions.datasetId, doomed.dataset.id));
+  await deleteFileOnly(doomed.dataset.id, owner);
+  check('a deleted dataset’s versions can no longer be used', await outcome(() => qualityReport(me, doomedV1!.id, P)), 'NOT_FOUND');
+  check('… nor analysed', await outcome(() => createSpec(me, { projectId: P, datasetVersionId: doomedV1!.id, spec: { analysisType: 'descriptives', variables: ['a'] } })), 'NOT_FOUND');
 
   /* ------------------------------------------------------------------ */
   section('Reproducibility');

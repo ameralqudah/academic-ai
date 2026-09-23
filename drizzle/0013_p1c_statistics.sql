@@ -33,10 +33,10 @@ CREATE TABLE "dataset_versions" (
 CREATE TABLE "stat_estimates" (
 	"id" text PRIMARY KEY NOT NULL,
 	"run_id" text NOT NULL,
-	"key" varchar(300) NOT NULL,
-	"label" varchar(400) NOT NULL,
+	"key" varchar(1000) NOT NULL,
+	"label" varchar(1000) NOT NULL,
 	"family" varchar(40) NOT NULL,
-	"term" varchar(300),
+	"term" varchar(1000),
 	"stat" varchar(40) NOT NULL,
 	"estimate" double precision NOT NULL,
 	"se" double precision,
@@ -254,3 +254,27 @@ CREATE TRIGGER "stat_tables_no_delete" BEFORE DELETE ON "stat_tables" FOR EACH R
 CREATE TRIGGER "stat_figures_insert_guard" BEFORE INSERT ON "stat_figures" FOR EACH ROW EXECUTE FUNCTION "p1c_result_insert_guard"();--> statement-breakpoint
 CREATE TRIGGER "stat_figures_write_once" BEFORE UPDATE ON "stat_figures" FOR EACH ROW EXECUTE FUNCTION "p1c_write_once"();--> statement-breakpoint
 CREATE TRIGGER "stat_figures_no_delete" BEFORE DELETE ON "stat_figures" FOR EACH ROW EXECUTE FUNCTION "p1c_no_direct_delete"();
+--> statement-breakpoint
+-- A run is created queued, with no outcome: nothing can be inserted already running or finished (P1-C review).
+CREATE FUNCTION "stat_runs_insert_guard"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.status <> 'queued' OR NEW.result_hash IS NOT NULL OR NEW.payload IS NOT NULL OR NEW.parameters IS NOT NULL
+     OR NEW.method IS NOT NULL OR NEW.n_used IS NOT NULL OR NEW.started_at IS NOT NULL OR NEW.finished_at IS NOT NULL OR NEW.graph_run_node_id IS NOT NULL THEN
+    RAISE EXCEPTION 'stat_runs: a run is created queued, with no outcome' USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;--> statement-breakpoint
+CREATE TRIGGER "stat_runs_insert_guard" BEFORE INSERT ON "stat_runs" FOR EACH ROW EXECUTE FUNCTION "stat_runs_insert_guard"();--> statement-breakpoint
+CREATE FUNCTION "p1c_no_truncate"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION '% is part of the provenance record and cannot be truncated', TG_TABLE_NAME USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$;--> statement-breakpoint
+CREATE TRIGGER "dataset_versions_no_truncate" BEFORE TRUNCATE ON "dataset_versions" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();--> statement-breakpoint
+CREATE TRIGGER "dataset_transformations_no_truncate" BEFORE TRUNCATE ON "dataset_transformations" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();--> statement-breakpoint
+CREATE TRIGGER "stat_specs_no_truncate" BEFORE TRUNCATE ON "stat_specs" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();--> statement-breakpoint
+CREATE TRIGGER "stat_runs_no_truncate" BEFORE TRUNCATE ON "stat_runs" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();--> statement-breakpoint
+CREATE TRIGGER "stat_estimates_no_truncate" BEFORE TRUNCATE ON "stat_estimates" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();--> statement-breakpoint
+CREATE TRIGGER "stat_tables_no_truncate" BEFORE TRUNCATE ON "stat_tables" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();--> statement-breakpoint
+CREATE TRIGGER "stat_figures_no_truncate" BEFORE TRUNCATE ON "stat_figures" FOR EACH STATEMENT EXECUTE FUNCTION "p1c_no_truncate"();

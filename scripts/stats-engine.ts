@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 
 import { inspectOutput, numberSpellings } from '@/ai/guardrails';
 import { parseCsv } from '@/analysis/parse';
+import { numeric } from '@/analysis/engine/data';
 import { toNumber } from '@/analysis/stats-core';
 import { figuresFor } from '@/analysis/engine/figures';
 import { promax, varimax } from '@/analysis/engine/methods/efa';
@@ -25,6 +26,7 @@ import { canonicalJson, ENGINE, type ColumnType, type EngineDataset, type Estima
 import { validateDataset, validateSpec } from '@/analysis/engine/validate';
 import { methodSpecSchema } from '@/analysis/engine/spec';
 import { confirmatoryFactorAnalysis } from '@/analysis/inference/cbsem/cfa';
+import { untracedNumbers } from '@/lib/statistics-text';
 
 let passed = 0;
 let failed = 0;
@@ -297,6 +299,24 @@ async function main() {
   const invalidSpec = execute({ analysisType: 'regression', outcome: 'y' }, survey);
   ok('a malformed specification is refused with structured issues', invalidSpec.status === 'refused' && invalidSpec.issues.every((i) => i.severity === 'ERROR'));
   ok('every issue carries English and Arabic text', [...quality, ...badIssues].every((i) => i.message.length > 0 && i.messageAr.length > 0));
+  const codedAsText: EngineDataset = { columns: [{ name: 'v', type: 'numeric', missingCodes: [99, '-9'] }], rows: [['99.0'], ['-9.00'], ['99'], ['7'], ['990']] };
+  const coded = numeric(codedAsText, 'v');
+  ok('a numeric missing code matches however the number is written ("99.0", "-9.00")', coded.coded === 3 && coded.invalid === 0 && coded.values.filter(Number.isFinite).join(',') === '7,990');
+  const duplicateConstruct = validateSpec(methodSpecSchema.parse({ analysisType: 'cfa', constructs: [{ name: 'T', indicators: ['T1', 'T2', 'T3'] }, { name: 't', indicators: ['S1', 'S2', 'S3'] }] }), survey);
+  ok('two constructs with the same name are an ERROR (their results would be indistinguishable)', duplicateConstruct.some((i) => i.code === 'duplicate-construct' && i.severity === 'ERROR'));
+  const sharedIndicator = execute({ analysisType: 'pls', constructs: [{ name: 'A', indicators: ['T1', 'T2', 'T3'] }, { name: 'B', indicators: ['T3', 'S1', 'S2'] }], paths: [{ from: 'A', to: 'B' }] }, survey);
+  ok('an indicator measuring two constructs is refused', sharedIndicator.status === 'refused' && sharedIndicator.issues.some((i) => i.code === 'duplicate-indicator'));
+
+  section('Typed numbers in prose (claims and explanations)');
+  ok('Arabic-Indic digits are caught', untracedNumbers('بلغ معامل الارتباط ر = ٠٫٤٥').length > 0);
+  ok('Persian digits are caught', untracedNumbers('r = ۰٫۴۵').length > 0);
+  ok('a comma decimal is caught', untracedNumbers('the effect was 0,31').length > 0);
+  ok('an integer after a Greek symbol is caught ("β = 1")', untracedNumbers('the path was β = 1 overall').length > 0);
+  ok('χ² with degrees of freedom is caught', untracedNumbers('χ²(3) = 45').length > 0);
+  ok('a percentage is caught', untracedNumbers('12% of cases').length > 0);
+  ok('labels such as "H1" and "Table 2" are allowed in a person’s sentence', untracedNumbers('H1 is supported (see Table 2)').length === 0);
+  ok('strict mode (model text) refuses any digit, Arabic-Indic included', untracedNumbers('انظر الجدول ٢', { strict: true }).length === 1 && untracedNumbers('see {{value:coef:x}}', { strict: true }).length === 0);
+  ok('tokens are not numbers', untracedNumbers('X predicted Y ({{value:coef:x}}).').length === 0);
 
   /* ------------------------------------------------------ tables, figures */
   section('Tables and figures come only from estimates');

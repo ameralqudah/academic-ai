@@ -5318,6 +5318,13 @@ console.log('\nwhat a model costs');
   check('typed in → manual, never verified', typed.verification, 'manual');
   const verdictOnly = await assessCurrency('v', graphOf([{ id: 'v', type: 'result_value', provenance: 'computed' }, { id: 'h', type: 'hypothesis', marks: [{ severity: 'invalidates', kind: 'stale' }] }], [['v', 'tests', 'h']]));
   check('a hypothesis under revision does not make its test value non-current', verdictOnly.effective, 'current');
+  const lineage = (replacements: [string, string, string][]) => ({
+    ...graphOf([{ id: 'r', type: 'analysis_run', provenance: 'computed' }, { id: 'v3', type: 'dataset_version' }, { id: 'v4', type: 'dataset_version' }, { id: 'v2', type: 'dataset_version', status: 'superseded' }], [['r', 'uses_data', 'v3'], ['v3', 'derived_from', 'v2'], ['v4', 'derived_from', 'v2']]),
+    replacements: async (ids: string[]) => replacements.filter(([, , dst]) => ids.includes(dst)).map(([srcId, rel, dstId]) => ({ srcId, rel, dstId })),
+  });
+  check('data derived from the version it replaced is current (P1-C)', (await assessCurrency('r', lineage([['v3', 'supersedes', 'v2']]))).effective, 'current');
+  check('… other data derived from the replaced version is not', (await assessCurrency('v4', lineage([['v3', 'supersedes', 'v2']]))).effective, 'superseded_input');
+  check('… and without a replacement upstream, derived data is not current', (await assessCurrency('r', lineage([]))).effective, 'superseded_input');
 
   const { readdirSync, statSync } = await import('node:fs');
   const routeFiles: string[] = [];
@@ -5422,7 +5429,8 @@ console.log('\nwhat a model costs');
     if (/\.insert\(\s*(statEstimates|statTables|statFigures)\b/.test(await readFile(file, 'utf8'))) writers.push(file);
   }
   check('estimates, tables and figures are written in one place only (the engine run)', writers, ['src/server/stats/runs.ts']);
-  const { STATS_TOOL_NAMES } = await import('../src/server/stats/tools');
+  /* The allow-list module, not the tools themselves: this job has no database. */
+  const { STATS_TOOL_NAMES } = await import('../src/server/stats/tool-names');
   check('no model tool can write, edit or overwrite a result', STATS_TOOL_NAMES.filter((name: string) => /write|update|overwrite|fake|set|edit|insert|delete|create.*result/i.test(name)), []);
 }
 

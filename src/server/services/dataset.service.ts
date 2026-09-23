@@ -48,7 +48,7 @@ import { chunkDocument } from '@/server/files/retrieve';
 import type { Dataset as DatasetRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
-import { ensureInitialVersion, recordLegacyClean } from '@/server/stats/versions';
+import { ensureInitialVersion, recordLegacyClean, verifiedRunCount, versionObjectKeys } from '@/server/stats/versions';
 import { resolveReason } from '@/server/http/reasons';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import {
@@ -478,13 +478,15 @@ export interface DeletionImpact {
   name: string;
   analyses: number;
   cleanedCopies: number;
+  /** Verified statistics runs (P1-C) whose data would no longer be re-runnable. Their records stay. */
+  verifiedRuns?: number;
 }
 
 /** What "delete everything" would destroy, so the confirmation can say it. */
 export async function deletionImpact(datasetId: string, userId: string): Promise<DeletionImpact> {
   const row = await requireOwned(datasetId, userId);
   const counts = await datasetsRepo.countDependents(datasetId, userId);
-  return { datasetId, name: row.originalName, ...counts };
+  return { datasetId, name: row.originalName, ...counts, verifiedRuns: await verifiedRunCount(datasetId) };
 }
 
 /**
@@ -507,6 +509,10 @@ export async function deleteFileOnly(datasetId: string, userId: string): Promise
     .catch((error) => {
       logger.warn('dataset.objectDeleteFailed', { datasetId, error: String(error) });
     });
+  /* The files of its later versions go too (P1-C); the version records and the runs on them stay. */
+  for (const key of await versionObjectKeys([datasetId], [row.storageKey])) {
+    await storageProvider().delete(key).catch(() => undefined);
+  }
 
   await datasetsRepo.softDelete(datasetId, userId);
 
@@ -568,6 +574,9 @@ export async function deleteEverything(
   }
 
   await provider.delete(row.storageKey).catch(() => undefined);
+  for (const key of await versionObjectKeys([datasetId, ...children.map((child) => child.id)], [row.storageKey, ...children.map((child) => child.storageKey)])) {
+    await provider.delete(key).catch(() => undefined);
+  }
 
   /*
    * A local provider can remove the whole dataset folder, which also sweeps up

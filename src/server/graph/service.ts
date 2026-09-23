@@ -196,6 +196,13 @@ function currencyLoader(executor: Executor, projectId: string): CurrencyLoader {
         .from(graphEdges)
         .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.dependency, true), inArray(graphEdges.srcId, ids)));
     },
+    async replacements(ids) {
+      if (ids.length === 0) return [];
+      return executor
+        .select({ srcId: graphEdges.srcId, rel: graphEdges.rel, dstId: graphEdges.dstId })
+        .from(graphEdges)
+        .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'supersedes'), inArray(graphEdges.dstId, ids)));
+    },
   };
 }
 
@@ -1090,6 +1097,45 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
     }
 
     return { run, outputs, report, alreadyRecorded: false };
+  });
+}
+
+/**
+ * A manuscript claim together with its evidence, in one transaction (P1-C):
+ * the claim, a `reports` edge to every value it cites, and — when given — the
+ * block that asserts it. Every value must be a current result; if anything is
+ * refused, nothing is written, so a claim never exists without its evidence.
+ */
+export async function createClaim(
+  projectId: string,
+  actor: Actor,
+  input: { text: string; label?: string | null; reportIds: string[]; blockId?: string | null },
+): Promise<GraphNode> {
+  await authorize(projectId, actor, 'EDITOR');
+  if (input.reportIds.length === 0) throw AppError.validation({ reportIds: 'A claim reports at least one value.' });
+  return db.transaction(async (tx) => {
+    const values: GraphNode[] = [];
+    for (const id of input.reportIds) {
+      const value = await loadNode(tx, projectId, id, 'share');
+      if (!(RESULT_TYPES as readonly string[]).includes(value.type)) throw AppError.validation({ reportIds: `${id} is not a result.` });
+      const currency = await currencyOf(tx, projectId, value.id);
+      if (NOT_CURRENT.has(currency.effective)) {
+        throw refuse('stale_target', 'A cited value is out of date (replaced or invalidated); cite the current result.', 'قيمة مستشهد بها غير محدَّثة؛ استشهد بالنتيجة الحالية.', { nodeId: value.id, currency });
+      }
+      values.push(value);
+    }
+    let block: GraphNode | null = null;
+    if (input.blockId) {
+      block = await loadNode(tx, projectId, input.blockId, 'share');
+      if (block.type !== 'block') throw AppError.validation({ blockId: 'Not a manuscript block.' });
+      if (block.status === 'superseded') throw refuse('superseded', 'This block has been replaced.', 'استُبدلت هذه الكتلة.');
+    }
+    const claim = await insertNode(tx, projectId, actor, { type: 'claim', label: input.label ?? null, payload: parsePayload('claim', { text: input.text }), status: 'active' });
+    const edge = (srcId: string, rel: string, dstId: string, dstVersion: number | null) =>
+      tx.insert(graphEdges).values({ projectId, srcId, rel, dstId, dstVersion, dependency: true, createdByUserId: actor.userId, createdByRunId: actor.runId ?? null, origin: actor.origin ?? 'user' });
+    for (const value of values) await edge(claim.id, 'reports', value.id, value.currentVersion);
+    if (block) await edge(block.id, 'asserts', claim.id, claim.currentVersion);
+    return claim;
   });
 }
 

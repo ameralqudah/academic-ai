@@ -248,6 +248,18 @@ export function validateSpec(spec: MethodSpec, dataset: EngineDataset): Issue[] 
   if (spec.analysisType === 'efa' && spec.retention === 'fixed' && !spec.nFactors) {
     issues.push(issue('missing-parameter', 'ERROR', [], 'Fixed retention needs nFactors.', 'يلزم تحديد عدد العوامل.'));
   }
+  if (spec.analysisType === 'cfa' || spec.analysisType === 'pls') {
+    const constructNames = spec.constructs.map((entry) => entry.name.trim().toLowerCase());
+    const repeatedNames = spec.constructs.filter((_, index) => constructNames.indexOf(constructNames[index]!) !== index).map((entry) => entry.name);
+    if (repeatedNames.length > 0) {
+      issues.push(issue('duplicate-construct', 'ERROR', [], `Construct names must be unique: ${[...new Set(repeatedNames)].join(', ')}.`, 'يجب أن تكون أسماء البنى فريدة.'));
+    }
+    const indicators = spec.constructs.flatMap((entry) => entry.indicators);
+    const repeatedIndicators = [...new Set(indicators.filter((name, index) => indicators.indexOf(name) !== index))];
+    if (repeatedIndicators.length > 0) {
+      issues.push(issue('duplicate-indicator', 'ERROR', repeatedIndicators, `An indicator may measure only one construct: ${repeatedIndicators.join(', ')}.`, 'يقيس المؤشر بنية واحدة فقط.'));
+    }
+  }
   if (spec.analysisType === 'cfa') {
     for (const entry of spec.constructs) {
       if (entry.indicators.length < 3) {

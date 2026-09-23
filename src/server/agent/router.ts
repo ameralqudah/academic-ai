@@ -26,7 +26,7 @@ import { classifyIntent, type IntentResult } from '@/agents/intent';
 import { asksAboutEarlierWork, asksToExplain, decide, detectReference } from './routing-rules';
 import { asksForAnalysis, isDataIntent, softwareIntentOf } from '@/server/services/data-requests';
 import type { DatasetProfile } from '@/analysis/types';
-import { asksForDiagram } from '@/server/diagrams/requests';
+import { asksForDiagram, namesDrawing } from '@/server/diagrams/requests';
 
 export type RoutePath = 'fast' | 'agent';
 
@@ -195,7 +195,14 @@ export async function routeRequest(input: RouteInput): Promise<RouteDecision> {
   const wantsFile = FORMAT_WORDS.some((pattern) => pattern.test(input.message));
   const needsTools = NEEDS_TOOLS.has(intent.intent);
 
-  const wantsDiagram = asksForDiagram(input.message);
+  /*
+   * A drawing, unless the request names an analysis and no drawing. "Need
+   * measurement model", with a file attached, asks for the factor model —
+   * loadings, CR, AVE — not a picture of it.
+   */
+  const wantsDiagram =
+    asksForDiagram(input.message) &&
+    (namesDrawing(input.message) || !input.hasDataset || softwareIntentOf(input.message) === null);
   const suggested = new Set(wantsDiagram ? [] : (CAPABILITY_FOR[intent.intent] ?? []));
   if (wantsFile && !wantsDiagram) suggested.add('document.generate');
   if (wantsDiagram) suggested.add('diagram.draw');

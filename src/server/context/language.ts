@@ -89,12 +89,24 @@ export function decideConversationLanguage(input: {
   interfaceLocale?: OutputLanguage;
 }): OutputLanguage {
   const letters = (input.request ?? '').replace(/[^\p{L}]/gu, '').length;
+  const words = (input.request ?? '').trim().split(/\s+/).filter(Boolean).length;
 
-  if (letters >= 3) {
+  /*
+   * A few words in the other script do not change the language of the
+   * conversation. "NEED MEASUREMENT MODEL", typed into an Arabic
+   * conversation, was answered in English — the researcher had named a
+   * method, not switched language. A sentence is different: someone writing
+   * in English is answered in English.
+   */
+  const brief = words <= 4 && (input.history ?? []).length > 0;
+
+  if (letters >= 3 && !brief) {
     const share = arabicShare(input.request);
     if (share >= 0.5) return 'ar';
     if (share < 0.2) return 'en';
   }
+
+  if (brief && arabicShare(input.request) >= 0.5) return 'ar';
 
   /*
    * A mixed message — "حلل SmartPLS" — is two Arabic words and a product

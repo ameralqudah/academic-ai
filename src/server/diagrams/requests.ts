@@ -29,6 +29,26 @@ const NOT_A_MODEL = new RegExp(
   'iu',
 );
 
+/*
+ * A word that asks for a drawing, as opposed to a phrase that names a model.
+ *
+ * "Measurement model" is the name of an analysis as often as it is the name
+ * of a figure; "ارسم نموذج القياس" is unambiguous. Where the request names a
+ * method and no drawing, the analysis is what was meant.
+ */
+const NAMES_DRAWING = new RegExp(
+  [
+    String.raw`\b(?:diagram|draw|drawing|figure|sketch|plot\s+the\s+model)\b`,
+    String.raw`(?<![\p{L}\p{N}])(?:ارسم|أرسم|ارسملي|ارسمي|رسمة|رسمه|الرسمة|الرسمه|رسمات|مخطط|المخطط|شكل)`,
+  ].join('|'),
+  'iu',
+);
+
+/** Whether a message uses a word that asks for a drawing. */
+export function namesDrawing(message: string): boolean {
+  return NAMES_DRAWING.test(message);
+}
+
 /** Whether a message asks for a research-model diagram. */
 export function asksForDiagram(message: string): boolean {
   return DRAW.test(message) && !NOT_A_MODEL.test(message) && !asksForCharts(message);

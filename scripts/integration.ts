@@ -4653,6 +4653,10 @@ async function main() {
     assertTrue('with its fit indices', typeof cfa?.fit?.cfi === 'number');
     check('and a loading for every item', cfa?.loadings?.length, 6);
 
+    /* The measurement model is the factor model: no paths, no question. */
+    const outer = await ask('stats.cbSem', 'NEED MEASURMENT MODEL');
+    check('"measurement model" runs the factor model rather than asking for paths', outer.status === 'done' ? outer.displays[0]?.kind : outer.status, 'cbsem');
+
     const pls = await ask('stats.plsSem', 'حلل SmartPLS');
     check('SmartPLS without paths asks for them', pls.status, 'question');
     assertTrue('naming the scales it found', pls.status === 'question' && pls.question.includes('SQ (SQ1, SQ2, SQ3)') && pls.question.includes('SAT'));

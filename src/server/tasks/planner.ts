@@ -28,7 +28,7 @@ import { selectModel } from '@/server/ai/model-router';
 
 import { allCapabilities, capabilityFor, isKnownCapability } from './capabilities';
 import { repairPrerequisites } from './prerequisites';
-import { asksForDiagram, diagramKindOf } from '@/server/diagrams/requests';
+import { asksForDiagram, diagramKindOf, namesDrawing } from '@/server/diagrams/requests';
 import { isDataIntent } from '@/server/services/data-requests';
 
 export interface PlannedStep {
@@ -129,7 +129,7 @@ export async function planTask(input: {
   if (
     hints?.intent &&
     isDataIntent(hints.intent) &&
-    !asksForDiagram(input.request) &&
+    !(asksForDiagram(input.request) && namesDrawing(input.request)) &&
     !input.context.references
   ) {
     /*

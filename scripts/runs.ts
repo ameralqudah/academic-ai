@@ -14,6 +14,7 @@ import './support/unit-env';
 import { actionHash, inputHash, stepIdempotencyKey } from '@/server/runs/approvals';
 import { DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
 import { decide, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
+import { resolveReferences, toolsFor, validatePlan } from '@/server/runs/planner';
 import { gatewayToolsFor, listTools, TOOL_NAMES, toolByName } from '@/server/runs/registry';
 import { canApproval, canRun, canStep, IllegalTransitionError, assertRun } from '@/server/runs/state';
 import { STATS_TOOL_NAMES } from '@/server/stats/tool-names';
@@ -128,6 +129,24 @@ async function main() {
   const decision = await decide(request(), deps());
   check('every rule’s result is recorded', decision.rules.map((rule) => rule.rule), ['tool.known', 'tool.context', 'flag', 'auth.project', 'auth.resources', 'entitlement', 'limits.run', 'limits.user', 'run.state', 'approval']);
   check('the stored decision has no inputs', Object.keys(storedDecision(decision)).sort(), ['approval', 'evaluatedAt', 'outcome', 'reason', 'role', 'rules', 'tier', 'tool']);
+
+  section('Planner: proposes; its plan is validated, never trusted');
+  const allowed = toolsFor('EDITOR', 'free');
+  const limits = DEFAULT_RUN_LIMITS.free;
+  const step = (tool: string, input: Record<string, unknown> = {}, dependsOn: number[] = []) => ({ tool, label: tool, input, dependsOn });
+  const ok = validatePlan({ summary: 's', steps: [step('createAnalysisSpec', { datasetVersionId: 'v', spec: {} }), step('runAnalysis', { specId: { $step: 0, path: 'specId' } }, [0])] }, allowed, limits);
+  check('a well-formed plan is accepted, with tool versions and bounded attempts', ok.ok ? ok.plan.steps.map((s) => [s.seq, s.tool, s.toolVersion, s.maxAttempts]) : ok.errors, [[0, 'createAnalysisSpec', '1.0.0', 2], [1, 'runAnalysis', '1.0.0', 3]]);
+  const bad = (raw: unknown) => { const result = validatePlan(raw, allowed, limits); return result.ok ? 'accepted' : 'refused'; };
+  check('an unregistered tool is refused', bad({ summary: 's', steps: [step('execShell')] }), 'refused');
+  check('a tool the caller’s role may not use is not offered, and refused', [toolsFor('VIEWER', 'free').some((tool) => tool.name === 'runAnalysis'), validatePlan({ summary: 's', steps: [step('runAnalysis', { specId: 'x' })] }, toolsFor('VIEWER', 'free'), limits).ok], [false, false]);
+  check('a dependency on a later step (a cycle) is refused', bad({ summary: 's', steps: [step('listDatasets', {}, [1]), step('listDatasets')] }), 'refused');
+  check('a reference to an undeclared dependency is refused', bad({ summary: 's', steps: [step('listDatasets'), step('inspectDataset', { datasetVersionId: { $step: 0, path: 'x' } })] }), 'refused');
+  check('more steps than the tier allows is refused', bad({ summary: 's', steps: Array.from({ length: limits.maxSteps + 1 }, () => step('listDatasets')) }), 'refused');
+  check('an oversized step input is refused', bad({ summary: 's', steps: [step('searchLiterature', { query: 'x'.repeat(20_000) })] }), 'refused');
+  check('an empty plan is refused', bad({ summary: 's', steps: [] }), 'refused');
+  check('extra fields in the plan are refused', bad({ summary: 's', steps: [], execute: true }), 'refused');
+  check('references resolve from earlier outputs', resolveReferences({ specId: { $step: 0, path: 'specId' }, keep: 'x' }, new Map([[0, { specId: 'abc' }]])), { specId: 'abc', keep: 'x' });
+  check('a missing referenced value is an error, not a silent undefined', (() => { try { resolveReferences({ specId: { $step: 0, path: 'nope' } }, new Map([[0, {}]])); return 'resolved'; } catch { return 'refused'; } })(), 'refused');
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

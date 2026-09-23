@@ -45,6 +45,17 @@ export async function startJobWorkers(options: { taskConcurrency?: number; analy
     },
   );
 
+  await boss.work<{ runId: string }>(
+    QUEUES.run,
+    { localConcurrency: options.analysisConcurrency ?? 2, pollingIntervalSeconds: 2 },
+    async ([job]) => {
+      if (!job) return;
+      const { advanceRun } = await import('@/server/runs/executor');
+      const outcome = await advanceRun(job.data.runId);
+      logger.info('jobs.run.done', { runId: job.data.runId, outcome, worker: WORKER_ID });
+    },
+  );
+
   await boss.schedule(QUEUES.reaper, '* * * * *');
   await boss.work(QUEUES.reaper, async () => {
     await reap();

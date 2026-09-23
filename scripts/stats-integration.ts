@@ -342,7 +342,8 @@ async function main() {
   const [reaped] = await db.select().from(statRuns).where(eq(statRuns.id, orphan!.id));
   check('a run whose job failed is settled as failed by the reaper, with no results', [reaped?.status, reaped?.resultHash, Boolean(reaped?.finishedAt)], ['failed', null, true]);
   check('a run cannot be inserted already succeeded', await databaseRefuses(() => db.insert(statRuns).values({ specId: phantomSpec.id, userId: owner, projectId: P, datasetVersionId: v2.id, datasetContentHash: v2.contentHash, specHash: phantomSpec.specHash, analysisType: 'descriptives', engine: 'x', engineVersion: '1', runtime: 'x', status: 'succeeded', resultHash: 'x', finishedAt: new Date() })), true);
-  const figureCount = async () => (await db.select({ id: statFigures.id }).from(statFigures)).length;
+  /* Counted on a finished run: a background job elsewhere in the suite may add figures to its own run meanwhile. */
+  const figureCount = async () => (await db.select({ id: statFigures.id }).from(statFigures).where(eq(statFigures.runId, rerunNew.id))).length;
   const figuresBefore = await figureCount();
   check('results cannot be truncated', await databaseRefuses(() => db.execute(sql`truncate stat_figures`)), true);
   check('… and are all still there', await figureCount(), figuresBefore);

@@ -934,6 +934,7 @@
         "sharedIndicator": "The indicator \"{indicator}\" belongs to both \"{first}\" and \"{second}\"; an indicator cannot measure two constructs.",
         "unknownConstructInPath": "A path refers to an undefined construct: \"{construct}\".",
         "selfPath": "The construct \"{construct}\" cannot affect itself.",
+        "isolatedConstruct": "The construct \"{construct}\" is on no structural path, so it cannot be estimated; connect it or remove it.",
         "cyclicModel": "The model contains a cycle ({cycle}); PLS requires a recursive model.",
         "tooFewCases": "Too few complete cases ({n}); at least {minimum} are needed.",
         "constantIndicator": "The indicator \"{indicator}\" does not vary — every response is identical.",

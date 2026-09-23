@@ -297,10 +297,10 @@ export function confirmatoryFactorAnalysis(
   const covariance = parameterCovariance(constructs, indicators, fitted, layout, n);
 
   return {
-    loadings: buildLoadings(constructs, indicators, fitted, observed, layout, covariance),
+    loadings: buildLoadings(constructs, indicators, fitted, layout, covariance),
     factorCorrelations: buildFactorCorrelations(constructs, fitted, layout, covariance),
     fit,
-    reliability: buildReliability(constructs, indicators, fitted, observed),
+    reliability: buildReliability(constructs, indicators, fitted),
     n,
     rowsDropped: (data.get(indicators[0] as string)?.length ?? 0) - n,
     parameters,
@@ -945,7 +945,6 @@ function buildLoadings(
   constructs: LatentConstruct[],
   indicators: string[],
   fitted: FittedModel,
-  observed: number[][],
   layout: ParameterLayout,
   covariance: number[][] | null,
 ): CbSemLoading[] {
@@ -959,7 +958,12 @@ function buildLoadings(
       const index = indicatorIndex.get(indicator) as number;
       const loading = fitted.loadings[index] as number;
       const residual = fitted.residuals[index] as number;
-      const totalVariance = (observed[index] as number[])[index] as number;
+      /*
+       * The model-implied variance λ²φ + θ, as lavaan's std.all uses — not the
+       * observed variance, which gives a different number whenever the model
+       * does not reproduce that variance exactly (P1-C audit).
+       */
+      const totalVariance = loading * loading * factorVariance + residual;
 
       /*
        * The standardised loading: the correlation between the indicator and its
@@ -1060,7 +1064,6 @@ function buildReliability(
   constructs: LatentConstruct[],
   indicators: string[],
   fitted: FittedModel,
-  observed: number[][],
 ): CbSemResult['reliability'] {
   const indicatorIndex = new Map(indicators.map((name, index) => [name, index]));
 
@@ -1069,7 +1072,9 @@ function buildReliability(
 
     const standardised = construct.indicators.map((indicator) => {
       const index = indicatorIndex.get(indicator) as number;
-      const total = (observed[index] as number[])[index] as number;
+      /* Model-implied variance, consistent with the standardised loadings above. */
+      const loading = fitted.loadings[index] as number;
+      const total = loading * loading * factorVariance + (fitted.residuals[index] as number);
       return total > 0
         ? ((fitted.loadings[index] as number) * Math.sqrt(factorVariance)) / Math.sqrt(total)
         : 0;

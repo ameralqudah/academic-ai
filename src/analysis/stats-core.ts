@@ -128,7 +128,18 @@ export function toNumber(value: unknown): number | null {
     text = text.slice(0, -1).trim();
   }
 
-  text = text.replace(/[\s,_']/g, '');
+  /*
+   * Grouping separators are removed only when they actually group thousands
+   * ("1,234", "12 345.6"). Anything else is ambiguous — "3,5" is three and a
+   * half in much of the world and thirty-five nowhere — and is refused rather
+   * than guessed: it used to become 35 (P1-C audit).
+   */
+  if (/[\s,_']/.test(text)) {
+    const unsigned = text.replace(/^[+-]/, '');
+    const separators = new Set(unsigned.match(/[\s,_']/g));
+    if (separators.size !== 1 || !/^\d{1,3}(?:[\s,_']\d{3})+(?:\.\d*)?$/.test(unsigned)) return null;
+    text = text.replace(/[\s,_']/g, '');
+  }
   if (text.startsWith('+')) text = text.slice(1);
   if (text.startsWith('-')) {
     negative = !negative;

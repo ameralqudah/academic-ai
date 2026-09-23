@@ -6017,6 +6017,58 @@ console.log('\nuploaded documents are attributed');
 }
 
 
+  /* ------------------------------------------ P0.6 missing values in SEM */
+  {
+    console.log('P0.6 — a blank cell is missing, not zero');
+
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+    const { estimatePls } = await import('@/analysis/inference/pls/algorithm');
+    const { readFile: read } = await import('node:fs/promises');
+
+    const cells = numericColumns({ columns: ['v'], rows: [[null], [''], [' 3 '], ['1,234'], ['٣'], ['n/a'], [5]] }).get('v') ?? [];
+    check(
+      'blank, empty and text cells become NaN, numbers parse',
+      JSON.stringify(cells.map((value) => (Number.isNaN(value) ? 'NaN' : value))),
+      JSON.stringify(['NaN', 'NaN', 3, 1234, 3, 'NaN', 5]),
+    );
+
+    /* The committed survey: 360 rows, 6% of them with one blank cell. */
+    const reference = JSON.parse(await read('evals/fixtures/references/cfa-survey-blanks.json', 'utf8'));
+    const survey = parseCsv(await read('evals/fixtures/datasets/survey_with_blanks.csv', 'utf8'), 'survey.csv');
+    const columns = numericColumns(survey);
+    const model = {
+      constructs: [
+        { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' as const },
+        { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' as const },
+        { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' as const },
+      ],
+      paths: [
+        { from: 'TRUST', to: 'ATT' },
+        { from: 'ATT', to: 'INT' },
+        { from: 'TRUST', to: 'INT' },
+      ],
+    };
+
+    const cfa = confirmatoryFactorAnalysis(model, columns);
+    check('CFA uses only the complete cases', cfa.n, reference.completeCases);
+    check('and reports the rows it dropped', cfa.rowsDropped, reference.blankRows);
+
+    /* The same data with the incomplete rows removed by hand, and with blanks zero-filled. */
+    const keep = survey.rows.map((_, row) => [...columns.values()].every((values) => Number.isFinite(values[row] as number)));
+    const filtered = new Map([...columns].map(([name, values]) => [name, values.filter((_, row) => keep[row])]));
+    const zeroFilled = new Map([...columns].map(([name, values]) => [name, values.map((value) => (Number.isFinite(value) ? value : 0))]));
+
+    const pls = estimatePls(model, columns);
+    const plsFiltered = estimatePls(model, filtered);
+    const plsZero = estimatePls(model, zeroFilled);
+    check('PLS uses only the complete cases', pls.n, reference.completeCases);
+    close('PLS on data with blanks equals PLS on the complete cases', pls.pathCoefficients.get('TRUST→ATT') ?? 0, plsFiltered.pathCoefficients.get('TRUST→ATT') ?? 1, 1e-12);
+    assertTrue('and differs from treating blanks as zero', Math.abs((pls.pathCoefficients.get('TRUST→ATT') ?? 0) - (plsZero.pathCoefficients.get('TRUST→ATT') ?? 0)) > 1e-4);
+
+    const services = await Promise.all(['src/server/services/pls.service.ts', 'src/server/services/data-analysis.service.ts'].map((file) => read(file, 'utf8')));
+    assertTrue('no analysis service converts cells with Number()', services.every((text) => !text.includes(': Number(value);')));
+  }
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

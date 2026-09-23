@@ -20,6 +20,7 @@
  * and nothing else.
  */
 
+import { numericColumns } from '@/analysis/numeric-columns';
 import {
   assessDiscriminantValidity,
   assessMeasurement,
@@ -107,18 +108,7 @@ export async function runPls(input: {
 }): Promise<PlsAnalysis> {
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
-  const columns = new Map<string, number[]>();
-  for (const name of loaded.data.columns) {
-    const index = loaded.data.columns.indexOf(name);
-    columns.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  }
+  const columns = numericColumns(loaded.data);
 
   /*
    * The data is checked before the model is estimated, and the errors are
@@ -303,18 +293,7 @@ export async function runCbSem(input: {
 }): Promise<CbSemResult> {
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
-  const columns = new Map<string, number[]>();
-  for (const name of loaded.data.columns) {
-    const index = loaded.data.columns.indexOf(name);
-    columns.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  }
+  const columns = numericColumns(loaded.data);
 
   try {
     const result = confirmatoryFactorAnalysis(input.model, columns);
@@ -404,18 +383,7 @@ export async function startBootstrap(input: {
    * found a minute into a background run is a minute the user waited to learn
    * something knowable immediately.
    */
-  const jobColumns = new Map<string, number[]>();
-  for (const name of loaded.data.columns) {
-    const index = loaded.data.columns.indexOf(name);
-    jobColumns.set(
-      name,
-      loaded.data.rows.map((row) => {
-        const value = row[index];
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) ? parsed : Number.NaN;
-      }),
-    );
-  }
+  const jobColumns = numericColumns(loaded.data);
 
   const preflight = checkModelData(input.model, jobColumns);
 
@@ -486,18 +454,7 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
 
     const loaded = await loadForAnalysis(job.datasetId as string, job.userId);
 
-    const columns = new Map<string, number[]>();
-    for (const name of loaded.data.columns) {
-      const index = loaded.data.columns.indexOf(name);
-      columns.set(
-        name,
-        loaded.data.rows.map((row) => {
-          const value = row[index];
-          const parsed = typeof value === 'number' ? value : Number(value);
-          return Number.isFinite(parsed) ? parsed : Number.NaN;
-        }),
-      );
-    }
+    const columns = numericColumns(loaded.data);
 
     await jobsRepo.updateProgress(jobId, 0, 'estimating');
     const estimate = estimatePls(spec.model, columns);

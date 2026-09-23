@@ -19,10 +19,9 @@ import {
 } from '@/ai/prompts/titles';
 import { resolveProvider } from '@/ai/registry';
 import { requirementsFor } from '@/server/ai/model-requirements';
-import { alternativeProvider, selectModel } from '@/server/ai/model-router';
-import { shouldFailOver } from '@/server/ai/model-requirements';
+import { selectModel } from '@/server/ai/model-router';
 import type { AIProvider } from '@/ai/provider';
-import { AIProviderError, type AIChatMessage, type AITask, type ProjectContext } from '@/ai/types';
+import type { AIChatMessage, AITask, ProjectContext } from '@/ai/types';
 import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
 import { countWords } from '@/lib/text';
 import { logger } from '@/lib/logger';
@@ -37,8 +36,7 @@ import * as titlesRepo from '@/server/repositories/titles.repository';
 
 import { getOwnedProject, getProjectWithSections, updateProject } from './project.service';
 import { saveSection } from './section.service';
-import { assertCanUseAI, recordAIUsage } from './usage.service';
-import { costFor } from '@/ai/prices';
+import { assertCanUseAI } from './usage.service';
 
 /**
  * What the provider actually billed as input. Cached reads are cheap but they
@@ -91,49 +89,15 @@ async function prepare(
 }
 
 /**
- * Exported for the task planner, which needs the same metering, provider
- * resolution and usage recording as every other model call.
+ * Exported for the task planner and the diagram extractor, which need the
+ * same path as every other model call.
  *
- * A second implementation would be a second place for the quota check to be
- * forgotten.
+ * Since P1-B the Model Gateway does the rest, for every call: quota
+ * reservation, routing within the plan, timeouts, bounded retries, failover
+ * (never above the plan, never cross-provider on an explicit choice) and
+ * durable metering. Nothing is metered or retried here, so nothing can be
+ * counted twice or forgotten.
  */
-/**
- * Runs a completion, moving to another configured provider when the first one
- * fails for its own reasons.
- *
- * Thin on purpose: the decision of *whether* a failure is worth retrying
- * elsewhere lives in `shouldFailOver`, and the choice of *which* provider lives
- * in the router. This only sequences them.
- *
- * With one provider configured — the usual case — there is nothing to fail
- * over to, and the original error is thrown unchanged. Wrapping it would hide
- * the cause that the service layer turns into a message naming the quota or
- * the outage.
- */
-async function runWithFailover<T>(
-  input: { provider: AIProvider; task: AITask },
-  run: (provider: AIProvider) => Promise<T>,
-): Promise<T> {
-  try {
-    return await run(input.provider);
-  } catch (error) {
-    if (!shouldFailOver(error)) throw error;
-
-    const alternative = await alternativeProvider(input.provider.name);
-
-    if (!alternative) throw error;
-
-    logger.warn('ai.failover', {
-      task: input.task,
-      from: input.provider.name,
-      to: alternative.name,
-      reason: String(error).slice(0, 200),
-    });
-
-    return run(alternative);
-  }
-}
-
 export async function runCompletion(input: {
   userId: string;
   projectId: string;
@@ -145,85 +109,20 @@ export async function runCompletion(input: {
   maxTokens?: number;
   temperature?: number;
   json?: boolean;
+  /** An internal step (planning, extraction for a larger task): metered, not counted as a request. */
+  countsAsRequest?: boolean;
 }) {
-  try {
-    /*
-     * Failover lives here because this is the one place every model call
-     * passes through. Putting it at the ten call sites would mean ten copies
-     * of the same retry, and the one that was forgotten would be the one that
-     * mattered.
-     *
-     * Only provider-side failures move to another provider: a quota, an
-     * outage, a timeout. A malformed request or a refusal would fail
-     * identically elsewhere, and retrying spends a second call to receive the
-     * same answer.
-     */
-    const result = await runWithFailover(input, (provider) =>
-      provider.complete({
-        task: input.task,
-        locale: input.locale,
-        system: input.system,
-        messages: input.messages,
-        maxTokens: input.maxTokens,
-        temperature: input.temperature,
-        json: input.json,
-      }),
-    );
-
-    await recordAIUsage({
-      userId: input.userId,
-      projectId: input.projectId,
-      generatedWords: countWords(result.text),
-      tokensIn: billableInput(result.usage),
-      tokensOut: result.usage.tokensOut,
-      /* Priced as the model that answered, which after a failover is not the one asked. */
-      costMicroUsd: costFor(result.model, result.usage, () => input.provider.estimateCostMicroUsd(result.usage)),
-      provider: result.provider,
-      model: result.model,
-    });
-
-    return result;
-  } catch (error) {
-    if (error instanceof AIProviderError) {
-      logger.error('ai.provider.failed', {
-        provider: error.provider,
-        status: error.status,
-        task: input.task,
-        /*
-         * The model actually sent, and what the provider said about it.
-         *
-         * A 404 was chased for hours with the configured model correct
-         * everywhere it could be read — the environment, the health endpoint,
-         * the picker — because the log recorded the status and not the request.
-         * A status alone cannot distinguish a wrong model name from a wrong
-         * path, and the provider's own message names both.
-         */
-        model: input.provider.model,
-        detail: error.message.slice(0, 300),
-      });
-      /*
-       * A quota is not an outage, and saying so matters.
-       *
-       * A researcher saw "The AI service is not reachable right now" when the
-       * provider had returned 429 — their allowance was spent. "Unreachable"
-       * describes something broken that they cannot influence; "you have used
-       * your quota" describes something they can wait out or raise. The two
-       * lead to entirely different actions, and the generic message pointed at
-       * neither.
-       */
-      if (error.status === 429 || /quota|rate.?limit/i.test(error.message)) {
-        throw new AppError(
-          'AI_UNAVAILABLE',
-          'The AI provider quota has been used up. It resets on its own — try again later, or raise the limit in the provider console.',
-          'انتهت حصّتك من مزوّد الذكاء الاصطناعي. تتجدّد تلقائيًا — أعد المحاولة لاحقًا أو ارفع الحدّ من لوحة المزوّد.',
-          error.message.slice(0, 400),
-        );
-      }
-
-      throw AppError.aiUnavailable(error.message.slice(0, 400));
-    }
-    throw error;
-  }
+  return input.provider.complete({
+    task: input.task,
+    locale: input.locale,
+    system: input.system,
+    messages: input.messages,
+    maxTokens: input.maxTokens,
+    temperature: input.temperature,
+    json: input.json,
+    projectId: input.projectId || null,
+    ...(input.countsAsRequest === undefined ? {} : { countsAsRequest: input.countsAsRequest }),
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -609,6 +508,8 @@ export async function answerGeneralQuestion(input: {
    * than the working material of one step.
    */
   material?: string;
+  /** Cancels the call when the caller goes away (a disconnected stream). */
+  signal?: AbortSignal;
 }): Promise<{ content: string; usage: { tokensIn: number; tokensOut: number } }> {
   const prepared = await prepareGeneralAnswer(input);
 
@@ -731,6 +632,10 @@ export async function* streamGeneralAnswer(
   let servedBy = prepared.provider.model;
 
   try {
+    /*
+     * Metered by the gateway, including a stream cut short: text already
+     * delivered was generated and paid for, and is counted (P1-B).
+     */
     for await (const chunk of prepared.provider.stream({
       task: 'chat',
       locale: input.locale,
@@ -738,6 +643,8 @@ export async function* streamGeneralAnswer(
       messages: prepared.messages,
       maxTokens: 2000,
       temperature: 0.6,
+      projectId: input.projectId ?? null,
+      signal: input.signal,
     })) {
       if (chunk.usage) usage = { tokensIn: chunk.usage.tokensIn, tokensOut: chunk.usage.tokensOut };
       if (chunk.model) servedBy = chunk.model;
@@ -746,50 +653,9 @@ export async function* streamGeneralAnswer(
       content += chunk.delta;
       yield chunk.delta;
     }
-  } catch (error) {
-    if (error instanceof AIProviderError) {
-      logger.error('ai.provider.failed', {
-        provider: error.provider,
-        status: error.status,
-        task: 'chat',
-        model: prepared.provider.model,
-        detail: error.message.slice(0, 300),
-      });
-
-      if (error.status === 429 || /quota|rate.?limit/i.test(error.message)) {
-        throw new AppError(
-          'AI_UNAVAILABLE',
-          'The AI provider quota has been used up. It resets on its own — try again later, or raise the limit in the provider console.',
-          'انتهت حصّتك من مزوّد الذكاء الاصطناعي. تتجدّد تلقائيًا — أعد المحاولة لاحقًا أو ارفع الحدّ من لوحة المزوّد.',
-          error.message.slice(0, 400),
-        );
-      }
-
-      throw AppError.aiUnavailable(error.message.slice(0, 400));
-    }
-
-    throw error;
   } finally {
-    if (content) {
-      /* An estimate when the provider sent no count — a dropped stream, usually. */
-      const counted =
-        usage.tokensOut > 0
-          ? usage
-          : { tokensIn: usage.tokensIn, tokensOut: prepared.provider.countTokens(content) };
-
-      await recordAIUsage({
-        userId: input.userId,
-        projectId: input.projectId ?? '',
-        generatedWords: countWords(content),
-        tokensIn: billableInput(counted),
-        tokensOut: counted.tokensOut,
-        costMicroUsd: costFor(servedBy, counted, () => prepared.provider.estimateCostMicroUsd(counted)),
-        provider: prepared.provider.name,
-        model: servedBy,
-      }).catch((error: unknown) => {
-        logger.warn('ai.usageNotRecorded', { error: String(error).slice(0, 200) });
-      });
-    }
+    /* Provider failures arrive as sanitised AppErrors from the gateway; the attempt is already metered. */
+    logger.debug('ai.stream.finished', { model: servedBy, chars: content.length });
   }
 
   return { content, usage };
@@ -1436,6 +1302,7 @@ export async function streamChat(
 
   // Shared between `start` and `cancel` so a client disconnect stops further writes.
   let closed = false;
+  const abort = new AbortController();
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -1455,6 +1322,7 @@ export async function streamChat(
 
       let full = '';
       let usage = { tokensIn: 0, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
+      let servedBy = provider.model;
       let failed = false;
 
       try {
@@ -1465,11 +1333,14 @@ export async function streamChat(
           messages,
           maxTokens: 4000,
           temperature: 0.7,
+          projectId,
+          signal: abort.signal,
         })) {
           if (chunk.delta) {
             full += chunk.delta;
             send({ type: 'delta', text: chunk.delta });
           }
+          if (chunk.model) servedBy = chunk.model;
           if (chunk.done && chunk.usage) {
             usage = {
               tokensIn: chunk.usage.tokensIn,
@@ -1486,9 +1357,12 @@ export async function streamChat(
         });
       }
 
-      // Persistence and metering run whether or not the reader is still there.
-      // Skipping them on disconnect would let a client abort every response and
-      // consume the provider without ever touching its quota.
+      /*
+       * The reply is persisted whether or not the reader is still there —
+       * whatever was generated before a disconnect is kept. Metering is the
+       * gateway's, including a cancelled stream (P1-B), so a client that
+       * aborts every response still pays for what it consumed.
+       */
       const guardrails = inspectOutput(full);
 
       if (full) {
@@ -1498,35 +1372,13 @@ export async function streamChat(
             role: 'ASSISTANT',
             content: full,
             provider: provider.name,
-            model: provider.model,
+            model: servedBy,
             tokensIn: billableInput(usage),
             tokensOut: usage.tokensOut,
             flags: guardrails.flags,
           });
         } catch (error) {
           logger.error('ai.chat.persistFailed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-
-      if (full || usage.tokensIn > 0) {
-        try {
-          await recordAIUsage({
-            userId,
-            projectId,
-            generatedWords: countWords(full),
-            // If the stream was cut before the usage event arrived, fall back to
-            // an estimate so an aborted request still counts against the quota.
-            tokensIn:
-              billableInput(usage) || provider.countTokens(messages.at(-1)?.content ?? ''),
-            tokensOut: usage.tokensOut || provider.countTokens(full),
-            costMicroUsd: provider.estimateCostMicroUsd(usage),
-            provider: provider.name,
-            model: provider.model,
-          });
-        } catch (error) {
-          logger.error('ai.chat.meterFailed', {
             error: error instanceof Error ? error.message : String(error),
           });
         }
@@ -1546,9 +1398,12 @@ export async function streamChat(
     },
 
     cancel() {
-      // The reader went away; `send()` becomes a no-op from here, but the run
-      // continues so the reply and its usage are still recorded.
+      /*
+       * The reader went away: stop the model rather than let it write to no
+       * one (P1-B). What was produced so far is still persisted and metered.
+       */
       closed = true;
+      abort.abort();
       logger.debug('ai.chat.clientDisconnected', { projectId });
     },
   });

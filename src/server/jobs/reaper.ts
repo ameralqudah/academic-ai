@@ -110,7 +110,21 @@ export async function reap(): Promise<ReapResult> {
     if (await enqueue(QUEUES.analysis, { jobId: job.id }, job.id)) jobsRequeued += 1;
   }
 
+  /*
+   * Model Gateway quota reservations left by a worker that died (P1-B). They
+   * already stopped counting at expiry; this settles them. Best effort: a
+   * failure here must not stop tasks and jobs being recovered.
+   */
+  const reservationsReleased = await import('@/server/ai/gateway/quota')
+    .then(({ releaseExpired }) => releaseExpired())
+    .catch((error: unknown) => {
+      logger.warn('jobs.reservationSweepFailed', { error: String(error).slice(0, 200) });
+      return 0;
+    });
+
   const result = { tasksRequeued, jobsRequeued, jobsFailed };
-  if (tasksRequeued + jobsRequeued + jobsFailed > 0) logger.info('jobs.reaped', { ...result });
+  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased > 0) {
+    logger.info('jobs.reaped', { ...result, reservationsReleased });
+  }
   return result;
 }

@@ -130,6 +130,15 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
         maxTokens: tokensPerRound,
         temperature: 0.6,
         locale: input.locale,
+        longForm: true,
+        /*
+         * One piece of writing is one request, however many rounds it takes;
+         * every round is metered, and its words count (P1-B). The first round
+         * needs the plan's headroom; later rounds continue what it admitted.
+         */
+        countsAsRequest: round === 1,
+        continuation: round > 1,
+        estimatedWords: Math.round(tokensPerRound * 0.6),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

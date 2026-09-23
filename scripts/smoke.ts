@@ -61,7 +61,7 @@ import {
   plannedCapabilities,
 } from '@/agents/registry';
 import { estimateTokens } from '@/ai/provider';
-import { AnthropicProvider } from '@/ai/providers/anthropic';
+import { attemptCost } from '@/server/ai/gateway/metering';
 import { inspectOutput, parseJsonOutput } from '@/ai/guardrails';
 import { sectionI18nKey } from '@/lib/sections';
 import { countWords, slugify, truncate } from '@/lib/text';
@@ -146,14 +146,26 @@ check('returns null on unparsable output', parseJsonOutput('not json at all'), n
 check('token estimate is positive for both scripts', estimateTokens('هذه دراسة') > 0 && estimateTokens('a study') > 0, true);
 
 console.log('\nprompt caching economics');
-const anthropic = new AnthropicProvider('test-key', 'test-model');
-const uncached = anthropic.estimateCostMicroUsd({ tokensIn: 20_000, tokensOut: 1_000 });
-const cachedRead = anthropic.estimateCostMicroUsd({
+/*
+ * Priced by the Model Gateway at the serving model since P1-B (the legacy
+ * provider class is gone). Claude Sonnet 4 carries the same rates the old
+ * fallback used: $3 in, $15 out, $3.75 cache write, $0.30 cache read.
+ */
+const anthropicCost = (usage: { tokensIn: number; tokensOut: number; cacheReadTokens?: number; cacheWriteTokens?: number }) =>
+  attemptCost('claude-sonnet-4', {
+    inputTokens: usage.tokensIn,
+    outputTokens: usage.tokensOut,
+    cacheReadTokens: usage.cacheReadTokens ?? 0,
+    cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+    estimated: false,
+  });
+const uncached = anthropicCost({ tokensIn: 20_000, tokensOut: 1_000 });
+const cachedRead = anthropicCost({
   tokensIn: 200,
   tokensOut: 1_000,
   cacheReadTokens: 19_800,
 });
-const cacheWrite = anthropic.estimateCostMicroUsd({
+const cacheWrite = anthropicCost({
   tokensIn: 200,
   tokensOut: 1_000,
   cacheWriteTokens: 19_800,
@@ -1887,8 +1899,9 @@ assertTrue(
   ),
 );
 assertTrue(
+  /* Since P1-B the resolver hands the choice to the Model Gateway, which serves it and never swaps it. */
   'and the resolver builds that provider',
-  registryModel.includes('build(chosen.provider, chosen.model)'),
+  registryModel.includes('requested: chosen ?? null'),
 );
 
 /*
@@ -3945,122 +3958,108 @@ check('OpenAlex is used with or without a key', new OpenAlexProvider().isConfigu
 console.log('\nmodel routing by plan, and provider resilience');
 
 {
-  const { candidatesFor, candidateOverride } = await import(
-    '../src/server/ai/model-requirements'
-  );
-  const { resilient } = await import('../src/server/ai/resilient-provider');
-  const { AIProviderError } = await import('../src/ai/types');
-
-  check(
-    'a free account is routed away from the premium model',
-    candidatesFor('free', ['anthropic', 'google']).candidates,
-    ['google'],
-  );
-  check(
-    'unless the premium model is the only one there is',
-    candidatesFor('free', ['anthropic']).candidates,
-    ['anthropic'],
-  );
-  check(
-    'a paid account gets the premium model first',
-    candidatesFor('paid', ['anthropic', 'google']),
-    { candidates: ['anthropic', 'google'], premiumFirst: true },
-  );
-  check(
-    'but not when its key is unusable',
-    candidatesFor('paid', ['google']).premiumFirst,
-    false,
-  );
-  check(
-    'with no known user the router behaves as before',
-    candidatesFor(undefined, ['anthropic', 'google']),
-    { candidates: ['anthropic', 'google'], premiumFirst: false },
-  );
-
   /*
-   * Narrowing the candidates is only half of it. The router resolves "no
-   * particular provider" when one candidate is left, and that returns the
-   * deployment default — the premium model — so every free account was routed
-   * back to the model the narrowing exists to avoid.
+   * Since P1-B the Model Gateway owns plan routing and resilience; these are
+   * the same scenarios the legacy router and `resilient()` were tested with,
+   * asserted against the gateway. One changes deliberately: with no known
+   * user the gateway routes as the free plan (fail closed) — the legacy router
+   * offered every provider, premium first for reasoning work (audit G-3).
    */
-  check(
-    'the single candidate overrides a default that is not it',
-    candidateOverride(candidatesFor('free', ['anthropic', 'google']).candidates, 'anthropic'),
-    'google',
-  );
-  check(
-    'and the default stands when it already is the candidate',
-    candidateOverride(['google'], 'google'),
-    null,
-  );
-  check(
-    'with nothing configured there is nothing to override',
-    candidateOverride([], 'anthropic'),
-    null,
-  );
+  const { route } = await import('../src/server/ai/gateway/routing');
+  const { createGateway } = await import('../src/server/ai/gateway/gateway');
+  const { FakeAdapter } = await import('../src/server/ai/gateway/adapters/fake');
+  const { GatewayError } = await import('../src/server/ai/gateway/errors');
 
-  type Fake = { calls: number };
-  const fake = (name: 'google' | 'anthropic', failures: number, status = 503) => {
-    const state: Fake = { calls: 0 };
-    const provider = {
-      name,
-      model: `${name}-test`,
-      isConfigured: () => true,
-      countTokens: () => 0,
-      estimateCostMicroUsd: () => 0,
-      async complete() {
-        state.calls += 1;
-        if (state.calls <= failures) throw new AIProviderError(name, 'high demand', status);
-        return { text: `from ${name}`, usage: { tokensIn: 0, tokensOut: 0 }, provider: name, model: `${name}-test` };
+  const claude = { provider: 'anthropic' as const, model: 'claude-sonnet-5' };
+  const gemini = { provider: 'google' as const, model: 'gemini-2.5-pro' };
+  const plan = (tier: 'free' | 'paid' | undefined, configured: (typeof claude | typeof gemini)[], defaultProvider: 'anthropic' | 'google' = 'anthropic') =>
+    route({ tier, configured, defaultProvider, needsReasoning: false, latencySensitive: false, contextTokens: 1000 });
+
+  check('a free account is routed away from the premium model', plan('free', [claude, gemini]).chosen.provider, 'google');
+  let premiumOnly = 'routed';
+  try {
+    plan('free', [claude]);
+  } catch (error) {
+    premiumOnly = error instanceof GatewayError ? `${error.errorClass}:${error.detail}` : 'other';
+  }
+  check('even when the premium model is the only one there is: refused, no eligible model', premiumOnly, 'entitlement:no_eligible_model');
+  check('a paid account gets the premium model first', plan('paid', [gemini, claude], 'google').chosen.provider, 'anthropic');
+  check('but not when its key is unusable (not configured)', plan('paid', [gemini]).chosen.provider, 'google');
+  check('with no known user the gateway routes as the free plan', [plan(undefined, [claude, gemini]).tier, plan(undefined, [claude, gemini]).chosen.provider], ['free', 'google']);
+  check('the plan’s candidate wins over a default that is not it', plan('free', [claude, gemini], 'anthropic').chosen.provider, 'google');
+  check('and the default stands when it already is the candidate', plan('free', [gemini], 'google').chosen.provider, 'google');
+  let nothing = '';
+  try {
+    plan('free', []);
+  } catch (error) {
+    nothing = (error as InstanceType<typeof GatewayError>).errorClass;
+  }
+  check('with nothing configured there is nothing to route to', nothing, 'not_configured');
+
+  const scripted = (provider: 'google' | 'anthropic' | 'openai', failures: number, errorClass: 'outage' | 'invalid_request' = 'outage') =>
+    new FakeAdapter(provider, [
+      ...Array.from({ length: failures }, () => ({ fail: new GatewayError(errorClass, 'high demand', { provider }) })),
+      { reply: { text: `from ${provider}` } },
+      { stream: [`from ${provider}`] },
+    ]);
+  const gpt = { provider: 'openai' as const, model: 'gpt-4.1' };
+  const gatewayWith = (adapters: Partial<Record<'google' | 'anthropic' | 'openai', InstanceType<typeof FakeAdapter>>>, configured: { provider: 'google' | 'anthropic' | 'openai'; model: string }[]) =>
+    createGateway({
+      adapters: () => adapters,
+      models: async () => ({ configured, defaultProvider: configured[0]!.provider, siblings: {} }),
+      plan: async () => ({ tier: 'paid', limits: { maxAiRequests: -1, maxGeneratedWords: -1 }, unlimited: () => true }),
+      checkProject: async () => undefined,
+      quota: {
+        reserve: async (input) => ({ id: input.idempotencyKey, userId: input.userId, periodKey: '2026-09', requests: input.requests, words: input.words, status: 'reserved' }),
+        commit: async () => undefined,
+        release: async () => undefined,
       },
-      async *stream() {
-        state.calls += 1;
-        if (state.calls <= failures) throw new AIProviderError(name, 'high demand', status);
-        yield { delta: `from ${name}`, done: true };
-      },
-    };
-    return { provider: provider as never, state };
-  };
+      meter: { attempt: async () => undefined, toolCalls: async () => new Map() },
+      clock: { now: () => 0, sleep: async () => undefined, random: () => 0.5 },
+      scope: () => ({ userId: 'smoke' }),
+      notify: () => undefined,
+    });
+  const ask = { purpose: 'chat', messages: [{ role: 'user' as const, content: 'hi' }], needsReasoning: false };
 
-  const request = { task: 'chat', locale: 'ar', system: '', messages: [] } as never;
+  const once = scripted('google', 1);
+  const afterRetry = await gatewayWith({ google: once }, [gemini]).generate(ask);
+  check('a 503 is retried on the same provider', [afterRetry.text, once.calls.length], ['from google', 2]);
 
-  const once = fake('google', 1);
-  const afterRetry = await resilient(once.provider, async () => null, { retryDelayMs: 1 }).complete(request);
-  check('a 503 is retried on the same provider', [afterRetry.text, once.state.calls], ['from google', 2]);
-
-  const down = fake('google', 5);
-  const spare = fake('anthropic', 0);
-  const moved = await resilient(down.provider, async () => spare.provider, { retryDelayMs: 1 }).complete(request);
+  const down = scripted('google', 5);
+  const spare = scripted('openai', 0);
+  const moved = await gatewayWith({ google: down, openai: spare }, [gemini, gpt]).generate(ask);
   check(
     'and moves to the alternative at once, rather than waiting on a model that said it is overloaded',
-    [moved.provider, down.state.calls],
-    ['anthropic', 1],
+    [moved.provider, down.calls.length],
+    ['openai', 1],
   );
 
-  const bothDown = fake('google', 1);
-  const spareDown = fake('anthropic', 5);
-  const lastResort = await resilient(bothDown.provider, async () => spareDown.provider, { retryDelayMs: 1 }).complete(request);
+  const bothDown = scripted('google', 1);
+  const spareDown = scripted('openai', 5);
+  const lastResort = await gatewayWith({ google: bothDown, openai: spareDown }, [gemini, gpt]).generate(ask);
   check('when the alternative fails too, the first is tried once more', lastResort.text, 'from google');
 
-  const { siblingModel } = await import('../src/server/ai/model-requirements');
-  check('an overloaded Gemini falls to its sibling', siblingModel('google', 'gemini-3.6-flash', 'gemini-3.5-flash'), 'gemini-3.5-flash');
-  check('but the sibling does not fall to itself', siblingModel('google', 'gemini-3.5-flash', 'gemini-3.5-flash'), null);
-  check('an empty setting turns it off', siblingModel('google', 'gemini-3.6-flash', ' '), null);
-  check('and other providers have none configured', siblingModel('anthropic', 'claude-sonnet-5', 'gemini-3.5-flash'), null);
+  const sibling = (chosenModel: string, fallback: string, provider: 'google' | 'anthropic' = 'google') =>
+    route({ tier: 'paid', configured: [{ provider, model: chosenModel }], defaultProvider: provider, needsReasoning: false, latencySensitive: false, contextTokens: 1000, siblingModels: fallback.trim() ? { google: fallback.trim() } : {} })
+      .fallbacks.map((f) => f.model)[0] ?? null;
+  check('an overloaded Gemini falls to its sibling', sibling('gemini-3.6-flash', 'gemini-3.5-flash'), 'gemini-3.5-flash');
+  check('but the sibling does not fall to itself', sibling('gemini-3.5-flash', 'gemini-3.5-flash'), null);
+  check('an empty setting turns it off', sibling('gemini-3.6-flash', ' '), null);
+  check('and other providers have none configured', sibling('claude-sonnet-5', 'gemini-3.5-flash', 'anthropic'), null);
 
-  const bad = fake('google', 5, 400);
+  const bad = scripted('google', 5, 'invalid_request');
   let rejected = '';
   try {
-    await resilient(bad.provider, async () => spare.provider, { retryDelayMs: 1 }).complete(request);
+    await gatewayWith({ google: bad, openai: scripted('openai', 0) }, [gemini, gpt]).generate(ask);
   } catch (error) {
-    rejected = (error as Error).message;
+    rejected = (error as InstanceType<typeof GatewayError>).errorClass;
   }
-  check('a bad request is not retried — it would fail the same way', [rejected, bad.state.calls], ['high demand', 1]);
+  check('a bad request is not retried — it would fail the same way', [rejected, bad.calls.length], ['invalid_request', 1]);
 
-  const flaky = fake('google', 1);
+  const flaky = new FakeAdapter('google', [{ fail: new GatewayError('outage', 'high demand', { provider: 'google' }) }, { stream: ['from google'] }]);
   let streamed = '';
-  for await (const chunk of resilient(flaky.provider, async () => null, { retryDelayMs: 1 }).stream(request)) {
-    streamed += chunk.delta;
+  for await (const event of gatewayWith({ google: flaky }, [gemini]).stream(ask)) {
+    if (event.type === 'text_delta') streamed += event.text;
   }
   check('a stream that fails before its first chunk is restarted', streamed, 'from google');
 }
@@ -4230,45 +4229,58 @@ console.log('\nspeed of the first word');
     check(`but work is never mistaken for one: ${message}`, isSmallTalk(message), false);
   }
 
-  const { GoogleProvider } = await import('../src/ai/providers/google');
-  const realFetch = globalThis.fetch;
+  /* Since P1-B these run against the gateway's Google adapter (the legacy provider class is gone). */
+  const { GoogleAdapter } = await import('../src/server/ai/gateway/adapters/google');
   const bodies: Record<string, unknown>[] = [];
   let refuse = false;
 
-  globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
-    const body = JSON.parse(init?.body ?? '{}') as { generationConfig?: { thinkingConfig?: unknown } };
+  const fakeFetch = async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body ?? '{}')) as { generationConfig?: { thinkingConfig?: unknown } };
     bodies.push(body);
     if (refuse && body.generationConfig?.thinkingConfig) {
       return new Response('{"error":{"message":"Unknown name thinkingLevel"}}', { status: 400 });
     }
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), { status: 200 });
-  }) as typeof fetch;
+  };
 
-  try {
-    const base = { task: 'chat', locale: 'ar', system: '', messages: [{ role: 'user', content: 'hi' }] } as never;
-    const thinkingOf = (index: number) =>
-      (bodies[index] as { generationConfig: { thinkingConfig?: unknown } }).generationConfig.thinkingConfig;
+  const call = (model: string, reasoning: boolean) => ({
+    request: {
+      purpose: 'chat',
+      system: '',
+      messages: [{ role: 'user' as const, content: 'hi' }],
+      maxOutputTokens: 100,
+      temperature: 0.2,
+      reasoning,
+      cacheSystem: true,
+      jsonMode: false,
+      needsReasoning: reasoning,
+      latencySensitive: !reasoning,
+      countsAsRequest: true,
+      continuation: false,
+    },
+    model,
+    signal: new AbortController().signal,
+  });
+  const thinkingOf = (index: number) =>
+    (bodies[index] as { generationConfig: { thinkingConfig?: unknown } }).generationConfig.thinkingConfig;
+  const adapter = new GoogleAdapter('k'.repeat(40), fakeFetch);
 
-    await new GoogleProvider('k'.repeat(40), 'gemini-3.6-flash').complete({ ...(base as object), reasoning: false } as never);
-    check('a step that needs no reasoning asks Gemini 3 for the least', thinkingOf(0), { thinkingLevel: 'minimal' });
+  await adapter.send(call('gemini-3.6-flash', false));
+  check('a step that needs no reasoning asks Gemini 3 for the least', thinkingOf(0), { thinkingLevel: 'minimal' });
 
-    await new GoogleProvider('k'.repeat(40), 'gemini-3.6-flash').complete({ ...(base as object), reasoning: true } as never);
-    check('a step that does need it is left alone', thinkingOf(1), undefined);
+  await adapter.send(call('gemini-3.6-flash', true));
+  check('a step that does need it is left alone', thinkingOf(1), undefined);
 
-    await new GoogleProvider('k'.repeat(40), 'gemini-2.5-pro').complete({ ...(base as object), reasoning: false } as never);
-    check('and so is a model that cannot turn it down', thinkingOf(2), undefined);
+  await adapter.send(call('gemini-2.5-pro', false));
+  check('and so is a model that cannot turn it down', thinkingOf(2), undefined);
 
-    refuse = true;
-    bodies.length = 0;
-    const provider = new GoogleProvider('k'.repeat(40), 'gemini-3.9-test');
-    const answered = await provider.complete({ ...(base as object), reasoning: false } as never);
-    check('a model that refuses the setting is answered without it', [answered.text, bodies.length, thinkingOf(1)], ['ok', 2, undefined]);
+  refuse = true;
+  bodies.length = 0;
+  const answered = await adapter.send(call('gemini-3.9-test', false));
+  check('a model that refuses the setting is answered without it', [answered.text, bodies.length, thinkingOf(1)], ['ok', 2, undefined]);
 
-    await provider.complete({ ...(base as object), reasoning: false } as never);
-    check('and is not offered it a second time', bodies.length, 3);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  await adapter.send(call('gemini-3.9-test', false));
+  check('and is not offered it a second time', bodies.length, 3);
 }
 
 console.log('\nwhat a model costs');
@@ -5327,6 +5339,76 @@ console.log('\nwhat a model costs');
     if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !source.includes('GRAPH_WRITE_LIMIT') && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
   }
   check(`every /api/v1 handler (${routeFiles.length} routes) is behind the flag and rate-limited`, unguarded, []);
+}
+
+{
+  console.log('\nModel Gateway: no path around it (P1-B)');
+  const { readdirSync, statSync } = await import('node:fs');
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const path = `${dir}/${entry}`;
+      if (statSync(path).isDirectory()) walk(path);
+      else if (/\.(ts|tsx)$/.test(entry)) files.push(path);
+    }
+  };
+  walk('src');
+
+  const ADAPTERS = 'src/server/ai/gateway/adapters/';
+  const VENDOR = /api\.anthropic\.com|api\.openai\.com|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com/;
+  const SDK = /from ['"](@anthropic-ai\/sdk|openai|@google\/genai|@google\/generative-ai|@ai-sdk\/[^'"]+|ai)['"]/;
+  const outside: string[] = [];
+  const sdk: string[] = [];
+  const clientReach: string[] = [];
+  const legacyProviders: string[] = [];
+  for (const file of files) {
+    const source = await readFile(file, 'utf8');
+    if (VENDOR.test(source) && !file.startsWith(ADAPTERS)) outside.push(file);
+    if (SDK.test(source)) sdk.push(file);
+    const isClient = /^['"]use client['"]/m.test(source) || file.startsWith('src/components/');
+    if (isClient && /@\/server\/ai\/gateway|@\/ai\/registry|@\/server\/ai\/model-router/.test(source)) clientReach.push(file);
+    if (/implements AIProvider\b/.test(source)) legacyProviders.push(file);
+  }
+  check('provider hosts appear only in the gateway adapters', outside, []);
+  check('no vendor SDK is imported anywhere', sdk, []);
+  check('no client code imports the gateway, the registry or the router', clientReach, []);
+  check('no AIProvider class talks to a vendor any more (the facade is the only implementation)', legacyProviders, []);
+
+  const envSource = await readFile('src/config/env.ts', 'utf8');
+  check('no API key is exposed to the browser (NEXT_PUBLIC_*KEY)', /NEXT_PUBLIC_[A-Z_]*(KEY|SECRET|TOKEN)/.test(envSource), false);
+
+  const direct: string[] = [];
+  for (const file of files) {
+    if (file.startsWith('src/server/ai/gateway/')) continue;
+    const source = await readFile(file, 'utf8');
+    if (/\.send\(\{[^}]*signal/.test(source) && /Adapter/.test(source)) direct.push(file);
+  }
+  check('no application code calls a provider adapter directly', direct, []);
+
+  /* The quota ledger is written for model calls by the gateway alone, so nothing is counted twice or forgotten. */
+  const ledgerWriters: string[] = [];
+  for (const file of files) {
+    if (file === 'src/server/services/usage.service.ts') continue;
+    if (/\brecordAIUsage\(/.test(await readFile(file, 'utf8'))) ledgerWriters.push(file);
+  }
+  check('no application code meters a model call itself (recordAIUsage has no callers)', ledgerWriters, []);
+
+  /*
+   * The per-plan output cap is enforced in the gateway. It is set above every
+   * call site's own request, so it changes no feature on the free plan; this
+   * keeps that true when a call site asks for more (raise the cap deliberately).
+   */
+  const { OUTPUT_TOKEN_CAP } = await import('../src/server/ai/gateway/policy');
+  const overCap: string[] = [];
+  for (const file of files) {
+    if (file.startsWith('src/server/ai/gateway/')) continue;
+    const source = await readFile(file, 'utf8');
+    for (const match of source.matchAll(/(?:maxTokens|maxOutputTokens)\s*:\s*(?:Math\.min\(\s*)?([\d_]+)|tokensPerRound\s*\?\?\s*\(([^)]*)\)/g)) {
+      const numbers = (match[1] ?? match[2] ?? '').match(/\d[\d_]*/g) ?? [];
+      for (const n of numbers) if (Number(n.replaceAll('_', '')) > OUTPUT_TOKEN_CAP.free) overCap.push(`${file}: ${n}`);
+    }
+  }
+  check('no call site asks for more output than the free plan’s cap (so the cap changes no feature)', overCap, []);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

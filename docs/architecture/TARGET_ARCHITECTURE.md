@@ -1108,7 +1108,7 @@ An approval is a typed object with a **preview** (a diff, an impact report, the 
 | `src/agents/*` (legacy orchestrator), `/api/agent`, `/api/ai/chat`, `chat-panel.tsx`, dead modes in `agent-chat.tsx` | **Retire** (P1) | — |
 | `src/agents/keywords.ts`, `intent.ts`, router | **Reduce** | Only a thin fast-path classifier (small talk, quick answers). Everything else goes to the Supervisor. |
 | `src/server/context/*` (ContextManager, envelope) | **Evolve** | Context Assembler v2 (turn order fixed, graph slice, token counting). `src/ai/context/*` retired. |
-| `src/ai/*` providers, registry, router, resilient | **Evolve** | Model Gateway (native tools, timeouts, metering, plan-aware failover). Price table kept. |
+| `src/ai/*` providers, registry, router, resilient | **Evolve** — done in P1-B | Model Gateway (`src/server/ai/gateway/`: native tools, structured output, timeouts, metering, quota reservation, plan-aware failover). Vendor providers and `resilient` removed; `registry`/`model-router` return gateway-backed providers; price table kept. See `docs/phase1/P1B_REPORT.md`. |
 | `src/analysis/**` (TS stats) | **Keep + fix** | ts-core engine (bugs fixed in P0). CFA/CB-SEM retired after R parity. TS PLS kept as the fast interactive preview. |
 | `pls.service`, `pls-builder.tsx` | **Evolve** | SEM tools + model canvas |
 | `src/server/knowledge/*`, `research/pipeline.ts` | **Keep + extend** | Literature service (add S2, PubMed, arXiv, Unpaywall; egress proxy). Deep research becomes a deterministic pipeline run by the Literature agent. |
@@ -1181,7 +1181,7 @@ Each epic lists deliverables, acceptance criteria (AC) and dependencies. Sizes a
 | Epic | Deliverables | Acceptance criteria | Depends on | Size |
 |---|---|---|---|---|
 | P1-A Graph core | `graph_nodes`, `node_versions`, `graph_edges`, `stale_marks`; graph service (create/update/link/impact/trace); `project_members` + RLS; `/api/v1` graph routes | Impact on a construct change returns the right hypotheses, items, runs and blocks in fixture projects; RLS blocks cross-project reads in tests | P0-A | L |
-| P1-B Model Gateway | Adapters with native tool calling + structured output; token counting; prompt caching; metering; traces | Same tool schema works on 2+ providers; cost per run visible | P0-D | L |
+| P1-B Model Gateway | Adapters with native tool calling + structured output; token counting; prompt caching; metering; traces. **As built:** `src/server/ai/gateway/`, tables `ai_usage_events`, `ai_quota_reservations`, `ai_tool_calls` (`P1B_REPORT.md`) | Same tool schema works on 2+ providers; cost per run visible | P0-D | L |
 | P1-C Tool Registry + policy engine | `ToolDef`, registry, scopes, approval policies, idempotency; first 25 tools (graph, plan, lit.search, retrieve, stats.run (ts-core), results, citation.insert/format) | Policy unit tests; every tool call visible in the activity timeline | P1-A, P1-B | L |
 | P1-D Run engine v2 | Agent loop step type, parked waits, approvals API, answers API, outbox events, SSE with resume, sub-runs (`delegate`) | Supervisor completes a multi-tool goal; approval pauses and resumes across worker restarts | P0-C, P1-C | XL |
 | P1-E Context and memory | Context Assembler v2, Project State Snapshot, thread summaries, memories (user/project) with UI | Turn order correct; the snapshot is always present; memories editable | P1-A | M |

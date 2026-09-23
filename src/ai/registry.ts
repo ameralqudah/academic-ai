@@ -1,11 +1,7 @@
-import { getEnv } from '@/config/env';
 import { logger } from '@/lib/logger';
 import { getSetting } from '@/server/repositories/app-settings.repository';
 
 import type { AIProvider } from './provider';
-import { AnthropicProvider } from './providers/anthropic';
-import { GoogleProvider } from './providers/google';
-import { OpenAIProvider } from './providers/openai';
 import type { ProviderName } from './types';
 
 export const AI_SETTINGS_KEY = 'ai';
@@ -40,88 +36,42 @@ async function loadSettings(): Promise<AISettings | null> {
   return settings;
 }
 
+/** The admin's provider and model overrides (cached), for the Model Gateway's routing. */
+export async function adminAISettings(): Promise<AISettings | null> {
+  return loadSettings();
+}
+
 export function invalidateProviderCache(): void {
   cached = null;
 }
 
-function build(name: ProviderName, modelOverride?: string): AIProvider {
-  const env = getEnv();
-
-  switch (name) {
-    case 'openai':
-      return new OpenAIProvider(env.OPENAI_API_KEY ?? '', modelOverride ?? env.OPENAI_MODEL);
-    case 'google':
-      return new GoogleProvider(env.GOOGLE_AI_API_KEY ?? '', modelOverride ?? env.GOOGLE_MODEL);
-    case 'anthropic':
-    default:
-      return new AnthropicProvider(
-        env.ANTHROPIC_API_KEY ?? '',
-        modelOverride ?? env.ANTHROPIC_MODEL,
-      );
-  }
-}
-
 /**
- * Resolution order: the caller's choice → admin setting → environment → anthropic.
+ * A provider for "no particular step": the configuration check in
+ * `ai.service.prepare` and the health report. Served by the Model Gateway like
+ * every other model call (P1-B) — there is no vendor code in this module any
+ * more, and no silent substitution: a chosen provider that is not configured
+ * reports itself as such instead of being swapped for another.
  *
- * The caller's choice comes first because it is the user's, and it has already
- * been checked against their plan by `resolveRequestedModel` — this function
- * does not re-check, and must never be passed a choice that has not been.
- *
- * If the chosen provider has no key, fall back to any provider that does, so a
- * misconfigured override degrades instead of taking the product down.
+ * `chosen` must already have been checked against the user's plan
+ * (`resolveRequestedModel`); the gateway checks it again at call time.
  */
-export async function resolveProvider(
-  /**
-   * A provider and model the user selected.
-   *
-   * The selection was being validated in the API route and then discarded —
-   * `await resolveRequestedModel(...)` with no assignment. A user could pick a
-   * model, be told they were entitled to it, and receive an answer from a
-   * different one. Threading it through is what makes the selector mean
-   * something.
-   */
-  chosen?: { provider: ProviderName; model: string } | null,
-): Promise<AIProvider> {
-  const env = getEnv();
-  const settings = await loadSettings();
-
-  if (chosen) {
-    const selected = build(chosen.provider, chosen.model);
-
-    /*
-     * Falls through to the default when the chosen provider has no key. That
-     * combination should not occur — the model list is built from configured
-     * keys — but a key removed between the list being served and the request
-     * arriving would otherwise fail the request rather than answering it.
-     */
-    if (selected.isConfigured()) return selected;
-
-    logger.warn('ai.provider.chosenUnavailable', {
-      provider: chosen.provider,
-      model: chosen.model,
-    });
+export async function resolveProvider(chosen?: { provider: ProviderName; model: string } | null): Promise<AIProvider> {
+  /* Imported here: the gateway reads admin settings from this module. */
+  const [{ gateway, predictRoute }, { gatewayProvider }] = await Promise.all([
+    import('@/server/ai/gateway'),
+    import('@/server/ai/gateway/compat'),
+  ]);
+  const predicted = await predictRoute({ needsReasoning: true, latencySensitive: false, requested: chosen ?? null });
+  if (chosen && (predicted.provider !== chosen.provider || !predicted.configured)) {
+    logger.warn('ai.provider.chosenUnavailable', { provider: chosen.provider, model: chosen.model });
   }
-
-  const preferred = settings?.provider ?? env.AI_PROVIDER;
-  const primary = build(preferred, settings?.models?.[preferred]);
-  if (primary.isConfigured()) return primary;
-
-  const alternatives: ProviderName[] = (['anthropic', 'openai', 'google'] as const).filter(
-    (name) => name !== preferred,
-  );
-
-  for (const name of alternatives) {
-    const candidate = build(name, settings?.models?.[name]);
-    if (candidate.isConfigured()) {
-      logger.warn('ai.provider.fallback', { requested: preferred, using: name });
-      return candidate;
-    }
-  }
-
-  // Return the primary anyway — the service layer turns "not configured" into a
-  // clear AI_UNAVAILABLE error rather than a confusing 401 from the vendor.
-  return primary;
+  return gatewayProvider(gateway, {
+    needsReasoning: true,
+    latencySensitive: false,
+    requested: chosen ?? null,
+    predicted,
+    configured: predicted.configured,
+  });
 }
 
 export function listProviderNames(): ProviderName[] {

@@ -1427,3 +1427,116 @@ export type GraphNode = typeof graphNodes.$inferSelect;
 export type NodeVersion = typeof nodeVersions.$inferSelect;
 export type GraphEdge = typeof graphEdges.$inferSelect;
 export type StaleMark = typeof staleMarks.$inferSelect;
+
+/* -------------------------------------------------------------------------- */
+/*                          Model Gateway (P1-B)                              */
+/* -------------------------------------------------------------------------- */
+/*
+ * Durable records of every model call. `usage_tracking` stays the quota ledger
+ * (what counts against a plan); these tables are the call-level truth behind it:
+ * one row per provider attempt, one per quota reservation, one per tool call.
+ */
+
+export const aiUsageEvents = pgTable(
+  'ai_usage_events',
+  {
+    id: id(),
+    /** Groups the attempts of one logical gateway call. */
+    callId: text('call_id').notNull(),
+    attempt: integer('attempt').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    taskId: text('task_id'),
+    jobId: text('job_id'),
+    runId: text('run_id'),
+    purpose: varchar('purpose', { length: 64 }).notNull(),
+    /** generate | stream | structured | tools | embed */
+    kind: varchar('kind', { length: 16 }).notNull(),
+    provider: varchar('provider', { length: 16 }).notNull(),
+    model: varchar('model', { length: 100 }).notNull(),
+    modelClass: varchar('model_class', { length: 16 }).notNull(),
+    /** succeeded | failed | cancelled */
+    status: varchar('status', { length: 16 }).notNull(),
+    errorClass: varchar('error_class', { length: 32 }),
+    finishReason: varchar('finish_reason', { length: 32 }),
+    inputTokens: integer('input_tokens').default(0).notNull(),
+    outputTokens: integer('output_tokens').default(0).notNull(),
+    cacheReadTokens: integer('cache_read_tokens').default(0).notNull(),
+    cacheWriteTokens: integer('cache_write_tokens').default(0).notNull(),
+    totalTokens: integer('total_tokens').default(0).notNull(),
+    usageEstimated: boolean('usage_estimated').default(false).notNull(),
+    costMicroUsd: integer('cost_micro_usd').default(0).notNull(),
+    currency: varchar('currency', { length: 3 }).default('USD').notNull(),
+    latencyMs: integer('latency_ms').default(0).notNull(),
+    retryCount: integer('retry_count').default(0).notNull(),
+    routing: jsonb('routing').$type<Record<string, unknown>>(),
+    reservationId: text('reservation_id'),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index('ai_usage_events_user_idx').on(table.userId, table.createdAt),
+    index('ai_usage_events_call_idx').on(table.callId),
+    index('ai_usage_events_project_idx').on(table.projectId),
+  ],
+);
+
+export const aiQuotaReservations = pgTable(
+  'ai_quota_reservations',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    periodKey: varchar('period_key', { length: 7 }).notNull(),
+    /** Unique per user: a retried step reserves once. */
+    idempotencyKey: varchar('idempotency_key', { length: 200 }).notNull(),
+    requests: integer('requests').default(0).notNull(),
+    words: integer('words').default(0).notNull(),
+    /** reserved | committed | released */
+    status: varchar('status', { length: 16 }).default('reserved').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    settledAt: timestamp('settled_at', { withTimezone: true, mode: 'date' }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex('ai_quota_reservations_key').on(table.userId, table.idempotencyKey),
+    index('ai_quota_reservations_open_idx').on(table.userId, table.periodKey, table.status),
+  ],
+);
+
+export const aiToolCalls = pgTable(
+  'ai_tool_calls',
+  {
+    id: id(),
+    callId: text('call_id').notNull(),
+    /** The provider's id for the call, echoed back with the result. */
+    toolCallId: varchar('tool_call_id', { length: 200 }).notNull(),
+    toolName: varchar('tool_name', { length: 64 }).notNull(),
+    /** Validated arguments; null when rejected. */
+    arguments: jsonb('arguments').$type<Record<string, unknown>>(),
+    /** What the model sent, kept only for rejected calls (truncated). */
+    rawArguments: text('raw_arguments'),
+    /** validated | rejected | succeeded | failed */
+    status: varchar('status', { length: 16 }).notNull(),
+    error: text('error'),
+    resultSummary: jsonb('result_summary').$type<Record<string, unknown>>(),
+    latencyMs: integer('latency_ms'),
+    provider: varchar('provider', { length: 16 }).notNull(),
+    model: varchar('model', { length: 100 }).notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'set null' }),
+    runId: text('run_id'),
+    taskId: text('task_id'),
+    createdAt: createdAt(),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [index('ai_tool_calls_call_idx').on(table.callId), index('ai_tool_calls_user_idx').on(table.userId, table.createdAt)],
+);
+
+export type AIUsageEvent = typeof aiUsageEvents.$inferSelect;
+export type AIQuotaReservation = typeof aiQuotaReservations.$inferSelect;
+export type AIToolCall = typeof aiToolCalls.$inferSelect;

@@ -70,6 +70,24 @@ export interface AIRequest {
    * provider's default alone.
    */
   reasoning?: boolean;
+  /**
+   * How the call counts against the plan (P1-B): a user-visible generation is
+   * one request; an internal step (classification, planning, a continuation
+   * round) is metered but not counted as a request. Default true.
+   */
+  countsAsRequest?: boolean;
+  /** A later round of a call already admitted (long-form rounds after the first). */
+  continuation?: boolean;
+  /** Words the call is expected to produce, for the quota reservation. */
+  estimatedWords?: number;
+  /** Makes the reservation idempotent across retries of the same step. */
+  idempotencyKey?: string;
+  /** Cancels the call (a disconnected client, a cancelled task). */
+  signal?: AbortSignal;
+  /** A long-form round, which may take longer than an ordinary generation. */
+  longForm?: boolean;
+  /** The project this call is for (metered, and authorised against the user's project role). */
+  projectId?: string | null;
 }
 
 export interface AIResult {

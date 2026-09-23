@@ -7,7 +7,8 @@ Each step gets a section when it is merged.
 | Step | Status | PR |
 |---|---|---|
 | P1.0 Security hardening | ✅ CI green | [#29](https://github.com/ameralqudah/academic-ai/pull/29) |
-| P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`); tests green locally | follows #29 |
+| P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`) | [#30](https://github.com/ameralqudah/academic-ai/pull/30) |
+| P1-B Model Gateway | ✅ implemented (`P1B_PLAN.md`, `P1B_REPORT.md`); all suites green locally; in review | — |
 
 ---
 
@@ -118,3 +119,27 @@ The fixture project (37 nodes, 48 edges) covers design, instrument, data, analys
 - **PostgreSQL RLS is deferred.** Isolation is enforced in the service: every query is scoped by project, and there are 6 isolation tests. RLS needs the project and user set per transaction (`SET LOCAL`), which interacts with the connection poolers used in production. It will be added together with the run engine (P1-D), where every agent write goes through one transaction boundary.
 - **The full Impact Report is not stored as a document.** Its hash is stored on the node version, and its items are stored as the stale marks, with their paths.
 - **IDs** stay random UUIDs as text, like the rest of the schema (UUIDv7 would sort by time, but it would be the only exception).
+
+---
+
+## P1-B Model Gateway
+
+Full report: `docs/phase1/P1B_REPORT.md`. Plan and audit: `docs/phase1/P1B_PLAN.md`.
+
+- **One path to a model.** `src/server/ai/gateway/` is the only code that talks to a provider. The Anthropic, OpenAI and Google adapters use raw `fetch`, native tool calling and native structured output. All 22 model-calling paths moved there through an `AIProvider` facade (strangler). The old providers, `resilient-provider` and every stacked failover layer were removed. A smoke gate fails the build on any path around the gateway.
+- **Entitlement inside the gateway.**
+  - The plan is looked up from the user id on every call, so a worker cannot lose it.
+  - A call with no user in scope, or whose plan cannot be resolved, is refused.
+  - Failover never goes above the plan or above the class first chosen, and never switches provider when the user chose a model.
+  - Every routing decision is logged and stored.
+- **Quota.**
+  - Every call reserves under a per-user advisory lock (concurrency-safe, idempotent, expires after 15 minutes, released by the reaper).
+  - The ledger is still `usage_tracking`.
+  - Task-path generations now count (G-4). Internal steps are metered but not counted, and are refused on a used-up plan.
+- **Metering.** One `ai_usage_events` row per attempt, including failed and cancelled ones, with cost at the model that served.
+- **Tool calls.** Tool calls are validated, checked against the run's permissions and recorded in `ai_tool_calls`. Tools are projected from the existing capability registry; no second registry was created.
+- **Resilience.** Timeouts per kind, at most 3 attempts, and classified errors (only transient classes are retried). Streams are cancelled on client disconnect.
+- **Migration:** `0012_p1b_model_gateway`, additive (3 tables).
+- **Final review:** a free user on a premium-only deployment is refused ("no eligible model for this plan", never served premium). Output tokens are capped per plan by the gateway (free 8,192 · paid 32,768 · admin 64,000), above every current call site's request.
+- **Tests:** gateway unit (87) and database (37) suites, both in CI, with mock providers only. Mutation checks cover the entitlement filter, the failover class filter, the retry guard, the reservation lock, the word check and the project check.
+- **Deferred:** RLS on the new tables (P1-D); moving the text parsers for titles, evidence and extraction to structured output; embedding call sites (P1-G); the tool registry and policy engine (P1-C/D).

@@ -4,14 +4,13 @@ import { inspectOutput, type GuardrailResult } from '@/ai/guardrails';
 import { toolPrompt } from '@/ai/prompts/tools';
 import { requirementsFor } from '@/server/ai/model-requirements';
 import { selectModel } from '@/server/ai/model-router';
-import { AIProviderError, type ProjectContext } from '@/ai/types';
+import type { ProjectContext } from '@/ai/types';
 import type { ToolKey } from '@/config/research';
-import { logger } from '@/lib/logger';
 import { countWords } from '@/lib/text';
 import { AppError } from '@/server/http/errors';
 
 import { getProjectWithSections } from './project.service';
-import { assertCanUseAI, assertToolAllowed, recordAIUsage } from './usage.service';
+import { assertCanUseAI, assertToolAllowed, recordSimple } from './usage.service';
 
 export interface ToolRunResult {
   toolKey: ToolKey;
@@ -45,46 +44,27 @@ export async function runTool(input: {
     locale = project.language === 'AR' ? 'ar' : 'en';
   }
 
-  try {
-    const result = await provider.complete({
-      task: `tool.${input.toolKey}`,
-      locale,
-      system: toolPrompt(input.toolKey, input.options ?? {}, context),
-      messages: [{ role: 'user', content: input.text }],
-      maxTokens: 4000,
-      temperature: input.toolKey === 'translator' ? 0.3 : 0.6,
-    });
+  const result = await provider.complete({
+    task: `tool.${input.toolKey}`,
+    locale,
+    system: toolPrompt(input.toolKey, input.options ?? {}, context),
+    messages: [{ role: 'user', content: input.text }],
+    maxTokens: 4000,
+    temperature: input.toolKey === 'translator' ? 0.3 : 0.6,
+    projectId: input.projectId ?? null,
+  });
 
-    await recordAIUsage({
-      userId: input.userId,
-      projectId: input.projectId,
-      toolKey: input.toolKey,
-      generatedWords: countWords(result.text),
-      tokensIn:
-        result.usage.tokensIn +
-        (result.usage.cacheWriteTokens ?? 0) +
-        (result.usage.cacheReadTokens ?? 0),
-      tokensOut: result.usage.tokensOut,
-      costMicroUsd: provider.estimateCostMicroUsd(result.usage),
-      provider: result.provider,
-      model: result.model,
-    });
+  /* Tokens, words, cost and the request are metered by the gateway; the tool run is this service's own count. */
+  await recordSimple(input.userId, 'TOOL_RUN', 1, input.projectId);
 
-    return {
-      toolKey: input.toolKey,
-      output: result.text,
-      wordCount: countWords(result.text),
-      // The citation assistant is the one tool whose entire output is references,
-      // so its findings always matter.
-      guardrails: inspectOutput(result.text, {
-        expectsNoStatistics: input.toolKey !== 'summarizer',
-      }),
-    };
-  } catch (error) {
-    if (error instanceof AIProviderError) {
-      logger.error('tool.provider.failed', { tool: input.toolKey, status: error.status });
-      throw AppError.aiUnavailable(error.message.slice(0, 400));
-    }
-    throw error;
-  }
+  return {
+    toolKey: input.toolKey,
+    output: result.text,
+    wordCount: countWords(result.text),
+    // The citation assistant is the one tool whose entire output is references,
+    // so its findings always matter.
+    guardrails: inspectOutput(result.text, {
+      expectsNoStatistics: input.toolKey !== 'summarizer',
+    }),
+  };
 }

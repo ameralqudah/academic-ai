@@ -1,6 +1,8 @@
 /**
- * What a step needs from a model, and which failures are worth retrying
- * elsewhere.
+ * What a step needs from a model.
+ *
+ * Which failures are retried, and where, is the Model Gateway's decision
+ * (`gateway/errors.ts`, `gateway/policy.ts`, `gateway/routing.ts`) since P1-B.
  *
  * Pure decisions, separated from the router because that imports the provider
  * registry and through it the database — and a test asking whether a literature
@@ -10,9 +12,6 @@
  * varies: a module needs one small pure function, imports the module that
  * happens to contain it, and drags everything behind it.
  */
-
-import type { PlanTier } from '@/agents/modes';
-import type { ProviderName } from '@/ai/types';
 
 import { capabilityFor } from '@/server/tasks/capabilities';
 
@@ -99,91 +98,4 @@ export function requirementsFor(input: {
      */
     latencySensitive: profile.latencySensitive ?? (capability?.timeoutMs ?? 0) < 60_000,
   };
-}
-
-
-/**
- * Whether a failure is worth trying another provider for.
- *
- * A quota, an outage or a timeout is about the provider and says nothing about
- * the request — another provider may well succeed. A refusal or a malformed
- * request would fail identically everywhere, and retrying it elsewhere spends
- * a second call to receive the same answer.
- */
-export function shouldFailOver(error: unknown): boolean {
-  const detail = error instanceof Error ? error.message : String(error);
-  const status = (error as { status?: number })?.status;
-
-  if (status === 429 || status === 503 || status === 502 || status === 504) return true;
-
-  return /quota|rate.?limit|timeout|unavailable|overloaded|ECONNRESET|ETIMEDOUT/i.test(detail);
-}
-
-/**
- * Which providers a plan may be routed to.
- *
- * The premium model is what the paid plan pays for, so a free account is
- * routed to the others whenever there is another — and a paid account gets the
- * premium model first, whatever the latency preference says. With one usable
- * provider there is nothing to choose and everyone gets it: refusing to answer
- * a free user is not a pricing strategy.
- */
-export const PREMIUM: ProviderName = 'anthropic';
-
-export function candidatesFor(
-  tier: PlanTier | undefined,
-  usable: ProviderName[],
-): { candidates: ProviderName[]; premiumFirst: boolean } {
-  if (tier === 'free') {
-    const economical = usable.filter((name) => name !== PREMIUM);
-    return { candidates: economical.length > 0 ? economical : usable, premiumFirst: false };
-  }
-
-  return {
-    candidates: usable,
-    premiumFirst: (tier === 'paid' || tier === 'admin') && usable.includes(PREMIUM),
-  };
-}
-
-/**
- * Whether the deployment's default provider has to be overridden to stay
- * inside the plan, and by what.
- *
- * `resolveProvider(null)` answers with the default — the `AI_PROVIDER` setting,
- * which is the premium model on a stock deployment — and it knows nothing about
- * the candidate list. So "there is only one candidate" must not be read as
- * "resolving nothing in particular will return it": for a free account on a
- * deployment that configures both, the one candidate is the economical model
- * and the default is the premium one.
- *
- * Returns null when the default is already the candidate, so the ordinary
- * one-provider deployment keeps resolving the way it always has — including the
- * admin's model override, which naming a provider explicitly would discard.
- */
-export function candidateOverride(
-  candidates: ProviderName[],
-  byDefault: ProviderName,
-): ProviderName | null {
-  const only = candidates[0];
-  return only && only !== byDefault ? only : null;
-}
-
-/**
- * Which model stands in for one that is overloaded, when no other provider can.
- *
- * Pure, and given the configured fallback rather than reading it, so the rule
- * can be tested without an environment.
- */
-export function siblingModel(
-  provider: string,
-  failedModel: string | undefined,
-  fallback: string,
-): string | null {
-  if (provider !== 'google') return null;
-
-  const model = fallback.trim();
-  /* The fallback itself failing has nowhere further to go. */
-  if (!model || model === failedModel) return null;
-
-  return model;
 }

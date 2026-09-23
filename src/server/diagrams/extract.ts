@@ -8,10 +8,13 @@
  * two failures this has to avoid.
  */
 
-import { requirementsFor, selectModel } from '@/server/ai/model-router';
+import { z } from 'zod';
+
+import { gateway, GatewayError, toAppError } from '@/server/ai/gateway';
+import { requirementsFor } from '@/server/ai/model-router';
+import { currentPreferredModel } from '@/server/ai/request-scope';
 import { buildContextPrompt } from '@/server/context/manager';
 import { logger } from '@/lib/logger';
-import { runCompletion } from '@/server/services/ai.service';
 
 import { parseSpec, type DiagramKind, type DiagramSpec } from './spec';
 
@@ -67,31 +70,32 @@ export async function extractDiagramSpec(input: {
     logger.warn('diagram.contextFailed', { error: String(error).slice(0, 200) });
   }
 
-  const provider = (await selectModel(requirementsFor({ capability: 'diagram.draw' }))).provider;
-
-  const result = await runCompletion({
-    userId: input.userId,
-    projectId: '',
-    provider,
-    task: 'chat',
-    locale: input.language,
-    system: [extractionPrompt(input.kind, input.language), context].filter(Boolean).join('\n\n'),
-    messages: [{ role: 'user', content: input.request }],
-    maxTokens: 2000,
-    temperature: 0,
-    json: true,
-  });
-
+  /*
+   * Native structured output through the Model Gateway (P1-B): the reply is a
+   * JSON object by construction, and `parseSpec` then checks what it means.
+   * A reply that is not an object leaves `raw` null, exactly as before.
+   */
+  const requirements = requirementsFor({ capability: 'diagram.draw' });
   let raw: unknown = null;
-  const text = result.text;
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    try {
-      raw = JSON.parse(text.slice(start, end + 1));
-    } catch {
-      raw = null;
-    }
+  try {
+    const { data } = await gateway().generateStructured(
+      {
+        purpose: 'diagram.extract',
+        system: [extractionPrompt(input.kind, input.language), context].filter(Boolean).join('\n\n'),
+        messages: [{ role: 'user', content: input.request }],
+        maxOutputTokens: 2000,
+        temperature: 0,
+        needsReasoning: requirements.needsReasoning,
+        latencySensitive: requirements.latencySensitive,
+        requested: currentPreferredModel(),
+      },
+      z.record(z.string(), z.unknown()),
+      { name: 'diagram' },
+    );
+    raw = data;
+  } catch (error) {
+    if (!(error instanceof GatewayError)) throw error;
+    if (error.errorClass !== 'schema_validation') throw toAppError(error);
   }
 
   return parseSpec(raw, { kind: input.kind, language: input.language });

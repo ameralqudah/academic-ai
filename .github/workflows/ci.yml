@@ -41,6 +41,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       - name: Smoke suite
         run: npm run test:smoke
+      - name: Model Gateway unit suite (mock providers, no network)
+        run: npm run test:gateway
       - name: Statistics suite (includes lavaan/semTools reference parity)
         run: npm run test:analysis
       - name: Knowledge providers (tolerates network outages)
@@ -81,6 +83,8 @@ jobs:
         run: npm run test:jobs
       - name: Research Graph suite
         run: npm run test:graph
+      - name: Model Gateway suite (quota, metering, routing; mock providers)
+        run: npm run test:gateway:db
 
   build-and-e2e:
     name: Production build and browser tests

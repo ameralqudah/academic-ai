@@ -8,7 +8,7 @@
 
 import { logger } from '@/lib/logger';
 import { dispatchTask } from '@/server/jobs/dispatch';
-import { runForUser, type PreferredModel } from '@/server/ai/request-scope';
+import { runForUser, withCallIds, type PreferredModel } from '@/server/ai/request-scope';
 import type { Task, TaskStep } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
@@ -203,7 +203,8 @@ export async function executeTask(taskId: string): Promise<void> {
      */
     await runForUser(
       owner.userId,
-      () => planAndRun(taskId),
+      /* Every model call inside is metered against this task (P1-B). */
+      () => withCallIds({ taskId, projectId: owner.projectId ?? null }, () => planAndRun(taskId)),
       (owner.context.chosenModel as PreferredModel | undefined) ?? null,
     );
   } catch (error) {

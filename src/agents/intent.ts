@@ -32,9 +32,11 @@
  * than a setting.
  */
 
-import { parseJsonOutput } from '@/ai/guardrails';
+import { z } from 'zod';
+
+import { gateway, GatewayError, toAppError } from '@/server/ai/gateway';
 import { requirementsFor } from '@/server/ai/model-requirements';
-import { selectModel } from '@/server/ai/model-router';
+import { currentPreferredModel } from '@/server/ai/request-scope';
 import type { AIResult } from '@/ai/types';
 import type { DatasetProfile } from '@/analysis';
 import { logger } from '@/lib/logger';
@@ -193,14 +195,21 @@ The user writes in ${(input.userLanguage ?? input.locale) === 'ar' ? 'Arabic' : 
 /*                              Classification                                */
 /* -------------------------------------------------------------------------- */
 
-interface RawIntent {
-  intent?: unknown;
-  confidence?: unknown;
-  mentionedColumns?: unknown;
-  restatement?: unknown;
-  clarifyingQuestion?: unknown;
-  searchQueries?: unknown;
-}
+/**
+ * The shape the classifier must return. Permissive on purpose where the
+ * fields are validated one by one after parsing (unknown intents, invented
+ * columns, over-long queries are all dropped there).
+ */
+const RAW_INTENT = z.object({
+  intent: z.string(),
+  confidence: z.number().optional(),
+  mentionedColumns: z.array(z.string()).optional(),
+  restatement: z.string().optional(),
+  clarifyingQuestion: z.string().nullable().optional(),
+  searchQueries: z.array(z.object({ text: z.string(), language: z.string() })).optional(),
+});
+
+type RawIntent = z.infer<typeof RAW_INTENT>;
 
 /* -------------------------------------------------------------------------- */
 /*                                 Test seam                                  */
@@ -314,49 +323,51 @@ export async function classifyIntent(input: IntentInput): Promise<IntentResult> 
    * Routed as the short, latency-sensitive classification it is. This runs on
    * every message, so the model it reaches matters more here than anywhere.
    */
-  const provider = (await selectModel(requirementsFor({ capability: 'general.answer' }))).provider;
-
+  const requirements = requirementsFor({ capability: 'general.answer' });
   const history = (input.history ?? []).slice(-6);
-  const result = await provider.complete({
-    task: 'chat',
-    locale: input.locale,
-    system: buildSystemPrompt(input),
-    messages: [...history, { role: 'user', content: input.message }],
-    // Zero temperature: the same request should classify the same way twice.
-    temperature: 0,
-    /*
-     * Generous for a reply that is four short fields.
-     *
-     * The reason is reasoning models. Gemini and the newer OpenAI models spend
-     * output tokens on internal thinking before writing anything, and that
-     * spending counts against the same budget. At 400 the budget was exhausted
-     * before the JSON began, the response came back empty, and every request in
-     * production was answered with "I did not understand" — a failure that no
-     * amount of testing against a stubbed classifier could have found.
-     */
-    maxTokens: 2048,
-    json: true,
-  });
 
-  const parsed = parseJsonOutput<RawIntent>(result.text);
-
-  if (!parsed) {
-    /*
-     * Logged with enough detail to tell the three failure modes apart: an empty
-     * response (a budget or safety-filter problem), a non-JSON response (a
-     * provider that ignored the format request), and a truncated one. Without
-     * these fields all three look identical from the outside, which is what made
-     * the original failure so hard to diagnose.
-     */
-    logger.warn('agent.intent.unparsable', {
-      provider: result.provider,
-      model: result.model,
-      stopReason: result.stopReason,
-      textLength: result.text.length,
-      tokensOut: result.usage.tokensOut,
-      sample: result.text.slice(0, 300),
-    });
-    return unclear(input, result.usage, 'The classifier returned nothing usable.');
+  /*
+   * Native structured output through the Model Gateway (P1-B), validated
+   * against a schema before anything reads it — where the reply used to be
+   * parsed out of free text. The fields are still checked one by one below:
+   * the schema guarantees the shape, the checks guarantee the meaning.
+   *
+   * Classification is an internal step: metered, not counted as a request.
+   */
+  let parsed: RawIntent;
+  let result: { usage: { tokensIn: number; tokensOut: number } };
+  try {
+    const structured = await gateway().generateStructured(
+      {
+        purpose: 'intent.classify',
+        system: buildSystemPrompt(input),
+        messages: [...history, { role: 'user', content: input.message }],
+        // Zero temperature: the same request should classify the same way twice.
+        temperature: 0,
+        /*
+         * Generous for a reply that is four short fields: reasoning models spend
+         * output tokens thinking before they write, against the same budget. At
+         * 400 the budget ran out before the JSON began.
+         */
+        maxOutputTokens: 2048,
+        reasoning: false,
+        needsReasoning: requirements.needsReasoning,
+        latencySensitive: requirements.latencySensitive,
+        requested: currentPreferredModel(),
+        countsAsRequest: false,
+      },
+      RAW_INTENT,
+      { name: 'intent' },
+    );
+    parsed = structured.data;
+    result = { usage: { tokensIn: structured.response.usage.inputTokens, tokensOut: structured.response.usage.outputTokens } };
+  } catch (error) {
+    if (error instanceof GatewayError && error.errorClass === 'schema_validation') {
+      logger.warn('agent.intent.unparsable', { detail: error.detail?.slice(0, 300) });
+      return unclear(input, { tokensIn: 0, tokensOut: 0 }, 'The classifier returned nothing usable.');
+    }
+    if (error instanceof GatewayError) throw toAppError(error);
+    throw error;
   }
 
   const intent = typeof parsed.intent === 'string' ? parsed.intent : '';

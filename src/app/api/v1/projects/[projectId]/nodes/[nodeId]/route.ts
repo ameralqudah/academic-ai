@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { graphAccess } from '@/server/graph/access';
+import { GRAPH_READ_LIMIT, GRAPH_WRITE_LIMIT, flagged } from '@/server/graph/access';
 import { getNode, updateNode } from '@/server/graph/service';
 import { ok, withApi } from '@/server/http/api';
 import { AppError } from '@/server/http/errors';
@@ -19,21 +19,25 @@ const updateSchema = z.object({
 
 type Params = { projectId: string; nodeId: string };
 
-export const GET = withApi<undefined, Params>({}, async ({ user, params }) => {
-  await graphAccess(params.projectId, user.id, 'VIEWER');
-  return ok(await getNode(params.projectId, params.nodeId));
-});
+/** The node, its open marks, and whether it can be presented as current (`currency`). */
+export const GET = flagged(
+  withApi<undefined, Params>({ rateLimit: GRAPH_READ_LIMIT }, async ({ user, params }) => {
+    const node = await getNode(params.projectId, { userId: user.id }, params.nodeId);
+    return ok(node, { headers: { ETag: `"${node.currentVersion}"` } });
+  }),
+);
 
-export const PATCH = withApi<z.infer<typeof updateSchema>, Params>(
-  { schema: updateSchema },
-  async ({ request, user, params, body }) => {
-    await graphAccess(params.projectId, user.id, 'EDITOR');
-    const header = request.headers.get('if-match')?.replace(/"/g, '').trim();
-    const expectedVersion = body.expectedVersion ?? (header && /^\d+$/.test(header) ? Number(header) : undefined);
-    if (!expectedVersion) {
-      throw AppError.validation({ expectedVersion: 'The version being edited is required (or an If-Match header).' });
-    }
-    const result = await updateNode(params.projectId, params.nodeId, { userId: user.id }, { ...body, expectedVersion });
-    return ok(result);
-  },
+export const PATCH = flagged(
+  withApi<z.infer<typeof updateSchema>, Params>(
+    { schema: updateSchema, rateLimit: GRAPH_WRITE_LIMIT },
+    async ({ request, user, params, body }) => {
+      const header = request.headers.get('if-match')?.replace(/"/g, '').trim();
+      const expectedVersion = body.expectedVersion ?? (header && /^\d+$/.test(header) ? Number(header) : undefined);
+      if (!expectedVersion) {
+        throw AppError.validation({ expectedVersion: 'The version being edited is required (or an If-Match header).' });
+      }
+      const result = await updateNode(params.projectId, { userId: user.id }, params.nodeId, { ...body, expectedVersion });
+      return ok(result);
+    },
+  ),
 );

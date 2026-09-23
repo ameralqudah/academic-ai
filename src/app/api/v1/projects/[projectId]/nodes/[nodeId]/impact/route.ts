@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { graphAccess } from '@/server/graph/access';
+import { GRAPH_READ_LIMIT, flagged } from '@/server/graph/access';
 import { previewUpdate } from '@/server/graph/service';
 import { ok, withApi } from '@/server/http/api';
 
@@ -9,7 +9,8 @@ const schema = z.object({ data: z.record(z.string(), z.unknown()) });
 
 type Params = { projectId: string; nodeId: string };
 
-export const POST = withApi<z.infer<typeof schema>, Params>({ schema }, async ({ user, params, body }) => {
-  await graphAccess(params.projectId, user.id, 'VIEWER');
-  return ok(await previewUpdate(params.projectId, params.nodeId, body.data));
-});
+export const POST = flagged(
+  withApi<z.infer<typeof schema>, Params>({ schema, rateLimit: GRAPH_READ_LIMIT }, async ({ user, params, body }) =>
+    ok(await previewUpdate(params.projectId, { userId: user.id }, params.nodeId, body.data)),
+  ),
+);

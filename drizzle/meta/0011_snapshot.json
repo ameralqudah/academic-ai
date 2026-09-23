@@ -1,5 +1,5 @@
 {
-  "id": "d68fccb2-fb42-4b77-a635-95ace210dca4",
+  "id": "738d3e92-f3f5-46fc-ae45-80830d365d52",
   "prevId": "dbb14395-81a8-4b32-b421-cddb8058a0ff",
   "version": "7",
   "dialect": "postgresql",
@@ -1710,6 +1710,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "origin": {
+          "name": "origin",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'user'"
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1797,32 +1804,6 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "graph_edges_src_id_graph_nodes_id_fk": {
-          "name": "graph_edges_src_id_graph_nodes_id_fk",
-          "tableFrom": "graph_edges",
-          "tableTo": "graph_nodes",
-          "columnsFrom": [
-            "src_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "graph_edges_dst_id_graph_nodes_id_fk": {
-          "name": "graph_edges_dst_id_graph_nodes_id_fk",
-          "tableFrom": "graph_edges",
-          "tableTo": "graph_nodes",
-          "columnsFrom": [
-            "dst_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
         "graph_edges_created_by_user_id_users_id_fk": {
           "name": "graph_edges_created_by_user_id_users_id_fk",
           "tableFrom": "graph_edges",
@@ -1834,6 +1815,36 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "graph_edges_src_fk": {
+          "name": "graph_edges_src_fk",
+          "tableFrom": "graph_edges",
+          "tableTo": "graph_nodes",
+          "columnsFrom": [
+            "project_id",
+            "src_id"
+          ],
+          "columnsTo": [
+            "project_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "graph_edges_dst_fk": {
+          "name": "graph_edges_dst_fk",
+          "tableFrom": "graph_edges",
+          "tableTo": "graph_nodes",
+          "columnsFrom": [
+            "project_id",
+            "dst_id"
+          ],
+          "columnsTo": [
+            "project_id",
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -1890,6 +1901,18 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'active'"
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "frozen_at": {
+          "name": "frozen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_by_user_id": {
           "name": "created_by_user_id",
@@ -1952,6 +1975,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "graph_nodes_project_id_unique": {
+          "name": "graph_nodes_project_id_unique",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1992,6 +2036,12 @@
       "name": "node_versions",
       "schema": "",
       "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "node_id": {
           "name": "node_id",
           "type": "text",
@@ -2056,19 +2106,6 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "node_versions_node_id_graph_nodes_id_fk": {
-          "name": "node_versions_node_id_graph_nodes_id_fk",
-          "tableFrom": "node_versions",
-          "tableTo": "graph_nodes",
-          "columnsFrom": [
-            "node_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
         "node_versions_created_by_user_id_users_id_fk": {
           "name": "node_versions_created_by_user_id_users_id_fk",
           "tableFrom": "node_versions",
@@ -2080,6 +2117,21 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "node_versions_node_fk": {
+          "name": "node_versions_node_fk",
+          "tableFrom": "node_versions",
+          "tableTo": "graph_nodes",
+          "columnsFrom": [
+            "project_id",
+            "node_id"
+          ],
+          "columnsTo": [
+            "project_id",
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -3156,6 +3208,12 @@
       "name": "stale_marks",
       "schema": "",
       "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "node_id": {
           "name": "node_id",
           "type": "text",
@@ -3170,6 +3228,19 @@
         },
         "cause_version": {
           "name": "cause_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'stale'"
+        },
+        "node_version": {
+          "name": "node_version",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
@@ -3239,35 +3310,30 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "stale_marks_project_idx": {
+          "name": "stale_marks_project_idx",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "resolved_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
-        "stale_marks_node_id_graph_nodes_id_fk": {
-          "name": "stale_marks_node_id_graph_nodes_id_fk",
-          "tableFrom": "stale_marks",
-          "tableTo": "graph_nodes",
-          "columnsFrom": [
-            "node_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "stale_marks_cause_node_id_graph_nodes_id_fk": {
-          "name": "stale_marks_cause_node_id_graph_nodes_id_fk",
-          "tableFrom": "stale_marks",
-          "tableTo": "graph_nodes",
-          "columnsFrom": [
-            "cause_node_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
         "stale_marks_resolved_by_user_id_users_id_fk": {
           "name": "stale_marks_resolved_by_user_id_users_id_fk",
           "tableFrom": "stale_marks",
@@ -3280,15 +3346,46 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "stale_marks_node_fk": {
+          "name": "stale_marks_node_fk",
+          "tableFrom": "stale_marks",
+          "tableTo": "graph_nodes",
+          "columnsFrom": [
+            "project_id",
+            "node_id"
+          ],
+          "columnsTo": [
+            "project_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "stale_marks_cause_fk": {
+          "name": "stale_marks_cause_fk",
+          "tableFrom": "stale_marks",
+          "tableTo": "graph_nodes",
+          "columnsFrom": [
+            "project_id",
+            "cause_node_id"
+          ],
+          "columnsTo": [
+            "project_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "stale_marks_node_id_cause_node_id_cause_version_pk": {
-          "name": "stale_marks_node_id_cause_node_id_cause_version_pk",
+        "stale_marks_node_id_cause_node_id_cause_version_kind_pk": {
+          "name": "stale_marks_node_id_cause_node_id_cause_version_kind_pk",
           "columns": [
             "node_id",
             "cause_node_id",
-            "cause_version"
+            "cause_version",
+            "kind"
           ]
         }
       },

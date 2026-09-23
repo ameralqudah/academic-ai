@@ -9,9 +9,10 @@ import { createProject, registerAndLogin } from './helpers';
  * resolve, trace.
  */
 test.describe('research graph API', () => {
-  test('requires a session', async ({ request }) => {
+  test('does not exist while the flag is off, and requires a session when on', async ({ request }) => {
     const response = await request.get('/api/v1/projects/any/nodes');
-    expect(response.status()).toBe(401);
+    // The flag is checked before authentication, so a disabled API reveals nothing.
+    expect(response.status()).toBe(process.env.FF_GRAPH === 'true' ? 401 : 404);
   });
 
   test('follows the feature flag', async ({ page }) => {
@@ -59,11 +60,27 @@ test.describe('research graph API', () => {
     const conflict = await api.patch(`${base}/nodes/${construct.id}`, { data: { data: { name: 'x' }, expectedVersion: 1 } });
     expect(conflict.status()).toBe(409);
 
-    const stale = (await (await api.get(`${base}/stale`)).json()).data as { nodeId: string; severity: string }[];
+    const stale = (await (await api.get(`${base}/stale`)).json()).data as { nodeId: string; severity: string; causeNodeId: string; causeVersion: number; kind: string }[];
     expect(stale.map((mark) => mark.severity).sort()).toEqual(['invalidates', 'review']);
 
-    expect((await api.post(`${base}/stale/${element.id}/resolve`, { data: { resolution: 'accepted' } })).status()).toBe(200);
+    // Resolving must name exactly the open marks; an empty list is refused.
+    const elementMarks = stale
+      .filter((mark) => mark.nodeId === element.id)
+      .map(({ causeNodeId, causeVersion, kind }) => ({ causeNodeId, causeVersion, kind }));
+    const unnamed = await api.post(`${base}/stale/${element.id}/resolve`, { data: { resolution: 'accepted', marks: [] } });
+    expect(unnamed.status()).toBe(409);
+    expect((await unnamed.json()).error.details.reason).toBe('marks_changed');
+    expect((await api.post(`${base}/stale/${element.id}/resolve`, { data: { resolution: 'accepted', marks: elementMarks } })).status()).toBe(200);
     expect(((await (await api.get(`${base}/stale`)).json()).data as unknown[]).length).toBe(1);
+
+    // Provenance over HTTP: a typed-in value is manual; only the engine links values to runs.
+    const typed = await create('result_value', { stat: 'beta', value: 0.3 });
+    expect((await (await api.get(`${base}/nodes/${typed.id}`)).json()).data.provenance).toBe('manual');
+    expect((await api.post(`${base}/nodes`, { data: { type: 'analysis_run', data: {} } })).status()).toBe(403);
+    const claim = await create('claim', { text: 'β = .30' });
+    expect((await api.post(`${base}/edges`, { data: { srcId: claim.id, rel: 'reports', dstId: typed.id } })).status()).toBe(201);
+    const currency = (await (await api.get(`${base}/nodes/${claim.id}/currency`)).json()).data;
+    expect(currency.verification).toBe('manual');
 
     const trace = (await (await api.get(`${base}/nodes/${block.id}/trace?direction=up`)).json()).data;
     expect(trace.nodes.map((node: { id: string }) => node.id)).toContain(construct.id);

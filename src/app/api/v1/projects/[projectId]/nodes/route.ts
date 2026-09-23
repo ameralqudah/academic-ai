@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { graphAccess } from '@/server/graph/access';
+import { GRAPH_READ_LIMIT, GRAPH_WRITE_LIMIT, flagged } from '@/server/graph/access';
 import { createNode, listNodes } from '@/server/graph/service';
 import { NODE_TYPES } from '@/server/graph/types';
 import { ok, withApi } from '@/server/http/api';
@@ -20,17 +20,19 @@ const listQuery = z.object({
 
 type Params = { projectId: string };
 
-export const GET = withApi<undefined, Params>({}, async ({ request, user, params }) => {
-  await graphAccess(params.projectId, user.id, 'VIEWER');
-  const query = listQuery.parse(Object.fromEntries(new URL(request.url).searchParams));
-  return ok(await listNodes(params.projectId, query));
-});
+export const GET = flagged(
+  withApi<undefined, Params>({ rateLimit: GRAPH_READ_LIMIT }, async ({ request, user, params }) => {
+    const query = listQuery.parse(Object.fromEntries(new URL(request.url).searchParams));
+    return ok(await listNodes(params.projectId, { userId: user.id }, query));
+  }),
+);
 
-export const POST = withApi<z.infer<typeof createSchema>, Params>(
-  { schema: createSchema },
-  async ({ user, params, body }) => {
-    await graphAccess(params.projectId, user.id, 'EDITOR');
-    const node = await createNode(params.projectId, { userId: user.id }, body);
-    return ok(node, { status: 201 });
-  },
+export const POST = flagged(
+  withApi<z.infer<typeof createSchema>, Params>(
+    { schema: createSchema, rateLimit: GRAPH_WRITE_LIMIT },
+    async ({ user, params, body }) => {
+      const node = await createNode(params.projectId, { userId: user.id }, body);
+      return ok(node, { status: 201 });
+    },
+  ),
 );

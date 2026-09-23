@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { graphAccess } from '@/server/graph/access';
+import { GRAPH_WRITE_LIMIT, flagged } from '@/server/graph/access';
 import { supersede } from '@/server/graph/service';
 import { ok, withApi } from '@/server/http/api';
 
@@ -11,14 +11,8 @@ const schema = z.object({
 
 type Params = { projectId: string; nodeId: string };
 
-export const POST = withApi<z.infer<typeof schema>, Params>({ schema }, async ({ user, params, body }) => {
-  await graphAccess(params.projectId, user.id, 'EDITOR');
-  const report = await supersede(
-    params.projectId,
-    params.nodeId,
-    body.replacementId,
-    { userId: user.id },
-    body.impactAcknowledged,
-  );
-  return ok(report);
-});
+export const POST = flagged(
+  withApi<z.infer<typeof schema>, Params>({ schema, rateLimit: GRAPH_WRITE_LIMIT }, async ({ user, params, body }) =>
+    ok(await supersede(params.projectId, { userId: user.id }, params.nodeId, body.replacementId, body.impactAcknowledged)),
+  ),
+);

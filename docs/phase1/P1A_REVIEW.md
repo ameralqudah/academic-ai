@@ -1,5 +1,7 @@
 # P1-A Research Graph: formal review
 
+> **Status:** the findings F-1 to F-13, F-16, F-17, F-20 and F-24 were fixed in P1-A.1, and F-11's relations were added; see `docs/phase1/P1A_HARDENING_REPORT.md`. The gap tests described in §7 now live in `test:graph` (in CI), and `scripts/graph-gaps.ts` was removed.
+
 **Date:** 2026-09-23 · **Scope:** commits `4800f33` and `e6ba872` (local branch, **not pushed, not merged**). The code reviewed is `src/server/graph/*`, `src/app/api/v1/projects/[projectId]/*`, migration `0011_p1a_research_graph` and the graph tables in `src/server/db/schema.ts`.
 **Measured against:** `docs/architecture/TARGET_ARCHITECTURE.md` §C, §G, R1–R10, and the goal of a research platform whose numbers and claims can be trusted.
 **Method:** code reading, then one executable test per suspected gap. `npm run test:graph:gaps` (`scripts/graph-gaps.ts`) asserts the behaviour the platform needs. **All 24 checks fail today, confirming 12 findings (F-1 to F-12).** The script is deliberately not in CI while the gaps are open. As each finding is fixed, its checks move into `test:graph`, which is in CI. Findings F-13 to F-24 are design findings with no test.

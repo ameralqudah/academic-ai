@@ -7,7 +7,7 @@ Each step gets a section when it is merged.
 | Step | Status | PR |
 |---|---|---|
 | P1.0 Security hardening | ✅ CI green | [#29](https://github.com/ameralqudah/academic-ai/pull/29) |
-| P1-A Research Graph core | ✅ tests green locally | follows #29 |
+| P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`); tests green locally | follows #29 |
 
 ---
 
@@ -26,6 +26,12 @@ The audit's security findings that were not among the 13 P0 items. Details are i
 
 ## P1-A Research Graph core
 
+> **Read with P1-A.1.** The formal review (`docs/phase1/P1A_REVIEW.md`) found 24 issues, and the hardening step fixed the ones that had to be fixed before exposure (`docs/phase1/P1A_HARDENING_REPORT.md`). Where this section and the hardening report differ, the hardening report is current. The main differences:
+> - supersede now **invalidates** what used the old object;
+> - pins no longer hide a dependent from later changes;
+> - runs and computed results are written only by the engine and are immutable;
+> - there are 51 relations, not 41.
+
 **Goal:** everything later in Phase 1 writes into one graph per project, and a change to an upstream object reports, before it is saved, what downstream work it affects (R6).
 
 ### What was built
@@ -34,7 +40,7 @@ The audit's security findings that were not among the 13 P0 items. Details are i
 |---|---|
 | Tables `project_members`, `graph_nodes`, `node_versions`, `graph_edges`, `stale_marks` | `src/server/db/schema.ts`, migration `drizzle/0011_p1a_research_graph.sql` |
 | Node types (35, §G.1), payload schemas, field classes (cosmetic / substantive / structural), change classifier | `src/server/graph/types.ts` |
-| Edge rules: 41 relations, each with its allowed types and its severity per kind of change | `src/server/graph/rules.ts` |
+| Edge rules: 51 relations (41 in P1-A), each with its allowed types and its severity per kind of change | `src/server/graph/rules.ts` |
 | Impact engine: pure and testable; a fixture, the database or a transaction supplies the edges | `src/server/graph/impact.ts` |
 | Service: access by project role, create, update (versioned), dry-run impact, link and unlink, supersede, trace, stale list, resolve | `src/server/graph/service.ts` |
 | API behind `FF_GRAPH` (off → 404) | `src/app/api/v1/projects/[projectId]/…` |
@@ -63,8 +69,8 @@ The audit's security findings that were not among the 13 P0 items. Details are i
 3. **Walk.** The walk goes backwards over dependency edges, and each edge rule gives a severity (`info`, `review` or `invalidates`) for the kind of change.
 4. **Propagation.** Only `invalidates` propagates: an invalid run makes its results, and the text reporting them, invalid. `review` asks a person to decide about that one object; if they then change it, that change is analysed in turn. This keeps a definition tweak from flagging the whole project. There are two exceptions:
    - **Containers** (a questionnaire and its items, a model and its elements) pass a change through, because a change to a part is a change to the whole.
-   - **Supersede** asks for review all the way down. When a newer run exists, every block reporting the old one says so.
-5. **Pinning.** Edges are pinned to the version of their target. Once an object is stale, later changes to the same target do not flag it again. **Accepting** a stale mark re-pins it to the current versions.
+   - **Supersede** (P1-A.1: now *invalidates*) reaches everything that used the old object: the runs on replaced data, their results, and every block reporting them.
+5. **Pinning.** Edges are pinned to the version of their target. (P1-A.1: pins no longer skip anything. Every dependency is followed, and a dependent that is already stale is flagged again and labelled as such. Pins move forward when a change does not affect them and on every resolution. A run's pins record the versions it used and never move.)
 6. **Acknowledgement (R6).** A change with any `review` or `invalidates` consequence is refused with `428 IMPACT_ACK_REQUIRED`, and the refusal carries the Impact Report. The client re-sends with `impactAcknowledged: <report hash>`. The hash covers the node, the version, the proposed payload and the consequences, so an acknowledgement is valid only for the exact report that was shown. The hash is stored on the new version for audit.
 7. **Transaction.** The update, the new version, the stale marks and the status changes are written in one transaction. The node row is locked, and an edit made against an old version is refused with 409.
 
@@ -81,10 +87,10 @@ The fixture project (37 nodes, 48 edges) covers design, instrument, data, analys
 | Item reverse-coded | column, dataset versions, cleaning step, run, results, reporting block | construct measurement, questionnaire, Methods block, cross-reference | — |
 | Item wording | — | construct, questionnaire, column binding, Methods block | dataset version (wording drift) |
 | Dataset column recode | dataset versions, cleaning step, run, results, reporting block | cross-reference | — |
-| Dataset version content | run, results, reporting block | cross-reference | — |
-| New dataset version (supersede) | — | runs on the old version, their results, reporting blocks | — |
+| Dataset version content | P1-A.1: refused. Content is immutable; create a new version and supersede | | |
+| New dataset version (supersede) | P1-A.1: runs on the old version, their results, reporting claims and blocks | section, abstract, cross-references | submission |
 | Analysis spec | run, results, reporting block | cross-reference | — |
-| Result value corrected / newer run | reporting block / — | — / old values, their tables and reporting blocks | — |
+| Result value corrected / newer run | P1-A.1: correcting in place is refused; a re-run invalidates the old values, their tables and reporting text | | |
 | Citation contradicted | citing block | hypothesis grounded in it | — |
 | Source retracted | citation, citing block | hypothesis | — |
 | Manuscript section | — | abstract, cross-references, reviewer response | submission snapshot |

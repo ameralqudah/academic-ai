@@ -40,6 +40,7 @@ export const NODE_TYPES = [
   'manuscript',
   'section',
   'block',
+  'claim',
   'journal_target',
   'submission',
   'reviewer_comment',
@@ -182,6 +183,37 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       text: z.string().max(400_000).optional(),
     })
     .strict(),
+  conceptual_model: z
+    .object({
+      ...common,
+      name: shortText.min(1),
+      /** The estimation family the model is specified for. */
+      type: z.enum(['pls_sem', 'cb_sem', 'regression', 'path', 'other']).optional(),
+      description: text.optional(),
+    })
+    .strict(),
+  model_element: z
+    .object({
+      ...common,
+      name: shortText.optional(),
+      /** latent/observed/composite variables, or a structural relation between them. */
+      kind: z.enum(['latent', 'observed', 'composite', 'path', 'covariance']).default('latent'),
+      /** For relations: what the path asserts. */
+      role: z.enum(['direct', 'moderation', 'mediation', 'interaction', 'control', 'covariance']).optional(),
+      /** For latent variables: how the indicators relate to it. */
+      measurement: z.enum(['reflective', 'formative', 'single_item']).optional(),
+      order: z.enum(['first', 'higher']).optional(),
+    })
+    .strict(),
+  claim: z
+    .object({
+      ...common,
+      /** The statement as it appears in the text. */
+      text: z.string().trim().min(1).max(5_000),
+      /** Character offsets of the claim inside its block, when known. */
+      span: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).optional(),
+    })
+    .strict(),
   block: z
     .object({
       ...common,
@@ -218,7 +250,43 @@ const FIELD_CLASSES: Partial<Record<NodeType, { cosmetic?: string[]; structural?
   citation: { structural: ['support'] },
   section: { cosmetic: ['title'] },
   block: { cosmetic: ['role'] },
+  conceptual_model: { cosmetic: ['name', 'description'], structural: ['type'] },
+  model_element: { cosmetic: ['name'], structural: ['kind', 'role', 'measurement', 'order'] },
+  claim: { cosmetic: ['span'] },
 };
+
+/**
+ * Fields that never change once written: a different value is a different
+ * object, created anew and linked with `supersedes`. A dataset version whose
+ * content changed is a new dataset version.
+ */
+export const IMMUTABLE_FIELDS: Partial<Record<NodeType, readonly string[]>> = {
+  dataset_version: ['contentHash', 'rows', 'storageKey'],
+};
+
+/** The immutable fields a proposed payload would change. */
+export function immutableFieldChanges(
+  type: NodeType,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): string[] {
+  return (IMMUTABLE_FIELDS[type] ?? []).filter(
+    (key) => before[key] !== undefined && canonicalJson(before[key]) !== canonicalJson(after[key]),
+  );
+}
+
+/** Written by the analysis engine together with their run. */
+export const ENGINE_OUTPUT_TYPES: readonly NodeType[] = ['analysis_run'];
+
+/**
+ * Statistical outputs. Created by the engine they are `computed` and
+ * immutable; typed in by a person they are `manual` and never shown as
+ * verified.
+ */
+export const RESULT_TYPES: readonly NodeType[] = ['result_value', 'result_table', 'figure'];
+
+/** Upper bound on one node's canonical payload. Text lives in blocks, data in files. */
+export const MAX_PAYLOAD_BYTES = 256 * 1024;
 
 const KIND_RANK: Record<ChangeKind, number> = { cosmetic: 1, substantive: 2, structural: 3 };
 

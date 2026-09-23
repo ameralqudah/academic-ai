@@ -45,6 +45,8 @@ jobs:
         run: npm run test:gateway
       - name: Statistics engine suite (golden references from R, committed; no R needed)
         run: npm run test:stats
+      - name: Research-run core suite (registry, policy, limits, state, hashes; no database)
+        run: npm run test:runs
       - name: Statistics suite (includes lavaan/semTools reference parity)
         run: npm run test:analysis
       - name: Knowledge providers (tolerates network outages)

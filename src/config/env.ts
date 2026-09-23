@@ -177,6 +177,22 @@ const serverSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+  /**
+   * - `FF_RUNS`: research runs — the planner, tool registry, policy, approvals
+   *   and the run API/UI (P1-D). Requires `FF_GRAPH` and a queue-backed
+   *   `JOB_RUNNER` (inline or worker); refused otherwise.
+   */
+  FF_RUNS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  /**
+   * Overrides of the research-run limits, as JSON keyed by tier
+   * (`{"free":{"maxSteps":8}}`). Optional; the defaults are in
+   * `src/server/runs/limits.ts`. Validated there: unknown keys or values
+   * outside the hard ceilings are refused at startup.
+   */
+  RUN_LIMITS: z.string().max(4000).optional(),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

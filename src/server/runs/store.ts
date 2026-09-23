@@ -1,0 +1,418 @@
+/**
+ * Reading and writing the run tables (P1-D). The only module that touches
+ * them; every statement runs under `withRunScope` (row-level security as the
+ * acting user), except the few system reads marked as such.
+ *
+ * Every state change is conditional on the state it expects, returns whether
+ * it applied, and writes a run event in the same transaction.
+ */
+
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+
+import { researchRuns, runApprovals, runEvents, runSteps, type ResearchRun, type RunApproval, type RunEvent, type RunStep } from '@/server/db/schema';
+
+import { systemDb, withRunScope, type RunTx } from './db-scope';
+import { bytesOf } from './limits';
+import { TERMINAL_RUN, type ApprovalStatus, type RunStatus, type StepStatus, type StopReason } from './state';
+
+const EVENT_BYTES = 3_500;
+
+/** Event data as stored: bounded, and never raw datasets or secrets (callers pass summaries). */
+function boundedData(data: Record<string, unknown>): Record<string, unknown> {
+  if (bytesOf(data) <= EVENT_BYTES) return data;
+  const small: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    const candidate = { ...small, [key]: typeof value === 'string' ? value.slice(0, 300) : value };
+    if (bytesOf(candidate) > EVENT_BYTES) {
+      small.truncated = true;
+      break;
+    }
+    small[key] = candidate[key];
+  }
+  return small;
+}
+
+export async function appendEvent(tx: RunTx, event: { runId: string; projectId: string; userId: string; stepId?: string | null; type: string; data?: Record<string, unknown> }): Promise<void> {
+  await tx.insert(runEvents).values({
+    runId: event.runId,
+    projectId: event.projectId,
+    userId: event.userId,
+    stepId: event.stepId ?? null,
+    type: event.type.slice(0, 40),
+    data: boundedData(event.data ?? {}),
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                    Runs                                    */
+/* -------------------------------------------------------------------------- */
+
+export interface NewRun {
+  projectId: string;
+  intent: string;
+  context: Record<string, unknown>;
+  tier: string;
+  limits: Record<string, number>;
+  idempotencyKey: string | null;
+}
+
+/**
+ * Creates a run, idempotent on (user, key), refusing when the user already has
+ * `maxActive` unfinished runs. The count and the insert are serialised per user.
+ */
+export async function createRun(userId: string, run: NewRun, maxActive: number): Promise<{ run: ResearchRun; created: boolean } | { refused: 'too_many_active' }> {
+  return withRunScope(userId, async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`research-runs:${userId}`}))`);
+    if (run.idempotencyKey) {
+      const [existing] = await tx.select().from(researchRuns).where(and(eq(researchRuns.userId, userId), eq(researchRuns.idempotencyKey, run.idempotencyKey))).limit(1);
+      if (existing) return { run: existing, created: false };
+    }
+    const active = await tx
+      .select({ id: researchRuns.id })
+      .from(researchRuns)
+      .where(and(eq(researchRuns.userId, userId), inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL'])));
+    if (active.length >= maxActive) return { refused: 'too_many_active' as const };
+    const [row] = await tx
+      .insert(researchRuns)
+      .values({ projectId: run.projectId, userId, intent: run.intent, context: run.context, tier: run.tier, limits: run.limits, idempotencyKey: run.idempotencyKey })
+      .returning();
+    await appendEvent(tx, { runId: row!.id, projectId: run.projectId, userId, type: 'run.created', data: { tier: run.tier, intentChars: run.intent.length } });
+    return { run: row!, created: true };
+  });
+}
+
+/** The run if the user may see it (RLS), in this project. */
+export async function readRun(userId: string, runId: string, projectId?: string): Promise<ResearchRun | null> {
+  return withRunScope(userId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(researchRuns)
+      .where(and(eq(researchRuns.id, runId), ...(projectId ? [eq(researchRuns.projectId, projectId)] : [])))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+export async function listRuns(userId: string, projectId: string, limit = 50): Promise<ResearchRun[]> {
+  return withRunScope(userId, (tx) => tx.select().from(researchRuns).where(eq(researchRuns.projectId, projectId)).orderBy(desc(researchRuns.createdAt)).limit(Math.min(limit, 100)));
+}
+
+export interface RunView {
+  run: ResearchRun;
+  steps: RunStep[];
+  approvals: RunApproval[];
+  events: RunEvent[];
+}
+
+export async function readRunView(userId: string, runId: string, projectId: string, eventsAfter = 0): Promise<RunView | null> {
+  return withRunScope(userId, async (tx) => {
+    const [run] = await tx.select().from(researchRuns).where(and(eq(researchRuns.id, runId), eq(researchRuns.projectId, projectId))).limit(1);
+    if (!run) return null;
+    const steps = await tx.select().from(runSteps).where(eq(runSteps.runId, runId)).orderBy(asc(runSteps.seq));
+    const approvals = await tx.select().from(runApprovals).where(eq(runApprovals.runId, runId)).orderBy(asc(runApprovals.createdAt));
+    const events = await tx.select().from(runEvents).where(and(eq(runEvents.runId, runId), gt(runEvents.id, eventsAfter))).orderBy(asc(runEvents.id)).limit(200);
+    return { run, steps, approvals, events };
+  });
+}
+
+export interface RunPatch {
+  plan?: Record<string, unknown>;
+  stopReason?: StopReason | null;
+  spent?: Record<string, number>;
+  planner?: Record<string, unknown>;
+  error?: Record<string, unknown> | null;
+  replans?: number;
+  startedAt?: Date;
+}
+
+/**
+ * Moves a run from one of `from` to `to` (conditional). A terminal state records
+ * `finished_at`; a failure records its stop reason. Returns whether it applied.
+ */
+export async function transitionRun(
+  userId: string,
+  runId: string,
+  from: RunStatus[],
+  to: RunStatus,
+  patch: RunPatch = {},
+  event?: { type: string; data?: Record<string, unknown> },
+  tx?: RunTx,
+): Promise<boolean> {
+  const work = async (t: RunTx) => {
+    const rows = await t
+      .update(researchRuns)
+      .set({
+        status: to,
+        updatedAt: new Date(),
+        ...(TERMINAL_RUN.has(to) ? { finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null } : {}),
+        ...patch,
+      })
+      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from)))
+      .returning({ id: researchRuns.id, projectId: researchRuns.projectId });
+    if (rows.length === 0) return false;
+    await appendEvent(t, { runId, projectId: rows[0]!.projectId, userId, type: event?.type ?? `run.${to.toLowerCase()}`, data: { from, to, ...(patch.stopReason ? { stopReason: patch.stopReason } : {}), ...(event?.data ?? {}) } });
+    return true;
+  };
+  return tx ? work(tx) : withRunScope(userId, work);
+}
+
+/** Updates progress fields without changing status (spent, planner metadata). */
+export async function patchRun(userId: string, runId: string, patch: Pick<RunPatch, 'spent' | 'planner'>): Promise<void> {
+  await withRunScope(userId, async (tx) => {
+    await tx.update(researchRuns).set({ ...patch, updatedAt: new Date() }).where(eq(researchRuns.id, runId));
+  });
+}
+
+/** Records a cancel request (monotonic: set once). Returns the run as it is now. */
+export async function requestCancel(userId: string, runId: string, projectId: string): Promise<ResearchRun | null> {
+  return withRunScope(userId, async (tx) => {
+    const rows = await tx
+      .update(researchRuns)
+      .set({ cancelRequestedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(researchRuns.id, runId), eq(researchRuns.projectId, projectId), isNull(researchRuns.cancelRequestedAt), inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL'])))
+      .returning();
+    if (rows[0]) await appendEvent(tx, { runId, projectId, userId, type: 'run.cancel_requested' });
+    const [row] = await tx.select().from(researchRuns).where(and(eq(researchRuns.id, runId), eq(researchRuns.projectId, projectId))).limit(1);
+    return row ?? null;
+  });
+}
+
+/* -------------------------------- Leases -------------------------------- */
+
+export const RUN_LEASE_SECONDS = 120;
+
+export async function claimRunLease(userId: string, runId: string, owner: string): Promise<boolean> {
+  return withRunScope(userId, async (tx) => {
+    const rows = await tx
+      .update(researchRuns)
+      .set({ leaseOwner: owner, leaseExpiresAt: sql`now() + make_interval(secs => ${RUN_LEASE_SECONDS})`, attempts: sql`${researchRuns.attempts} + 1`, updatedAt: new Date() })
+      .where(and(eq(researchRuns.id, runId), or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`), eq(researchRuns.leaseOwner, owner))))
+      .returning({ id: researchRuns.id });
+    return rows.length > 0;
+  });
+}
+
+export async function renewRunLease(userId: string, runId: string, owner: string): Promise<boolean> {
+  return withRunScope(userId, async (tx) => {
+    const rows = await tx
+      .update(researchRuns)
+      .set({ leaseExpiresAt: sql`now() + make_interval(secs => ${RUN_LEASE_SECONDS})` })
+      .where(and(eq(researchRuns.id, runId), eq(researchRuns.leaseOwner, owner)))
+      .returning({ id: researchRuns.id });
+    return rows.length > 0;
+  });
+}
+
+export async function releaseRunLease(userId: string, runId: string, owner: string): Promise<void> {
+  await withRunScope(userId, async (tx) => {
+    await tx.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(and(eq(researchRuns.id, runId), eq(researchRuns.leaseOwner, owner)));
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                    Steps                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface NewStep {
+  seq: number;
+  tool: string;
+  toolVersion: string;
+  label: string;
+  dependsOn: number[];
+  input: Record<string, unknown>;
+  maxAttempts: number;
+}
+
+/** Records the plan and its steps, and moves the run PLANNING → RUNNING, in one transaction. */
+export async function recordPlan(userId: string, runId: string, plan: Record<string, unknown>, steps: NewStep[], planner: Record<string, unknown>): Promise<boolean> {
+  return withRunScope(userId, async (tx) => {
+    const [run] = await tx.select().from(researchRuns).where(eq(researchRuns.id, runId)).limit(1);
+    if (!run || run.status !== 'PLANNING' || run.plan) return false;
+    if (steps.length) {
+      await tx.insert(runSteps).values(steps.map((step) => ({ runId, seq: step.seq, tool: step.tool, toolVersion: step.toolVersion, label: step.label.slice(0, 200), dependsOn: step.dependsOn, input: step.input, maxAttempts: step.maxAttempts })));
+    }
+    return transitionRun(userId, runId, ['PLANNING'], 'RUNNING', { plan, planner }, { type: 'run.planned', data: { steps: steps.length, tools: steps.map((step) => step.tool) } }, tx);
+  });
+}
+
+export async function readSteps(userId: string, runId: string): Promise<RunStep[]> {
+  return withRunScope(userId, (tx) => tx.select().from(runSteps).where(eq(runSteps.runId, runId)).orderBy(asc(runSteps.seq)));
+}
+
+export interface StepPatch {
+  validatedInput?: Record<string, unknown>;
+  inputHash?: string;
+  idempotencyKey?: string;
+  policy?: Record<string, unknown>;
+  approvalId?: string | null;
+  claimToken?: string | null;
+  attempts?: number;
+  output?: Record<string, unknown>;
+  outputRef?: Record<string, unknown> | null;
+  error?: Record<string, unknown> | null;
+  startedAt?: Date | null;
+  finishedAt?: Date | null;
+  durationMs?: number | null;
+}
+
+/**
+ * Moves a step from one of `from` to `to` (conditional; also on the claim token
+ * when given). Writes the event with the run's project. Returns whether it applied.
+ */
+export async function transitionStep(
+  userId: string,
+  step: Pick<RunStep, 'id' | 'runId'>,
+  from: StepStatus[],
+  to: StepStatus,
+  patch: StepPatch = {},
+  options: { claimToken?: string; event?: { type: string; data?: Record<string, unknown> }; tx?: RunTx } = {},
+): Promise<boolean> {
+  const work = async (tx: RunTx) => {
+    const rows = await tx
+      .update(runSteps)
+      .set({ status: to, updatedAt: new Date(), ...patch })
+      .where(and(eq(runSteps.id, step.id), inArray(runSteps.status, from), ...(options.claimToken ? [eq(runSteps.claimToken, options.claimToken)] : [])))
+      .returning({ id: runSteps.id });
+    if (rows.length === 0) return false;
+    const [run] = await tx.select({ projectId: researchRuns.projectId }).from(researchRuns).where(eq(researchRuns.id, step.runId)).limit(1);
+    await appendEvent(tx, { runId: step.runId, projectId: run!.projectId, userId, stepId: step.id, type: options.event?.type ?? `step.${to.toLowerCase()}`, data: { from, to, ...(options.event?.data ?? {}) } });
+    return true;
+  };
+  return options.tx ? work(options.tx) : withRunScope(userId, work);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                  Approvals                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface NewApproval {
+  runId: string;
+  stepId: string;
+  projectId: string;
+  actionHash: string;
+  action: Record<string, unknown>;
+  reason: string;
+  expiresAt: Date;
+}
+
+/**
+ * Opens an approval request for a step and parks the step and the run, in one
+ * transaction. An open request with the same hash is reused; one with a
+ * different hash (the action changed) is expired first.
+ */
+export async function requestApproval(userId: string, step: RunStep, approval: NewApproval): Promise<RunApproval> {
+  return withRunScope(userId, async (tx) => {
+    const open = await tx.select().from(runApprovals).where(and(eq(runApprovals.stepId, step.id), inArray(runApprovals.status, ['PENDING', 'APPROVED'])));
+    let current = open.find((row) => row.actionHash === approval.actionHash && row.expiresAt > new Date());
+    for (const row of open) {
+      if (row !== current) {
+        await tx.update(runApprovals).set({ status: 'EXPIRED' }).where(and(eq(runApprovals.id, row.id), inArray(runApprovals.status, ['PENDING', 'APPROVED'])));
+        await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: step.id, type: 'approval.expired', data: { approvalId: row.id, reason: 'action_changed' } });
+      }
+    }
+    if (!current) {
+      const [row] = await tx.insert(runApprovals).values({ ...approval, userId }).returning();
+      current = row!;
+      await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: step.id, type: 'approval.requested', data: { approvalId: current.id, reason: approval.reason, actionHash: approval.actionHash } });
+    }
+    await transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL'], 'WAITING_APPROVAL', { approvalId: current.id }, { tx, event: { type: 'step.waiting_approval', data: { approvalId: current.id } } });
+    await transitionRun(userId, approval.runId, ['RUNNING'], 'WAITING_APPROVAL', {}, { type: 'run.waiting_approval', data: { approvalId: current.id, stepId: step.id } }, tx);
+    return current;
+  });
+}
+
+export async function readApproval(userId: string, approvalId: string): Promise<RunApproval | null> {
+  return withRunScope(userId, async (tx) => {
+    const [row] = await tx.select().from(runApprovals).where(eq(runApprovals.id, approvalId)).limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * Records a decision on a PENDING approval (conditional). RLS lets only the
+ * run's owner (an editor) or a project OWNER update it; the service checks the
+ * same and the hash before calling.
+ */
+export async function decideApproval(
+  userId: string,
+  approval: RunApproval,
+  decision: 'APPROVED' | 'REJECTED',
+): Promise<boolean> {
+  return withRunScope(userId, async (tx) => {
+    const rows = await tx
+      .update(runApprovals)
+      .set({ status: decision, decidedBy: userId, decidedAt: new Date() })
+      .where(and(eq(runApprovals.id, approval.id), eq(runApprovals.status, 'PENDING'), eq(runApprovals.actionHash, approval.actionHash), gt(runApprovals.expiresAt, sql`now()`)))
+      .returning({ id: runApprovals.id });
+    if (rows.length === 0) return false;
+    await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: approval.stepId, type: `approval.${decision.toLowerCase()}`, data: { approvalId: approval.id, actionHash: approval.actionHash } });
+    return true;
+  });
+}
+
+/** Consumes an APPROVED approval whose hash matches (single use). */
+export async function consumeApproval(userId: string, approval: RunApproval, actionHash: string, tx: RunTx): Promise<boolean> {
+  const rows = await tx
+    .update(runApprovals)
+    .set({ status: 'CONSUMED', consumedAt: new Date() })
+    .where(and(eq(runApprovals.id, approval.id), eq(runApprovals.status, 'APPROVED'), eq(runApprovals.actionHash, actionHash), gt(runApprovals.expiresAt, sql`now()`)))
+    .returning({ id: runApprovals.id });
+  if (rows.length === 0) return false;
+  await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: approval.stepId, type: 'approval.consumed', data: { approvalId: approval.id } });
+  return true;
+}
+
+export async function expireApproval(userId: string, approval: RunApproval, reason: string): Promise<boolean> {
+  return withRunScope(userId, async (tx) => {
+    const rows = await tx
+      .update(runApprovals)
+      .set({ status: 'EXPIRED' as ApprovalStatus })
+      .where(and(eq(runApprovals.id, approval.id), inArray(runApprovals.status, ['PENDING', 'APPROVED'])))
+      .returning({ id: runApprovals.id });
+    if (rows.length === 0) return false;
+    await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: approval.stepId, type: 'approval.expired', data: { approvalId: approval.id, reason } });
+    return true;
+  });
+}
+
+export async function approvalsForStep(userId: string, stepId: string, tx?: RunTx): Promise<RunApproval[]> {
+  const work = (t: RunTx) => t.select().from(runApprovals).where(eq(runApprovals.stepId, stepId)).orderBy(desc(runApprovals.createdAt));
+  return tx ? work(tx) : withRunScope(userId, work);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                          System reads (owner role)                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The owner of a run, for a job runner that has no session. Only identifies
+ * whom to act as; everything after runs in `withRunScope` as that user.
+ */
+export async function systemRunOwner(runId: string): Promise<{ userId: string; projectId: string; status: string } | null> {
+  const [row] = await systemDb.select({ userId: researchRuns.userId, projectId: researchRuns.projectId, status: researchRuns.status }).from(researchRuns).where(eq(researchRuns.id, runId)).limit(1);
+  return row ?? null;
+}
+
+/** Runs the reaper should pick up: unfinished, not waiting on a person, lease lapsed or never taken for a while. */
+export async function systemStrandedRuns(limit = 50): Promise<{ id: string; userId: string }[]> {
+  return systemDb
+    .select({ id: researchRuns.id, userId: researchRuns.userId })
+    .from(researchRuns)
+    .where(
+      and(
+        inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING']),
+        or(lt(researchRuns.leaseExpiresAt, sql`now()`), and(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.updatedAt, sql`now() - interval '2 minutes'`))),
+      ),
+    )
+    .limit(limit);
+}
+
+/** Open approvals past their expiry, with the run owner to act as. */
+export async function systemExpiredApprovals(limit = 50): Promise<{ id: string; userId: string; runId: string }[]> {
+  return systemDb
+    .select({ id: runApprovals.id, userId: researchRuns.userId, runId: runApprovals.runId })
+    .from(runApprovals)
+    .innerJoin(researchRuns, eq(researchRuns.id, runApprovals.runId))
+    .where(and(inArray(runApprovals.status, ['PENDING', 'APPROVED']), lt(runApprovals.expiresAt, sql`now()`)))
+    .limit(limit);
+}

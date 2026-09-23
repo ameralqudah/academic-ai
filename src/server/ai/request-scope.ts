@@ -28,6 +28,8 @@ export interface CallIds {
   taskId?: string | null;
   jobId?: string | null;
   runId?: string | null;
+  /** P1-D: the research-run step, recorded with the run on every call and tool call. */
+  stepId?: string | null;
 }
 
 interface Scope extends CallIds {

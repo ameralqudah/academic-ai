@@ -23,6 +23,7 @@ export interface AttemptRecord {
   taskId: string | null;
   jobId: string | null;
   runId: string | null;
+  stepId?: string | null;
   purpose: string;
   kind: RequestKind;
   provider: Provider;
@@ -59,6 +60,7 @@ export interface Meter {
     userId: string;
     projectId: string | null;
     runId: string | null;
+    stepId?: string | null;
     taskId: string | null;
     accepted: { id: string; name: string; arguments: Record<string, unknown> }[];
     rejected: RejectedToolCall[];
@@ -76,6 +78,7 @@ export const databaseMeter: Meter = {
       taskId: record.taskId,
       jobId: record.jobId,
       runId: record.runId,
+      stepId: record.stepId ?? null,
       purpose: record.purpose,
       kind: record.kind,
       provider: record.provider,
@@ -118,6 +121,7 @@ export const databaseMeter: Meter = {
           userId: input.userId,
           projectId: input.projectId,
           runId: input.runId,
+          stepId: input.stepId ?? null,
           taskId: input.taskId,
         })),
       )

@@ -227,3 +227,22 @@ export async function replaceVersion(actor: StatsActor, projectId: string, oldVe
   const newNode = await ensureVersionNode(newVersionId, engine, projectId);
   return graph.supersede(projectId, { userId: actor.userId }, oldNode, newNode, impactAcknowledged);
 }
+
+/**
+ * The Impact Report of replacing one version with another, without replacing
+ * anything (P1-D approvals bind to its hash). Creates the versions' graph
+ * nodes if they do not exist yet, which is idempotent and changes no result.
+ */
+export async function previewVersionReplacement(actor: StatsActor, projectId: string, oldVersionId: string, newVersionId: string) {
+  const [older, newer] = await db.select().from(datasetVersions).where(inArray(datasetVersions.id, [oldVersionId, newVersionId]));
+  const oldRow = [older, newer].find((row) => row?.id === oldVersionId);
+  const newRow = [older, newer].find((row) => row?.id === newVersionId);
+  if (!oldRow || !newRow || oldRow.projectId !== projectId || newRow.projectId !== projectId || oldRow.datasetId !== newRow.datasetId) {
+    throw new AppError('NOT_FOUND', 'The dataset version was not found.', 'لم يُعثر على الإصدار.');
+  }
+  await graph.requireProjectRole(projectId, actor.userId, 'EDITOR');
+  const engine: EngineActor = { userId: actor.userId, origin: 'engine' };
+  const oldNode = await ensureVersionNode(oldVersionId, engine, projectId);
+  const newNode = await ensureVersionNode(newVersionId, engine, projectId);
+  return graph.previewSupersede(projectId, { userId: actor.userId }, oldNode, newNode);
+}

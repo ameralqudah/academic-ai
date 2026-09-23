@@ -61,10 +61,24 @@ export interface CreateSpecInput {
   hypothesisIds?: string[];
   constructIds?: string[];
   origin?: 'user' | 'assistant';
+  /** P1-D: a research-run step's key; the same key returns the specification it already created. */
+  idempotencyKey?: string | null;
 }
 
 export async function createSpec(actor: StatsActor, input: CreateSpecInput) {
   const version = await requireVersion(input.datasetVersionId, actor, 'EDITOR', input.projectId);
+  const key = input.idempotencyKey ?? null;
+  const existing = async () => {
+    if (!key) return null;
+    const [row] = await db.select().from(statSpecs).where(eq(statSpecs.idempotencyKey, key)).limit(1);
+    if (!row) return null;
+    if (row.userId !== actor.userId || row.datasetVersionId !== version.id) {
+      throw new AppError('CONFLICT', 'That idempotency key belongs to another request.', 'مفتاح التكرار يخص طلبًا آخر.');
+    }
+    return row;
+  };
+  const already = await existing();
+  if (already) return already;
   const seeded = input.spec && typeof input.spec === 'object' ? withSeed(input.spec as Record<string, unknown>, version.contentHash) : input.spec;
   const parsed = methodSpecSchema.safeParse(seeded);
   if (!parsed.success) {
@@ -96,8 +110,15 @@ export async function createSpec(actor: StatsActor, input: CreateSpecInput) {
       hypothesisIds,
       constructIds,
       origin: input.origin ?? 'user',
+      idempotencyKey: key,
     })
-    .returning();
+    .returning()
+    .catch(async (error: unknown) => {
+      /* A concurrent retry of the same keyed step won the insert: return its row. */
+      const made = String((error as { cause?: { code?: string } })?.cause?.code) === '23505' ? await existing() : null;
+      if (made) return [made];
+      throw error;
+    });
   return row!;
 }
 
@@ -129,7 +150,8 @@ export async function requireRun(runId: string, actor: StatsActor, need: 'VIEWER
 }
 
 /** Rough work estimate: cells touched times resamples. Above the line, the run goes to the job queue. */
-function cost(spec: MethodSpec, rows: number): number {
+/** The relative cost of running a specification on `rows` rows (exported for P1-D approvals). */
+export function analysisCost(spec: MethodSpec, rows: number): number {
   const columns = JSON.stringify(spec).length / 20;
   const resamples = spec.analysisType === 'mediation' ? spec.bootstrap.resamples : spec.analysisType === 'pls' && spec.bootstrap ? spec.bootstrap.resamples * 10 : 1;
   const heavy = spec.analysisType === 'cfa' || spec.analysisType === 'efa' ? 50 : 1;
@@ -208,7 +230,7 @@ export async function startRun(actor: StatsActor, specId: string, input: StartRu
 
   const execution = input.execution ?? 'auto';
   /* Heavy work always goes to the queue: a caller cannot force it into the request (P1-C review). */
-  const heavy = cost(spec.spec as unknown as MethodSpec, version!.rowCount) > INLINE_COST_LIMIT;
+  const heavy = analysisCost(spec.spec as unknown as MethodSpec, version!.rowCount) > INLINE_COST_LIMIT;
   if (execution === 'job' || heavy) {
     const jobs = await import('@/server/repositories/analysis-jobs.repository');
     if ((await jobs.countActive(actor.userId)) >= MAX_ACTIVE_JOBS) {

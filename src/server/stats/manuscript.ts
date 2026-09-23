@@ -71,6 +71,11 @@ export interface InsertClaimInput {
   text?: string;
   /** Attach to an existing manuscript block (`block —asserts→ claim`). */
   blockId?: string;
+  /**
+   * P1-D: the graph actor that writes the claim (a research-run step, with
+   * its run and step as provenance). Must be the same user as `actor`.
+   */
+  actor?: graph.Actor;
 }
 
 export async function insertClaim(actor: StatsActor, projectId: string, runId: string, input: InsertClaimInput) {
@@ -99,7 +104,8 @@ export async function insertClaim(actor: StatsActor, projectId: string, runId: s
   }
 
   /* One transaction: the claim exists with all of its evidence, or not at all. */
-  const claim = await graph.createClaim(projectId, { userId: actor.userId }, {
+  if (input.actor && input.actor.userId !== actor.userId) throw new AppError('FORBIDDEN', 'A claim is written on the caller’s own behalf.', 'يُكتب الادعاء باسم صاحبه فقط.');
+  const claim = await graph.createClaim(projectId, input.actor ?? { userId: actor.userId }, {
     text: text.slice(0, 5000),
     label: text.slice(0, 200),
     reportIds: keys.map((key) => byKey.get(key)!.graphNodeId!),

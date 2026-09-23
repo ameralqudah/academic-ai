@@ -82,6 +82,8 @@ const ROLE_RANK: Record<ProjectRole, number> = { VIEWER: 1, COMMENTER: 2, EDITOR
 export interface Actor {
   userId: string;
   runId?: string;
+  /** P1-D: the research-run step whose tool is writing; recorded as provenance. */
+  stepId?: string;
   origin?: 'user' | 'agent' | 'import' | 'engine';
 }
 
@@ -302,7 +304,7 @@ async function insertNode(
       status: input.status ?? 'active',
       provenance: input.provenance ?? null,
       createdByUserId: actor.userId,
-      createdByRunId: actor.runId ?? null,
+      createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null,
       origin: actor.origin ?? 'user',
     })
     .returning();
@@ -315,7 +317,7 @@ async function insertNode(
     payload: input.payload,
     hash: payloadHash(input.payload),
     createdByUserId: actor.userId,
-    createdByRunId: actor.runId ?? null,
+    createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null,
   });
   return node;
 }
@@ -613,7 +615,7 @@ export async function updateNode(
       changeNote: input.changeNote ?? null,
       impactReportHash: report.items.length > 0 ? report.hash : null,
       createdByUserId: actor.userId,
-      createdByRunId: actor.runId ?? null,
+      createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null,
     });
 
     const [updated] = await tx
@@ -690,7 +692,7 @@ async function supersedeInTx(
     dstId: oldId,
     dependency: false,
     createdByUserId: actor.userId,
-    createdByRunId: actor.runId ?? null,
+    createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null,
     origin: actor.origin ?? 'user',
   });
   await applyReport(tx, projectId, report, previous.currentVersion);
@@ -820,7 +822,7 @@ export async function link(
         dependency: rule.dependency,
         attrs: input.attrs ?? {},
         createdByUserId: actor.userId,
-        createdByRunId: actor.runId ?? null,
+        createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null,
         origin: actor.origin ?? 'user',
       })
       .onConflictDoNothing()
@@ -1047,7 +1049,7 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
         dstVersion,
         dependency,
         createdByUserId: actor.userId,
-        createdByRunId: actor.runId ?? null,
+        createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null,
         origin: 'engine',
       });
 
@@ -1132,7 +1134,7 @@ export async function createClaim(
     }
     const claim = await insertNode(tx, projectId, actor, { type: 'claim', label: input.label ?? null, payload: parsePayload('claim', { text: input.text }), status: 'active' });
     const edge = (srcId: string, rel: string, dstId: string, dstVersion: number | null) =>
-      tx.insert(graphEdges).values({ projectId, srcId, rel, dstId, dstVersion, dependency: true, createdByUserId: actor.userId, createdByRunId: actor.runId ?? null, origin: actor.origin ?? 'user' });
+      tx.insert(graphEdges).values({ projectId, srcId, rel, dstId, dstVersion, dependency: true, createdByUserId: actor.userId, createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null, origin: actor.origin ?? 'user' });
     for (const value of values) await edge(claim.id, 'reports', value.id, value.currentVersion);
     if (block) await edge(block.id, 'asserts', claim.id, claim.currentVersion);
     return claim;
@@ -1144,6 +1146,25 @@ export async function createClaim(
  * review and acknowledge it before the new run is recorded (P1-C). Same
  * proposal and same dependents as `recordRun` computes, hence the same hash.
  */
+/**
+ * The Impact Report a supersede would produce, without making it (P1-D). The
+ * same report — and so the same hash — that `supersede` checks at commit, so
+ * an approval can be bound to it before anything changes.
+ */
+export async function previewSupersede(projectId: string, actor: Actor, oldId: string, newId: string): Promise<ImpactReport> {
+  await authorize(projectId, actor, 'VIEWER');
+  const previous = await loadNode(db, projectId, oldId);
+  await loadNode(db, projectId, newId);
+  const { report } = await buildReport(db, projectId, {
+    nodeId: previous.id,
+    fromVersion: previous.currentVersion,
+    kind: 'structural',
+    proposalHash: `supersede:${oldId}:${newId}`,
+    exclude: [newId],
+  });
+  return report;
+}
+
 export async function previewRerun(projectId: string, actor: Actor, runId: string): Promise<ImpactReport> {
   await authorize(projectId, actor, 'VIEWER');
   const previous = await loadNode(db, projectId, runId);

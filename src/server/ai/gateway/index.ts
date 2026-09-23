@@ -7,6 +7,7 @@
  * the adapters it constructs.
  */
 
+import type { Tier } from './routing';
 import { getEnv } from '@/config/env';
 import { adminAISettings } from '@/ai/registry';
 import { currentCallScope } from '@/server/ai/request-scope';
@@ -74,6 +75,11 @@ async function plan(userId: string): Promise<PlanInfo> {
   planCache.set(userId, { plan: info, at: Date.now() });
   if (planCache.size > 1000) planCache.delete(planCache.keys().next().value as string);
   return info;
+}
+
+/** The user's plan tier, derived exactly as the gateway routes it (P1-D: run limits and entitlements). */
+export async function planTier(userId: string): Promise<Tier> {
+  return (await plan(userId)).tier;
 }
 
 /** Forgets a user's cached plan (after an upgrade, in tests). */

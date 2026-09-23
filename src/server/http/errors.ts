@@ -16,6 +16,8 @@ export type ErrorCode =
   | 'RATE_LIMITED'
   | 'PLAN_LIMIT'
   | 'AI_UNAVAILABLE'
+  /** A required safety mechanism is missing, so the feature refuses to run (P1-D: database RLS). */
+  | 'UNAVAILABLE'
   | 'INTERNAL';
 
 const STATUS: Record<ErrorCode, number> = {
@@ -29,6 +31,7 @@ const STATUS: Record<ErrorCode, number> = {
   RATE_LIMITED: 429,
   PLAN_LIMIT: 402,
   AI_UNAVAILABLE: 503,
+  UNAVAILABLE: 503,
   INTERNAL: 500,
 };
 

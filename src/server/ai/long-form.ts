@@ -134,9 +134,10 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
         /*
          * One piece of writing is one request, however many rounds it takes;
          * every round is metered, and its words count (P1-B). The first round
-         * reserves for the whole piece.
+         * needs the plan's headroom; later rounds continue what it admitted.
          */
         countsAsRequest: round === 1,
+        continuation: round > 1,
         estimatedWords: Math.round(tokensPerRound * 0.6),
       });
     } catch (error) {

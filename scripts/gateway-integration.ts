@@ -186,7 +186,13 @@ async function main() {
     check('30 concurrent reservations against 5 remaining, five times: never more than 5', raced, [5, 5, 5, 5, 5]);
     check('the ledger ends exactly at the plan limit', (await ledger(racer)).requests, 20);
     check('the next call is refused with the plan limit', await runForUser(racer, () => outcome(() => gw.generate(ask('one more')))), 'gateway:quota');
-    check('an internal step at the limit is still allowed (metered, not counted)', await runForUser(racer, () => outcome(() => gw.generate(ask('classify', { countsAsRequest: false })))), 'ok');
+    check(
+      'an internal step at the limit is refused too (no classification of every message on a used-up plan)',
+      await runForUser(racer, () => outcome(() => gw.generate(ask('classify', { countsAsRequest: false })))),
+      'gateway:quota',
+    );
+    const continued = await runForUser(racer, () => outcome(() => gw.generate(ask('round 2', { countsAsRequest: false, continuation: true }))));
+    check('a continuation round of an admitted call still runs at the limit, and is not counted', [continued, (await ledger(racer)).requests], ['ok', 20]);
 
     const u = await user('idem');
     await runForUser(u, () => gw.generate(ask('a', { idempotencyKey: 'task-1:step-2' })));

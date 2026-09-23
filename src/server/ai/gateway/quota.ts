@@ -78,6 +78,8 @@ export interface ReserveInput {
   /** 1 for a user-visible generation, 0 for an internal step. */
   requests: number;
   words: number;
+  /** A later round of an admitted call: needs no headroom of its own (see below). */
+  continuation?: boolean;
   limits: { maxAiRequests: number; maxGeneratedWords: number };
   unlimited: (limit: number) => boolean;
   now?: Date;
@@ -97,17 +99,24 @@ export async function reserve(input: ReserveInput): Promise<Reservation> {
 
     const used = await inUse(tx, input.userId, periodKey);
     const { maxAiRequests, maxGeneratedWords } = input.limits;
-    if (input.requests > 0 && !input.unlimited(maxAiRequests) && used.requests + input.requests > maxAiRequests) {
+    /*
+     * A counted call needs room for itself. An internal step that precedes one
+     * (classification, planning) is not counted, but it is refused once nothing
+     * is left: otherwise a used-up plan keeps paying for a classification of
+     * every message. Only a continuation of an admitted call runs at the limit.
+     */
+    const needed = input.requests > 0 ? input.requests : input.continuation ? 0 : 1;
+    if (needed > 0 && !input.unlimited(maxAiRequests) && used.requests + needed > maxAiRequests) {
       throw new GatewayError('quota', 'The plan’s AI requests for this month are used up.', {}).withCause(
         AppError.planLimit('aiRequests', used.requests, maxAiRequests),
       );
     }
     /*
-     * A generation needs room for at least one word, whatever it estimated: a
-     * zero estimate must not slip past a plan whose words are used up. Internal
-     * steps (no request, no words) are metered but not blocked.
+     * Likewise at least one word of room, whatever was estimated: a zero
+     * estimate must not slip past a plan whose words are used up. A
+     * continuation is checked only against what it says it will write.
      */
-    const wantsWords = input.requests > 0 || input.words > 0;
+    const wantsWords = !input.continuation || input.words > 0;
     if (wantsWords && !input.unlimited(maxGeneratedWords) && used.words + Math.max(input.words, 1) > maxGeneratedWords) {
       throw new GatewayError('quota', 'The plan’s generated words for this month are used up.', {}).withCause(
         AppError.planLimit('generatedWords', used.words, maxGeneratedWords),

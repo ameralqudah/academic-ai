@@ -102,6 +102,12 @@ export const requestSchema = z.object({
    * continuation round) is metered but not counted as a request.
    */
   countsAsRequest: z.boolean().default(true),
+  /**
+   * A later round of a call the plan already admitted (a long-form
+   * continuation, a structured-output repair). Admitted at the limit, so a
+   * chapter is not cut off mid-way; everything else needs headroom.
+   */
+  continuation: z.boolean().default(false),
   /** Words the call is expected to produce, for the reservation. */
   estimatedWords: z.number().int().nonnegative().optional(),
   /** Makes the quota reservation idempotent across retries of the same step. */

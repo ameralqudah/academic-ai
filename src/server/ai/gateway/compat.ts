@@ -45,6 +45,7 @@ function toGatewayRequest(request: AIRequest, hints: RoutingHints): GatewayReque
     needsReasoning: hints.needsReasoning,
     latencySensitive: hints.latencySensitive,
     countsAsRequest: request.countsAsRequest ?? true,
+    continuation: request.continuation ?? false,
     ...(request.estimatedWords === undefined ? {} : { estimatedWords: request.estimatedWords }),
     ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
   };

@@ -165,6 +165,7 @@ async function main() {
     needsReasoning: false,
     latencySensitive: true,
     countsAsRequest: true,
+    continuation: false,
   });
 
   /* ============================ B. adapters ============================ */

@@ -4250,6 +4250,7 @@ console.log('\nspeed of the first word');
       needsReasoning: reasoning,
       latencySensitive: !reasoning,
       countsAsRequest: true,
+      continuation: false,
     },
     model,
     signal: new AbortController().signal,
@@ -5377,6 +5378,14 @@ console.log('\nwhat a model costs');
     if (/\.send\(\{[^}]*signal/.test(source) && /Adapter/.test(source)) direct.push(file);
   }
   check('no application code calls a provider adapter directly', direct, []);
+
+  /* The quota ledger is written for model calls by the gateway alone, so nothing is counted twice or forgotten. */
+  const ledgerWriters: string[] = [];
+  for (const file of files) {
+    if (file === 'src/server/services/usage.service.ts') continue;
+    if (/\brecordAIUsage\(/.test(await readFile(file, 'utf8'))) ledgerWriters.push(file);
+  }
+  check('no application code meters a model call itself (recordAIUsage has no callers)', ledgerWriters, []);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

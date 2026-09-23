@@ -76,6 +76,8 @@ export interface AIRequest {
    * round) is metered but not counted as a request. Default true.
    */
   countsAsRequest?: boolean;
+  /** A later round of a call already admitted (long-form rounds after the first). */
+  continuation?: boolean;
   /** Words the call is expected to produce, for the quota reservation. */
   estimatedWords?: number;
   /** Makes the reservation idempotent across retries of the same step. */

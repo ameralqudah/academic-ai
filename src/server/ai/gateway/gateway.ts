@@ -216,6 +216,7 @@ export function createGateway(deps: GatewayDeps) {
       idempotencyKey: request.idempotencyKey ?? callId,
       requests: request.countsAsRequest ? 1 : 0,
       words: request.estimatedWords ?? 0,
+      continuation: request.continuation,
       limits: plan.limits,
       unlimited: plan.unlimited,
     });
@@ -457,6 +458,7 @@ export function createGateway(deps: GatewayDeps) {
     const repair = await attemptOnce({
       ...input,
       countsAsRequest: false,
+      continuation: true,
       estimatedWords: 0,
       idempotencyKey: `${first.response.callId}:repair`,
       messages: [

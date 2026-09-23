@@ -480,7 +480,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
          * than restarting. Its siblings keep whatever they achieved — a
          * question about one step is not a reason to discard another's work.
          */
-        await tasksRepo.failStep(step.id, 'task.step.needsInput', true, capability.maxAttempts + 1);
+        await tasksRepo.awaitInput(step.id);
         needsInput = { question: result.question };
         continue;
       }

@@ -229,6 +229,21 @@ export async function skipStep(stepId: string, reasonKey: string): Promise<void>
     .where(eq(taskSteps.id, stepId));
 }
 
+/**
+ * A step that stopped to ask the researcher something, waiting for the answer.
+ *
+ * Not a failure, and not an attempt. It was recorded as one: a question
+ * consumed the step's attempts, so the second question — "which variables?",
+ * asked again after the answer named none — marked the step failed after two
+ * attempts and ended a task that had done nothing wrong.
+ */
+export async function awaitInput(stepId: string): Promise<void> {
+  await db
+    .update(taskSteps)
+    .set({ status: 'PENDING', errorReasonKey: 'task.step.needsInput', startedAt: null })
+    .where(eq(taskSteps.id, stepId));
+}
+
 /** Marks steps that can never run because a dependency failed. */
 export async function blockSteps(stepIds: string[]): Promise<void> {
   if (stepIds.length === 0) return;

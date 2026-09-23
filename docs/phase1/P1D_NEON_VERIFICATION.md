@@ -75,6 +75,8 @@ The follow-up asked for the application's own run path (`npm run test:runs:db`: 
 1. **Application path on Neon.** Create a fresh Neon branch and run `npm run test:runs:db` against it, from a machine or CI job whose network can reach `*.neon.tech`. For this session, that would mean adding the host to the environment's allowed domains. Also run `npm run test:runs:db` through the **pooled** connection string, which exercises `SET LOCAL ROLE` behind PgBouncer's transaction mode. Delete the branch afterwards.
 2. **Production role and URL.** Confirm that the production `DATABASE_URL` connects as `neondb_owner` (or as whichever role ran migration 0015, which grants `academic_app` to `current_user`), and note whether it uses the pooled host.
 3. **Deploy order.** Apply migrations 0014 and 0015 to production with `FF_RUNS` **off**. Then run the probe (check 1), read-only, before any flag change.
+   - *Status after the merge.* The Render service `academic-ai-app` auto-deploys `main`, and its build runs `npm run db:migrate`. The deploy of merge commit `5f18aaa` logged `migrations applied successfully` (build log, 2026-09-23 17:22 UTC), so 0014 and 0015 are applied in production with `FF_RUNS` at its default, `false`.
+   - *Still open.* The read-only probe against production has **not** been run.
 
 **What this does not claim.** It does not claim general "Neon support", nor that the whole application is RLS-protected. It shows that, on Neon PostgreSQL 18.6 with the `neondb_owner` role:
 

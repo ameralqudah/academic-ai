@@ -1,6 +1,6 @@
 # P1-D report: research run engine, tool registry, policy engine, approvals, RLS on run paths
 
-**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1D_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Base:** `main` at `003d95b` · **Status:** implemented under the approval conditions below. The full regression is green locally (§9). **Not merged. P1-E has not been started.**
+**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1D_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Base:** `main` at `003d95b` · **Status:** implemented under the approval conditions below. The full regression is green locally (§9). **Merged into `main` via [#33](https://github.com/ameralqudah/academic-ai/pull/33) (merge commit `5f18aaa`; PR head `a6fa42d`, all CI checks green). `FF_RUNS` remains off (default `false`). P1-E has not been started. The application-level Neon verification is still a pre-production blocker (§11.1).**
 
 **Approval conditions this was built under** (from the approval of the plan):
 
@@ -36,7 +36,9 @@ All of it is behind `FF_GRAPH` + `FF_RUNS`. It also needs a queue-backed job run
 | `acae84a` | Run core: limits, state machines, tool contract, 20 tools, registry, approvals and hashes, policy engine, RLS scope, run store |
 | `eb58d64` | Planner, executor, service, `research-run` queue, reaper, and the statistics assistant moved onto the run registry |
 | `5a950d6` | API routes, feature flag, runs page, smoke gates, browser tests |
-| (final commit) | Rejection settling fix, CI storage env for `test:runs:db`, nested-depth smoke gate, this report, Phase 1 report |
+| `b63f7f5` | Rejection settling fix, CI storage env for `test:runs:db`, nested-depth smoke gate, this report, Phase 1 report |
+| `03b00b0`, `a6fa42d` | Documentation only: Neon RLS verification record (`P1D_NEON_VERIFICATION.md`) |
+| `5f18aaa` | Merge of #33 into `main` |
 
 ## 2. Chat / task-path fixes (approved scope only)
 

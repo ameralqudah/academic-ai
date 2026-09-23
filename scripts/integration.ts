@@ -6097,6 +6097,45 @@ async function main() {
     check('and the address stays unverified', (await usersRepo.findById(late))?.emailVerified ?? null, null);
   }
 
+  /* ------------------------------------------------ P0.4 session invalidation */
+  {
+    section('P0.4 — ending sessions');
+
+    const usersRepo = await import('@/server/repositories/users.repository');
+    const { changePassword, requestPasswordReset, resetPassword } = await import('@/server/services/account.service');
+    const { setUserRole, setUserStatus } = await import('@/server/services/admin.service');
+    const { evaluateToken, loadSessionUser } = await import('@/server/auth/session-check');
+
+    const id = await newUser('p04-sessions');
+    const version = async () => (await usersRepo.findById(id))?.tokenVersion ?? -1;
+    check('a new account starts at version 0', await version(), 0);
+
+    /* A session issued now, and what the re-check says about it after each change. */
+    const session = { tv: 0 };
+
+    await changePassword(id, 'Passw0rd123', 'NewPassw0rd456');
+    check('a password change ends open sessions', await version(), 1);
+    check('the old session is refused', evaluateToken(session, await loadSessionUser(id, Date.now() + 60_000), Date.now()).action, 'revoke');
+
+    const email = (await usersRepo.findById(id))?.email as string;
+    const reset = await requestPasswordReset(email, 'en');
+    const token = new URL(reset.devUrl as string).searchParams.get('token') as string;
+    await resetPassword({ userId: id, token, password: 'Another1Passw0rd' });
+    check('a password reset ends open sessions too', await version(), 2);
+
+    const admin = await newUser('p04-admin');
+    await setUserRole(admin, id, 'ADMIN');
+    check('a promotion does not end sessions', await version(), 2);
+    await setUserRole(admin, id, 'USER');
+    check('a demotion does', await version(), 3);
+
+    await setUserStatus(admin, id, 'SUSPENDED');
+    check('a suspension does', await version(), 4);
+    check('and a suspended account is refused on re-check', evaluateToken({ tv: 4 }, await loadSessionUser(id, Date.now() + 60_000), Date.now()), { action: 'revoke', reason: 'suspended' });
+    await setUserStatus(admin, id, 'ACTIVE');
+    check('reactivation keeps the version', await version(), 4);
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 

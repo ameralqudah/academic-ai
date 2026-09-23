@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import { db } from '@/server/db';
 import { userSettings, users, type NewUser, type User } from '@/server/db/schema';
@@ -44,4 +44,12 @@ export async function updateSettings(
   values: Partial<typeof userSettings.$inferInsert>,
 ) {
   await db.update(userSettings).set(values).where(eq(userSettings.userId, userId));
+}
+
+/** Ends every session the user has open (see `auth/session-check`). */
+export async function bumpTokenVersion(id: string): Promise<void> {
+  await db
+    .update(users)
+    .set({ tokenVersion: sql`${users.tokenVersion} + 1` })
+    .where(eq(users.id, id));
 }

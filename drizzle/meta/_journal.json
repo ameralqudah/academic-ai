@@ -64,6 +64,13 @@
       "when": 1789979346998,
       "tag": "0008_pin_conversations",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790145876866,
+      "tag": "0009_p0_token_version",
+      "breakpoints": true
     }
   ]
 }

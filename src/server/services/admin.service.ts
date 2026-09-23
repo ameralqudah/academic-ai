@@ -8,6 +8,7 @@ import * as appSettingsRepo from '@/server/repositories/app-settings.repository'
 import * as paymentsRepo from '@/server/repositories/payments.repository';
 import * as plansRepo from '@/server/repositories/plans.repository';
 import { periodKeyFor } from '@/server/repositories/usage.repository';
+import { endAllSessions } from '@/server/services/account.service';
 
 export async function overview() {
   const periodKey = periodKeyFor();
@@ -55,6 +56,8 @@ export async function setUserStatus(
     );
   }
   await adminRepo.setUserStatus(userId, status);
+  /* A suspension takes effect on the user's open sessions, not only on the next sign-in. */
+  if (status === 'SUSPENDED') await endAllSessions(userId);
   logger.info('admin.user.status', { userId, status });
 }
 
@@ -70,6 +73,8 @@ export async function setUserRole(
     );
   }
   await adminRepo.setUserRole(userId, role);
+  /* Losing the admin role ends the sessions that carried it. */
+  if (role === 'USER') await endAllSessions(userId);
   logger.info('admin.user.role', { userId, role });
 }
 

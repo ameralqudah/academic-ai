@@ -116,6 +116,12 @@ export const users = pgTable(
     status: userStatusEnum('status').default('ACTIVE').notNull(),
     locale: localeEnum('locale').default('ar').notNull(),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true, mode: 'date' }),
+    /**
+     * Incremented to end every session the user has open — on a password
+     * change or reset, on suspension, on losing the admin role. A session
+     * whose token carries an older value is refused (see `auth/session-check`).
+     */
+    tokenVersion: integer('token_version').default(0).notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

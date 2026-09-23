@@ -11,7 +11,18 @@ import * as tokensRepo from '@/server/repositories/tokens.repository';
 import * as usersRepo from '@/server/repositories/users.repository';
 import type { RegisterInput } from '@/server/validation/auth';
 
+import { forgetSessionUser } from '@/server/auth/session-check';
+
 import { attachDefaultPlan } from './subscription.service';
+
+/**
+ * Ends every session a user has open, everywhere: the next request from any of
+ * them is refused once its token is re-checked (within a minute).
+ */
+export async function endAllSessions(userId: string): Promise<void> {
+  await usersRepo.bumpTokenVersion(userId);
+  forgetSessionUser(userId);
+}
 
 export async function register(input: RegisterInput): Promise<{ id: string; email: string }> {
   const email = input.email.toLowerCase();
@@ -67,6 +78,7 @@ export async function changePassword(
   }
 
   await usersRepo.updateUser(userId, { passwordHash: await bcrypt.hash(newPassword, 12) });
+  await endAllSessions(userId);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -161,6 +173,9 @@ export async function resetPassword(input: {
   await usersRepo.updateUser(input.userId, {
     passwordHash: await bcrypt.hash(input.password, 12),
   });
+
+  /* Whoever held the old password may hold a session too; it ends here. */
+  await endAllSessions(input.userId);
 
   logger.info('auth.reset.completed', { userId: input.userId });
 }

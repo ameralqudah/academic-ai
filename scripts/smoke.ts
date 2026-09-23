@@ -5036,5 +5036,33 @@ console.log('\nwhat a model costs');
   check('and in the verification email', emailVerificationEmail({ to: 'a@b.c', name: hostile, url: 'https://x', locale: 'ar', expiresHours: 24 }).html.includes('<img'), false);
 }
 
+/* -------------------------------------------------------------------------- */
+/*                P0.4 — sessions end when the account changes                */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { evaluateToken, needsCheck, REVALIDATE_MS } = await import('@/server/auth/session-check');
+  const now = 1_000_000_000;
+  const active = { role: 'USER' as const, status: 'ACTIVE' as const, locale: 'en' as const, emailVerified: null, tokenVersion: 2 };
+
+  check('a token checked a moment ago is not re-read', needsCheck({ checkedAt: now - 1000 }, now), false);
+  check('a token checked a minute ago is re-read', needsCheck({ checkedAt: now - REVALIDATE_MS }, now), true);
+  check('a token never checked is re-read', needsCheck({}, now), true);
+  check('a settings update forces a read', needsCheck({ checkedAt: now }, now, true), true);
+
+  check('a deleted user is signed out', evaluateToken({ tv: 2 }, null, now), { action: 'revoke', reason: 'missing' });
+  check('a suspended user is signed out', evaluateToken({ tv: 2 }, { ...active, status: 'SUSPENDED' }, now), { action: 'revoke', reason: 'suspended' });
+  check('a session from before a password change is signed out', evaluateToken({ tv: 1 }, active, now), { action: 'revoke', reason: 'version' });
+  check('a pre-P0 session (no version) survives while the version is 0', evaluateToken({}, { ...active, tokenVersion: 0 }, now).action, 'refresh');
+  check('a demoted admin loses the role on refresh', evaluateToken({ tv: 2 }, active, now), {
+    action: 'refresh',
+    patch: { role: 'USER', locale: 'en', ev: false, checkedAt: now },
+  });
+  check('verification reaches the session on refresh', evaluateToken({ tv: 2 }, { ...active, emailVerified: new Date() }, now).action === 'refresh' && (evaluateToken({ tv: 2 }, { ...active, emailVerified: new Date() }, now) as { patch: { ev: boolean } }).patch.ev, true);
+
+  const authSource = await readFile('src/server/auth/index.ts', 'utf8');
+  check('the jwt callback signs out a revoked session', authSource.includes("if (decision.action === 'revoke') return null;"), true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

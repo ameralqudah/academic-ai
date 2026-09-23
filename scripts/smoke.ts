@@ -5240,5 +5240,35 @@ console.log('\nwhat a model costs');
   check('the seed keeps admin-edited plans', seedSource.includes("process.env.SEED_OVERWRITE_PLANS !== 'true'"), true);
 }
 
+{
+  console.log('\nResearch Graph: change classes and edge rules (P1-A)');
+  const { classifyChange, canonicalJson, NODE_TYPES } = await import('@/server/graph/types');
+  const { EDGE_RULES, ruleFor } = await import('@/server/graph/rules');
+  const { payloadHash } = await import('@/server/graph/impact');
+
+  const construct = { name: 'Trust', definition: 'Willingness', kind: 'reflective' };
+  check('no change is no change', classifyChange('construct', construct, { ...construct }), null);
+  check('a translation is cosmetic', classifyChange('construct', construct, { ...construct, nameAr: 'الثقة' }), 'cosmetic');
+  check('a definition is substantive', classifyChange('construct', construct, { ...construct, definition: 'Belief' }), 'substantive');
+  check('a measurement kind is structural', classifyChange('construct', construct, { ...construct, kind: 'formative' }), 'structural');
+  check('the largest change wins', classifyChange('construct', construct, { ...construct, nameAr: 'x', kind: 'formative' }), 'structural');
+  check('an unknown field is substantive', classifyChange('note', { a: 1 }, { a: 2 }), 'substantive');
+  check('reverse coding an item is structural', classifyChange('instrument_item', { wording: 'x', reverseCoded: false }, { wording: 'x', reverseCoded: true }), 'structural');
+  check('a citation becoming contradicted is structural', classifyChange('citation', { support: 'supports' }, { support: 'contradicts' }), 'structural');
+  check('a citation becoming supported is substantive', classifyChange('citation', { support: 'unverified' }, { support: 'supports' }), 'substantive');
+  check('a retraction is structural', classifyChange('source', { title: 't', retracted: false }, { title: 't', retracted: true }), 'structural');
+  check('canonical JSON ignores key order', canonicalJson({ b: 1, a: { d: 2, c: 3 } }), canonicalJson({ a: { c: 3, d: 2 }, b: 1 }));
+  check('equal payloads hash equally', payloadHash({ b: 1, a: 2 }), payloadHash({ a: 2, b: 1 }));
+
+  const known = new Set<string>(NODE_TYPES);
+  const rels = EDGE_RULES.map((rule) => rule.rel);
+  check('relation names are unique', new Set(rels).size, rels.length);
+  check('every rule names known node types', EDGE_RULES.every((rule) => [...rule.from, ...rule.to].every((type) => known.has(type))), true);
+  check('every dependency rule says what it does downstream', EDGE_RULES.every((rule) => !rule.dependency || Boolean(rule.downstream)), true);
+  check('non-dependency rules never flag anything', EDGE_RULES.every((rule) => rule.dependency || (!rule.downstream && !rule.upstream && !rule.onLink)), true);
+  check('cosmetic changes never flag anything', EDGE_RULES.every((rule) => !rule.downstream?.cosmetic && !rule.upstream?.cosmetic), true);
+  check('a reported number depends on its result', ruleFor('reports')?.downstream?.structural, 'invalidates');
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

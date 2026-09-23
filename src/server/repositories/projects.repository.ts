@@ -3,6 +3,7 @@ import { and, count, desc, eq } from 'drizzle-orm';
 import type { SectionKey } from '@/config/research';
 import { db } from '@/server/db';
 import {
+  projectMembers,
   researchProjects,
   researchSections,
   sectionVersions,
@@ -47,10 +48,14 @@ export async function findOwned(
   return row;
 }
 
+/** Creates the project and its OWNER membership together. */
 export async function create(values: NewResearchProject): Promise<ResearchProject> {
-  const [row] = await db.insert(researchProjects).values(values).returning();
-  if (!row) throw new Error('Failed to create project');
-  return row;
+  return db.transaction(async (tx) => {
+    const [row] = await tx.insert(researchProjects).values(values).returning();
+    if (!row) throw new Error('Failed to create project');
+    await tx.insert(projectMembers).values({ projectId: row.id, userId: row.userId, role: 'OWNER' });
+    return row;
+  });
 }
 
 export async function update(

@@ -252,6 +252,18 @@ background worker, Fly, a VM) against the same `DATABASE_URL`. The worker needs 
 
 **Rollback:** set `JOB_RUNNER=direct` and redeploy the environment — no code change needed.
 
+### مفاتيح الميزات الجديدة · Feature flags
+
+ميزات المرحلة الأولى تصل مطفأة، ولا يتغيّر شيء في المنتج الحالي حتى تشغّلها.
+Phase 1 features ship switched off; nothing in the current product changes until you turn them on.
+
+| المتغيّر · Variable | الافتراضي · Default | ما يفعله · What it does |
+| --- | --- | --- |
+| `FF_GRAPH` | `false` | واجهة مخطط البحث `/api/v1/projects/:id/…` · the Research Graph API. Off → the routes answer 404. |
+
+The graph tables (migration `0011`) are created either way; they are additive and nothing reads them while the
+flag is off.
+
 ## 8) الصيانة
 
 | المهمة | كيف |

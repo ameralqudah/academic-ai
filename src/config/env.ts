@@ -167,6 +167,16 @@ const serverSchema = z.object({
    *   and the default on Vercel, whose functions cannot host a worker.
    */
   JOB_RUNNER: z.enum(['inline', 'worker', 'direct']).optional(),
+  /**
+   * Phase 1 feature flags (R7). Each new path is off until switched on, so the
+   * existing product keeps working unchanged.
+   *
+   * - `FF_GRAPH`: the Research Graph API under `/api/v1/projects/:id/…` (P1-A).
+   */
+  FF_GRAPH: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

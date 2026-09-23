@@ -6228,6 +6228,75 @@ console.log('\nuploaded documents are attributed');
     }
   }
 
+  /* --------------------------- P0.9 PLS rows aligned after listwise deletion */
+  {
+    console.log('P0.9 — HTMT, cross-loadings and VIF use the complete cases');
+
+    const { readFile: read } = await import('node:fs/promises');
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+    const { estimatePls } = await import('@/analysis/inference/pls/algorithm');
+    const { assessDiscriminantValidity, assessMeasurement } = await import('@/analysis/inference/pls/assessment');
+
+    const reference = JSON.parse(await read('evals/fixtures/references/cfa-survey-blanks.json', 'utf8')) as {
+      htmt: { constructs: string[]; matrix: number[][] };
+      vifTrust: Record<string, number>;
+    };
+    const data = numericColumns(parseCsv(await read('evals/fixtures/datasets/survey_with_blanks.csv', 'utf8'), 'survey.csv'));
+    const reflective = {
+      constructs: [
+        { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' as const },
+        { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' as const },
+        { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' as const },
+      ],
+      paths: [
+        { from: 'TRUST', to: 'ATT' },
+        { from: 'ATT', to: 'INT' },
+        { from: 'TRUST', to: 'INT' },
+      ],
+    };
+
+    const estimate = estimatePls(reflective, data);
+    check('the estimate records its complete-case rows', estimate.rows.length, estimate.n);
+    const measurement = assessMeasurement(reflective, estimate, data);
+    const discriminant = assessDiscriminantValidity(reflective, estimate, data, measurement);
+
+    /* semTools::htmt on the complete cases (arithmetic mean of absolute correlations). */
+    const names = reference.htmt.constructs;
+    for (const [a, b] of [['TRUST', 'ATT'], ['TRUST', 'INT'], ['ATT', 'INT']] as const) {
+      const expected = (reference.htmt.matrix[names.indexOf(b)] as number[])[names.indexOf(a)] as number;
+      close(`HTMT ${a}–${b} equals semTools on the complete cases`, discriminant.htmt.get(`${a} ↔ ${b}`)?.value ?? Number.NaN, expected, 1e-10);
+    }
+
+    /* Cross-loadings recomputed by hand on the aligned rows. */
+    const scoreOf = (name: string) => estimate.scores.get(name) as number[];
+    const itemOf = (name: string) => estimate.rows.map((row) => (data.get(name) as number[])[row] as number);
+    const handIssues: string[] = [];
+    for (const construct of reflective.constructs) {
+      for (const indicator of construct.indicators) {
+        const own = Math.abs(pearson(itemOf(indicator), scoreOf(construct.name)));
+        for (const other of reflective.constructs) {
+          if (other.name !== construct.name && Math.abs(pearson(itemOf(indicator), scoreOf(other.name))) > own) {
+            handIssues.push(`${indicator}>${other.name}`);
+            break;
+          }
+        }
+      }
+    }
+    check('cross-loading issues match a hand computation on the aligned rows', JSON.stringify(discriminant.crossLoadingIssues.map((row) => `${row.indicator}>${row.higherWith}`)), JSON.stringify(handIssues));
+
+    /* Formative VIF: 1/(1 − R²) from lm(item ~ siblings) in R, on the complete cases. */
+    const formative = { ...reflective, constructs: reflective.constructs.map((construct) => (construct.name === 'TRUST' ? { ...construct, mode: 'formative' as const } : construct)) };
+    const formativeEstimate = estimatePls(formative, data);
+    const trust = assessMeasurement(formative, formativeEstimate, data).find((row) => row.construct === 'TRUST');
+    close('formative VIF uses the multiple R², as lm() does', (trust as { maxVif?: { value: number } } | undefined)?.maxVif?.value ?? Number.NaN, Math.max(...Object.values(reference.vifTrust)), 1e-9);
+
+    /* The failure the fix addresses: blanks at the top misalign slice(0, n). */
+    const shifted = new Map([...data].map(([name, values]) => [name, [...new Array(40).fill(Number.NaN), ...values]]));
+    const shiftedEstimate = estimatePls(reflective, shifted);
+    const shiftedDiscriminant = assessDiscriminantValidity(reflective, shiftedEstimate, shifted, assessMeasurement(reflective, shiftedEstimate, shifted));
+    close('forty blank rows in front change nothing', shiftedDiscriminant.htmt.get('TRUST ↔ ATT')?.value ?? Number.NaN, discriminant.htmt.get('TRUST ↔ ATT')?.value ?? 0, 1e-12);
+  }
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

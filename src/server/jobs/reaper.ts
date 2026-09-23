@@ -130,9 +130,17 @@ export async function reap(): Promise<ReapResult> {
       return 0;
     });
 
+  /* P1-D: research runs whose worker died are re-queued; expired approvals are settled. */
+  const runsReaped = await import('@/server/runs/service')
+    .then(({ reapRuns }) => reapRuns())
+    .catch((error: unknown) => {
+      logger.warn('jobs.runSweepFailed', { error: String(error).slice(0, 200) });
+      return 0;
+    });
+
   const result = { tasksRequeued, jobsRequeued, jobsFailed };
-  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased + statRunsSettled > 0) {
-    logger.info('jobs.reaped', { ...result, reservationsReleased, statRunsSettled });
+  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased + statRunsSettled + runsReaped > 0) {
+    logger.info('jobs.reaped', { ...result, reservationsReleased, statRunsSettled, runsReaped });
   }
   return result;
 }

@@ -7,9 +7,10 @@
  * - A tool is offered to the model only if the run is permitted to use it, and
  *   a call is accepted only if the tool was both offered and permitted — a
  *   model cannot widen its own permissions by naming another tool.
- * - Tools are projected from the existing capability registry
- *   (`src/server/tasks/capabilities.ts`); there is no second registry. The full
- *   tool registry and policy engine (autonomy modes) are P1-C.
+ * - What a model may execute is defined in one place: the research-run tool
+ *   registry (`src/server/runs/registry.ts`, P1-D), which builds its gateway
+ *   tools with `defineTool` and decides `permittedTools` through its policy.
+ *   `capabilityTool` projects the task capability registry for tests only.
  */
 
 import { z } from 'zod';

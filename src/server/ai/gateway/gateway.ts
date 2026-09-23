@@ -61,6 +61,7 @@ export interface CallScope {
   taskId?: string | null;
   jobId?: string | null;
   runId?: string | null;
+  stepId?: string | null;
 }
 
 export interface PlanInfo {
@@ -97,7 +98,7 @@ export interface CallOptions {
    * user always comes from the scope; a project named here is authorised
    * against that user like any other.
    */
-  ids?: { projectId?: string | null; taskId?: string | null; jobId?: string | null; runId?: string | null };
+  ids?: { projectId?: string | null; taskId?: string | null; jobId?: string | null; runId?: string | null; stepId?: string | null };
   /** Timeout class for long-form rounds, which may run longer than a plain generation. */
   timeoutKind?: 'longForm';
 }
@@ -282,6 +283,7 @@ export function createGateway(deps: GatewayDeps) {
         taskId: prepared.scope.taskId ?? null,
         jobId: prepared.scope.jobId ?? null,
         runId: prepared.scope.runId ?? null,
+        stepId: prepared.scope.stepId ?? null,
         purpose: prepared.request.purpose,
         kind: prepared.kind,
         provider: target.provider,
@@ -515,6 +517,7 @@ export function createGateway(deps: GatewayDeps) {
         userId: prepared.scope.userId,
         projectId: prepared.scope.projectId ?? null,
         runId: prepared.scope.runId ?? null,
+        stepId: prepared.scope.stepId ?? null,
         taskId: prepared.scope.taskId ?? null,
         accepted,
         rejected,

@@ -53,6 +53,7 @@ import {
   type ProducerContext,
 } from './contracts';
 import { registerHandler, type StepContext } from './executor';
+import { describeModel, modelHash, modelTooLarge, type ConfirmationState } from './model-confirmation';
 import { requirementsFor, selectModel } from '@/server/ai/model-router';
 import { estimateTokens } from '@/server/context/envelope';
 import { decideOutputLanguage, languageInstruction } from '@/server/context/language';
@@ -103,6 +104,45 @@ function instructionOf(context: StepContext, ...preferred: string[]): string {
 }
 
 /** Reads a string from a step's input or the task context, in that order. */
+/**
+ * The model a structural analysis may run, or the question to ask first (P1-D).
+ *
+ * A confirmed `pls-model.v1` proposal runs as before. A model anywhere else —
+ * the step's input, which the planner writes — runs only once the researcher
+ * has confirmed that exact model (its hash is in the task's confirmed models).
+ * Until then the step shows the model and asks; nothing is computed.
+ */
+async function confirmedModel(context: StepContext): Promise<{ model: unknown } | { question: string } | null> {
+  const proposed = readOutput<{ model?: unknown; confirmed?: boolean }>(context.available, 'pls-model.v1');
+  if (proposed?.confirmed && proposed.model) return { model: proposed.model };
+
+  const candidate = context.input.model ?? proposed?.model;
+  if (!candidate) return null;
+
+  if (modelTooLarge(candidate)) {
+    return {
+      question: say(
+        context,
+        'That model is too large to confirm here. Describe the constructs and the paths between them more briefly.',
+        'النموذج أكبر من أن يُؤكَّد هنا. صِف البنى والمسارات بينها باختصار.',
+      ),
+    };
+  }
+
+  const hash = modelHash(candidate);
+  const state = context.context as ConfirmationState;
+  if ((state.confirmedModels ?? []).includes(hash)) return { model: candidate };
+
+  await tasksRepo.mergeContext(context.taskId, { pendingModelConfirmation: hash });
+  const locale = context.locale === 'ar' ? 'ar' : 'en';
+  return {
+    question:
+      locale === 'ar'
+        ? `هل تؤكّد هذا النموذج قبل تشغيله؟ ${describeModel(candidate, locale)} أجب بـ «نعم» للتشغيل، أو صِف النموذج الذي تريده.`
+        : `Do you confirm this model before it runs? ${describeModel(candidate, locale)} Reply "yes" to run it, or describe the model you want.`,
+  };
+}
+
 function textInput(context: StepContext, key: string, fallback = ''): string {
   const fromInput = context.input[key];
   if (typeof fromInput === 'string' && fromInput.trim()) return fromInput;
@@ -698,24 +738,19 @@ export function registerAllHandlers(): void {
      * they have not seen would produce numbers for a study nobody is
      * conducting.
      */
-    const proposed = readOutput<{ model?: unknown; confirmed?: boolean }>(
-      context.available,
-      'pls-model.v1',
-    );
+    const resolved = await confirmedModel(context);
 
-    const model = context.input.model ?? (proposed?.confirmed ? proposed.model : undefined);
-
-    if (!model) {
-      const question = proposed
-        ? context.locale === 'ar'
-          ? 'هل تؤكّد نموذج PLS المقترح كما هو؟ النموذج نظريتك، ولن يُشغَّل قبل تأكيدك.'
-          : 'Do you confirm the proposed PLS model as it stands? The model is your theory, and it will not run until you confirm it.'
+    if (!resolved || 'question' in resolved) {
+      const question = resolved
+        ? resolved.question
         : context.locale === 'ar'
           ? 'ما نموذج PLS؟ حدّد المتغيّرات الكامنة والمسارات بينها.'
           : 'What is the PLS model? Name the constructs and the paths between them.';
 
       return needsInput(question, 'model');
     }
+
+    const model = resolved.model;
 
     const analysis = await runPls({
       datasetId,
@@ -773,21 +808,20 @@ export function registerAllHandlers(): void {
   registerHandler('statistics.cbsem', async (context): Promise<Observation> => {
     const datasetId = textInput(context, 'datasetId');
 
-    const proposed = readOutput<{ model?: unknown; confirmed?: boolean }>(
-      context.available,
-      'pls-model.v1',
-    );
+    const resolved = datasetId ? await confirmedModel(context) : null;
 
-    const model = context.input.model ?? (proposed?.confirmed ? proposed.model : undefined);
-
-    if (!datasetId || !model) {
+    if (!datasetId || !resolved || 'question' in resolved) {
       return needsInput(
-        context.locale === 'ar'
-          ? 'ما نموذج القياس؟ حدّد المتغيّرات الكامنة وبنودها.'
-          : 'What is the measurement model? Name the factors and their indicators.',
+        resolved && 'question' in resolved
+          ? resolved.question
+          : context.locale === 'ar'
+            ? 'ما نموذج القياس؟ حدّد المتغيّرات الكامنة وبنودها.'
+            : 'What is the measurement model? Name the factors and their indicators.',
         'model',
       );
     }
+
+    const model = resolved.model;
 
     const result = await runCbSem({ datasetId, userId: context.userId, model: model as never });
 

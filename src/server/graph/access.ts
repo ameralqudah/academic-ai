@@ -21,10 +21,18 @@ export const GRAPH_WRITE_LIMIT = { key: 'graph-write', max: 120, windowSeconds: 
 
 type Handler<A extends unknown[]> = (request: Request, ...rest: A) => Promise<Response>;
 
-/** Wraps a route handler so it does not exist while the flag is off. */
-export function flagged<A extends unknown[]>(handler: Handler<A>): Handler<A> {
+/** Research runs (P1-D): need the graph as well as their own flag. */
+export function runsFlagEnabled(): boolean {
+  return getEnv().FF_GRAPH && getEnv().FF_RUNS;
+}
+
+/**
+ * Wraps a route handler so it does not exist while its flag is off:
+ * `graph` (FF_GRAPH, the default) or `runs` (FF_GRAPH and FF_RUNS).
+ */
+export function flagged<A extends unknown[]>(handler: Handler<A>, feature: 'graph' | 'runs' = 'graph'): Handler<A> {
   return async (request, ...rest) => {
-    if (!graphEnabled()) {
+    if (feature === 'runs' ? !runsFlagEnabled() : !graphEnabled()) {
       return NextResponse.json(
         {
           ok: false,

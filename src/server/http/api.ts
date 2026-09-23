@@ -49,6 +49,12 @@ interface Options<TBody> {
   admin?: boolean;
   /** Route-specific limit; falls back to the global one. */
   rateLimit?: { max: number; windowSeconds?: number; key: string };
+  /**
+   * A second limit keyed by the signed-in user rather than the address (P1-D),
+   * applied after authentication. Several users behind one address do not
+   * share it, and one user cannot escape it by changing address.
+   */
+  userRateLimit?: { max: number; windowSeconds?: number; key: string };
   /** Largest accepted JSON body, in bytes (checked against Content-Length and the bytes read). */
   maxBodyBytes?: number;
 }
@@ -112,6 +118,11 @@ export function withApi<TBody = undefined, TParams = Record<string, string>>(
           emailVerified: session.user.verified === true,
         };
         if (options.admin && !hasAdminAccess(user)) throw AppError.forbidden();
+      }
+
+      if (options.userRateLimit && user) {
+        const result = await consume(`ratelimit:${options.userRateLimit.key}:user:${user.id}`, options.userRateLimit.max, options.userRateLimit.windowSeconds);
+        if (!result.allowed) throw AppError.rateLimited(result.retryAfterSeconds);
       }
 
       let body = undefined as TBody;

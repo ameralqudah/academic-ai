@@ -7,7 +7,7 @@
  * transition is written before the work that follows it.
  */
 
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 
 import { db } from '@/server/db';
 import {
@@ -40,6 +40,28 @@ export type TaskStatus =
 
 export type StepStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED' | 'BLOCKED';
 
+/** A step in one of these states has its outcome; it is never rewritten (P1-D). */
+const SETTLED_STEP_STATUSES = ['COMPLETED', 'FAILED', 'SKIPPED', 'BLOCKED'];
+
+/**
+ * The claim a settle belongs to (P1-D).
+ *
+ * The executor passes the `startedAt` its claim wrote. A settle then applies
+ * only while the step is still RUNNING under that same claim: a runner that
+ * lost the step (recovered by another after a crash, or cancelled) cannot
+ * overwrite what the current holder wrote. Without a claim, a settle still
+ * never rewrites a settled step.
+ */
+export interface StepClaim {
+  startedAt: Date;
+}
+
+function settleable(stepId: string, claim?: StepClaim) {
+  return claim
+    ? and(eq(taskSteps.id, stepId), eq(taskSteps.status, 'RUNNING'), eq(taskSteps.startedAt, claim.startedAt))
+    : and(eq(taskSteps.id, stepId), notInArray(taskSteps.status, SETTLED_STEP_STATUSES));
+}
+
 export async function create(input: NewTask): Promise<Task> {
   const [row] = await db.insert(tasks).values(input).returning();
   return row as Task;
@@ -70,23 +92,58 @@ export async function listForUser(userId: string, limit = 20): Promise<Task[]> {
     .limit(limit);
 }
 
+/** A task in one of these states is finished; nothing may move it again (P1-D). */
+export const TERMINAL_TASK_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED'] as const;
+
+/**
+ * Moves a task to `status`, unless it has already finished.
+ *
+ * Conditional on the task not being terminal, so a cancel is never overwritten
+ * by a runner that finishes a moment later, and a completed task never reads
+ * as cancelled. Returns whether the write applied. Reopening a failed task is
+ * a separate, explicit transition (`reopenFailed`).
+ */
 export async function setStatus(
   id: string,
   status: TaskStatus,
   extra: Partial<Task> = {},
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const rows = await db
     .update(tasks)
     .set({
       status,
       updatedAt: new Date(),
-      ...(status === 'RUNNING' && !extra.startedAt ? {} : {}),
       ...(status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED'
         ? { finishedAt: new Date() }
         : {}),
       ...extra,
     })
-    .where(eq(tasks.id, id));
+    .where(and(eq(tasks.id, id), notInArray(tasks.status, [...TERMINAL_TASK_STATUSES])))
+    .returning({ id: tasks.id });
+
+  return rows.length > 0;
+}
+
+/**
+ * Returns a failed task to the queue for a retry (P1-D).
+ *
+ * The one transition out of a terminal state, and only from FAILED: a
+ * cancelled task stays cancelled and a completed one stays completed. Failed
+ * and blocked steps go back to pending; completed steps keep their results.
+ */
+export async function reopenFailed(id: string): Promise<boolean> {
+  const rows = await db
+    .update(tasks)
+    .set({ status: 'QUEUED', errorReasonKey: null, finishedAt: null, updatedAt: new Date() })
+    .where(and(eq(tasks.id, id), eq(tasks.status, 'FAILED')))
+    .returning({ id: tasks.id });
+  if (rows.length === 0) return false;
+
+  await db
+    .update(taskSteps)
+    .set({ status: 'PENDING', startedAt: null, finishedAt: null })
+    .where(and(eq(taskSteps.taskId, id), inArray(taskSteps.status, ['FAILED', 'BLOCKED'])));
+  return true;
 }
 
 /** Merges into the context rather than replacing it. */
@@ -150,10 +207,11 @@ export async function completeStep(
   stepId: string,
   output: Record<string, unknown>,
   artifactIds: string[] = [],
-): Promise<void> {
+  claim?: StepClaim,
+): Promise<boolean> {
   const [step] = await db.select().from(taskSteps).where(eq(taskSteps.id, stepId)).limit(1);
 
-  await db
+  const rows = await db
     .update(taskSteps)
     .set({
       status: 'COMPLETED',
@@ -162,7 +220,10 @@ export async function completeStep(
       finishedAt: new Date(),
       durationMs: step?.startedAt ? Date.now() - step.startedAt.getTime() : null,
     })
-    .where(eq(taskSteps.id, stepId));
+    .where(settleable(stepId, claim))
+    .returning({ id: taskSteps.id });
+
+  return rows.length > 0;
 }
 
 /**
@@ -186,14 +247,15 @@ export async function failStep(
    * the moment it matters.
    */
   observation?: Record<string, unknown>,
-): Promise<{ willRetry: boolean }> {
+  claim?: StepClaim,
+): Promise<{ willRetry: boolean; applied?: boolean }> {
   const [step] = await db.select().from(taskSteps).where(eq(taskSteps.id, stepId)).limit(1);
   if (!step) return { willRetry: false };
 
   const attempts = step.attempts + 1;
   const willRetry = retryable && attempts < maxAttempts;
 
-  await db
+  const rows = await db
     .update(taskSteps)
     .set({
       status: willRetry ? 'PENDING' : 'FAILED',
@@ -210,9 +272,10 @@ export async function failStep(
       ...(observation ? { output: { observation } } : {}),
       ...(willRetry ? { startedAt: null } : { finishedAt: new Date() }),
     })
-    .where(eq(taskSteps.id, stepId));
+    .where(settleable(stepId, claim))
+    .returning({ id: taskSteps.id });
 
-  return { willRetry };
+  return rows.length > 0 ? { willRetry, applied: true } : { willRetry: false, applied: false };
 }
 
 /**
@@ -222,11 +285,11 @@ export async function failStep(
  * something the researcher asked for, so it neither fails the task nor holds
  * up the steps they did ask for.
  */
-export async function skipStep(stepId: string, reasonKey: string): Promise<void> {
+export async function skipStep(stepId: string, reasonKey: string, claim?: StepClaim): Promise<void> {
   await db
     .update(taskSteps)
     .set({ status: 'SKIPPED', errorReasonKey: reasonKey, finishedAt: new Date() })
-    .where(eq(taskSteps.id, stepId));
+    .where(settleable(stepId, claim));
 }
 
 /**
@@ -237,11 +300,11 @@ export async function skipStep(stepId: string, reasonKey: string): Promise<void>
  * asked again after the answer named none — marked the step failed after two
  * attempts and ended a task that had done nothing wrong.
  */
-export async function awaitInput(stepId: string): Promise<void> {
+export async function awaitInput(stepId: string, claim?: StepClaim): Promise<void> {
   await db
     .update(taskSteps)
     .set({ status: 'PENDING', errorReasonKey: 'task.step.needsInput', startedAt: null })
-    .where(eq(taskSteps.id, stepId));
+    .where(settleable(stepId, claim));
 }
 
 /** Marks steps that can never run because a dependency failed. */
@@ -251,7 +314,7 @@ export async function blockSteps(stepIds: string[]): Promise<void> {
   await db
     .update(taskSteps)
     .set({ status: 'BLOCKED', finishedAt: new Date() })
-    .where(inArray(taskSteps.id, stepIds));
+    .where(and(inArray(taskSteps.id, stepIds), notInArray(taskSteps.status, SETTLED_STEP_STATUSES)));
 }
 
 /**
@@ -260,15 +323,43 @@ export async function blockSteps(stepIds: string[]): Promise<void> {
  * A step marked RUNNING with no live executor is stranded: nothing will finish
  * it, and it blocks everything downstream. Recovery returns it to pending so
  * the work resumes rather than the task hanging.
+ *
+ * Called only by a runner that holds the task (its lease, or the direct call
+ * of a test): no other runner can be executing the step, so it is stranded.
+ * The interrupted execution counts as an attempt (P1-D). A step allowed one
+ * attempt — a statistics run, a document build, deep research — is marked
+ * failed as interrupted instead of running a second time, so a crash never
+ * silently repeats work that may already have had effects.
  */
-export async function recoverStranded(taskId: string): Promise<number> {
-  const rows = await db
-    .update(taskSteps)
-    .set({ status: 'PENDING', startedAt: null })
-    .where(and(eq(taskSteps.taskId, taskId), eq(taskSteps.status, 'RUNNING')))
-    .returning({ id: taskSteps.id });
+export async function recoverStranded(taskId: string, maxAttemptsOf: (capability: string) => number = () => 2): Promise<number> {
+  const stranded = await db
+    .select({ id: taskSteps.id, capability: taskSteps.capability, attempts: taskSteps.attempts, startedAt: taskSteps.startedAt })
+    .from(taskSteps)
+    .where(and(eq(taskSteps.taskId, taskId), eq(taskSteps.status, 'RUNNING')));
 
-  return rows.length;
+  let recovered = 0;
+  for (const step of stranded) {
+    const attempts = step.attempts + 1;
+    const exhausted = attempts >= maxAttemptsOf(step.capability);
+    const rows = await db
+      .update(taskSteps)
+      .set(
+        exhausted
+          ? { status: 'FAILED', attempts, errorReasonKey: 'task.step.interrupted', finishedAt: new Date() }
+          : { status: 'PENDING', attempts, startedAt: null },
+      )
+      .where(
+        and(
+          eq(taskSteps.id, step.id),
+          eq(taskSteps.status, 'RUNNING'),
+          step.startedAt ? eq(taskSteps.startedAt, step.startedAt) : sql`${taskSteps.startedAt} is null`,
+        ),
+      )
+      .returning({ id: taskSteps.id });
+    recovered += rows.length;
+  }
+
+  return recovered;
 }
 
 /** Tasks that were mid-flight when the process stopped. */

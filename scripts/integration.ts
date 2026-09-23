@@ -4913,11 +4913,12 @@ async function main() {
       ]),
     );
 
-    for (const step of steps) {
-      if (step.status === 'FAILED') await tasksRepo.failStep(step.id, 'retry', true, 99);
-    }
-
-    await tasksRepo.setStatus(task.id, 'RUNNING');
+    /*
+     * Through the explicit retry transition (P1-D): a finished step and a
+     * finished task are no longer rewritten by the ordinary status writes, so
+     * reopening a failed task is its own operation.
+     */
+    await tasksRepo.reopenFailed(task.id);
     await runTask(task.id);
 
     check('a retried task completes', (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');

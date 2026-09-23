@@ -1,4 +1,5 @@
 import { ArrowLeft, ArrowRight, Check, Circle, MessagesSquare, PenLine, Sparkles } from 'lucide-react';
+import { runsEnabled } from '@/server/runs/service';
 import type { Metadata } from 'next';
 import { getTranslations } from 'next-intl/server';
 
@@ -35,6 +36,8 @@ export default async function ProjectPage({ params }: Props) {
   const tstats = await getTranslations({ locale, namespace: 'stats' });
   /* The analysis workbench is part of the research workspace, behind FF_GRAPH (P1-C). */
   const graphOn = graphEnabled();
+  const runsOn = runsEnabled();
+  const truns = await getTranslations({ locale, namespace: 'runs' });
   const number = new Intl.NumberFormat(locale === 'ar' ? 'ar-EG' : 'en-US');
   const Arrow = locale === 'ar' ? ArrowLeft : ArrowRight;
 
@@ -191,6 +194,14 @@ export default async function ProjectPage({ params }: Props) {
                     className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink-soft transition-colors hover:border-line-strong hover:text-ink"
                   >
                     {tstats('title')}
+                  </Link>
+                ) : null}
+                {runsOn ? (
+                  <Link
+                    href={`/projects/${project.id}/runs`}
+                    className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink-soft transition-colors hover:border-line-strong hover:text-ink"
+                  >
+                    {truns('title')}
                   </Link>
                 ) : null}
               </div>

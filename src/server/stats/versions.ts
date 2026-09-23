@@ -325,8 +325,32 @@ async function nextVersionNo(datasetId: string): Promise<number> {
  * A new version from an existing one, by a recorded deterministic operation.
  * The input version is never touched.
  */
-export async function transformVersion(actor: StatsActor, versionId: string, input: TransformInput, projectId?: string | null): Promise<{ version: DatasetVersion; report: Record<string, unknown> }> {
+export async function transformVersion(
+  actor: StatsActor,
+  versionId: string,
+  input: TransformInput,
+  projectId?: string | null,
+  options: { idempotencyKey?: string | null } = {},
+): Promise<{ version: DatasetVersion; report: Record<string, unknown> }> {
   const source = await requireVersion(versionId, actor, 'EDITOR', projectId);
+  /*
+   * Idempotent on a caller's key (P1-D: a research-run step). The same key on
+   * the same input version returns the version it already made — a retried
+   * step never creates a second one.
+   */
+  const idempotencyKey = options.idempotencyKey ?? null;
+  const existing = async () => {
+    if (!idempotencyKey) return null;
+    const [row] = await db
+      .select({ transformation: datasetTransformations, version: datasetVersions })
+      .from(datasetTransformations)
+      .innerJoin(datasetVersions, eq(datasetVersions.id, datasetTransformations.outputVersionId))
+      .where(and(eq(datasetTransformations.inputVersionId, source.id), eq(datasetTransformations.idempotencyKey, idempotencyKey)))
+      .limit(1);
+    return row ? { version: row.version, report: row.transformation.report } : null;
+  };
+  const already = await existing();
+  if (already) return already;
   if (!source.datasetId) throw new AppError('CONFLICT', 'The dataset of this version was deleted; it can be read but not transformed.', 'حُذفت مجموعة البيانات؛ لا يمكن تحويل هذا الإصدار.');
   const [dataset] = await db.select().from(datasets).where(eq(datasets.id, source.datasetId)).limit(1);
   if (!dataset || dataset.deletedAt) throw new AppError('NOT_FOUND', 'The dataset was not found.', 'لم يُعثر على مجموعة البيانات.');
@@ -345,7 +369,7 @@ export async function transformVersion(actor: StatsActor, versionId: string, inp
         const report = { changed: input.columns.map((column) => ({ column: column.name, from: schema.find((c) => c.name === column.name), to: columns.find((c) => c.name === column.name) })) };
         const version = await insertVersion(
           { ...pick(source), versionNo, parentVersionId: source.id, schemaHash: hashOf(columns), columns: columns as unknown as Record<string, unknown>[] },
-          { datasetId: source.datasetId, userId: actor.userId, projectId: source.projectId, inputVersionId: source.id, operation: 'set-schema', parameters: { columns: input.columns }, report, engineVersion: ENGINE.version },
+          { datasetId: source.datasetId, userId: actor.userId, projectId: source.projectId, inputVersionId: source.id, operation: 'set-schema', parameters: { columns: input.columns }, report, engineVersion: ENGINE.version, idempotencyKey },
         );
         return { version, report };
       }
@@ -380,13 +404,18 @@ export async function transformVersion(actor: StatsActor, versionId: string, inp
           columnCount: reread.columns.length,
           columns: columns as unknown as Record<string, unknown>[],
         },
-        { datasetId: source.datasetId, userId: actor.userId, projectId: source.projectId, inputVersionId: source.id, operation: 'clean', parameters: { actions: input.actions, order: 'fixed engine order (clean.ts)' }, report: deterministicReport as unknown as Record<string, unknown>, engineVersion: ENGINE.version },
+        { datasetId: source.datasetId, userId: actor.userId, projectId: source.projectId, inputVersionId: source.id, operation: 'clean', parameters: { actions: input.actions, order: 'fixed engine order (clean.ts)' }, report: deterministicReport as unknown as Record<string, unknown>, engineVersion: ENGINE.version, idempotencyKey },
       );
       logger.info('stats.version.cleaned', { datasetId: source.datasetId, from: source.versionNo, to: versionNo, rows: reread.rows.length });
       return { version, report: deterministicReport as unknown as Record<string, unknown> };
     } catch (error) {
       /* Two transformations raced for the same version number: take the next one. */
-      if (String((error as { cause?: { code?: string }; code?: string })?.cause?.code ?? (error as { code?: string }).code) === '23505') continue;
+      if (String((error as { cause?: { code?: string }; code?: string })?.cause?.code ?? (error as { code?: string }).code) === '23505') {
+        /* …unless the race was with a retry of this same keyed step, which already made its version. */
+        const made = await existing();
+        if (made) return made;
+        continue;
+      }
       throw error;
     }
   }

@@ -10,6 +10,7 @@ Each step gets a section when it is merged.
 | P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`) | [#30](https://github.com/ameralqudah/academic-ai/pull/30) |
 | P1-B Model Gateway | ✅ merged (`P1B_PLAN.md`, `P1B_REPORT.md`) | [#31](https://github.com/ameralqudah/academic-ai/pull/31) |
 | P1-C Deterministic statistics engine + graph integration (re-scoped) | ✅ merged (`P1C_PLAN.md`, `P1C_REPORT.md`); CI green on the merged head | [#32](https://github.com/ameralqudah/academic-ai/pull/32) |
+| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | 🔍 in review (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); not merged | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
 
 ---
 
@@ -172,3 +173,38 @@ Full report: `docs/phase1/P1C_REPORT.md`. Plan and audit: `docs/phase1/P1C_PLAN.
 - **Migration:** `0013_p1c_statistics`, additive (7 tables and 3 columns).
 - **Tests:** engine 361 and database 105 (both in CI), e2e with the flag on and off, and smoke gates.
 
+---
+
+## P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths (in review)
+
+Full report: `docs/phase1/P1D_REPORT.md`. Plan and audit: `docs/phase1/P1D_PLAN.md`.
+
+- **One controlled path**, behind `FF_GRAPH` + `FF_RUNS` and a queue-backed job runner:
+  - intent;
+  - planner (a structured plan through the Model Gateway; it executes nothing);
+  - the one tool registry (20 tools);
+  - policy (10 rules, evaluated immediately before each step);
+  - hash-bound, single-use approval;
+  - leased pg-boss executor;
+  - P1-C services for every number;
+  - Research Graph with step provenance;
+  - append-only run events.
+- **Chat is unchanged in design.** It stays on the task engine, with only the approved fixes:
+  - no re-execution of settled steps;
+  - monotonic cancel;
+  - project and conversation ownership checks;
+  - a pinned PLS/CB-SEM model confirmation;
+  - a working Retry.
+
+  `/api/agent` is kept.
+- **RLS covers only the four run tables and the run paths.** It uses `SET LOCAL ROLE academic_app` per transaction and fails closed if the database cannot enforce it. Graph and statistics tables keep application-level authorisation. The application as a whole is not RLS-protected.
+- **Limits** for each plan tier are held in one module and can be overridden up to hard ceilings.
+- **Idempotency.** Step idempotency keys reach P1-C and the graph, so a retry or a crash never duplicates a statistical run, a dataset version, a node or a claim.
+- **Migrations:** `0014_p1d_runs` and `0015_p1d_rls`, both additive.
+- **Tests:**
+  - `test:runs` (71);
+  - `test:runs:db` (74, including RLS at the database);
+  - `test:tasks:db` (39);
+  - e2e with the flags on and off;
+  - smoke gates.
+- **Neon.** The RLS layer (role, policies, fail-closed probe through `neondb_owner`) was verified with SQL on a Neon branch, which was then deleted (`P1D_NEON_VERIFICATION.md`). The application-level test on Neon was **not** executed, because the network here is blocked. That test and the production pooler and role check still block enabling `FF_RUNS`.

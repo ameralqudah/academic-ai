@@ -17,6 +17,8 @@ export const QUEUES = {
   task: 'task-run',
   /** { jobId } — a row of analysis_jobs: PLS bootstrap or deep research. */
   analysis: 'analysis-job-run',
+  /** { runId } — advance a research run (P1-D). Same pg-boss instance; no second queue system. */
+  run: 'research-run',
   /** Every minute: re-queue work whose worker disappeared. */
   reaper: 'jobs-reaper',
 } as const;
@@ -64,6 +66,13 @@ export async function getBoss(): Promise<PgBoss | null> {
         policy: 'stately',
         expireInSeconds: 60 * 60,
         retryLimit: 2,
+        retryDelay: 5,
+        retryBackoff: true,
+      });
+      await instance.createQueue(QUEUES.run, {
+        policy: 'stately',
+        expireInSeconds: 2 * 60 * 60,
+        retryLimit: 3,
         retryDelay: 5,
         retryBackoff: true,
       });

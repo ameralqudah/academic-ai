@@ -17,10 +17,29 @@ export async function dispatchTask(taskId: string): Promise<void> {
   if (jobRunner() !== 'direct' && (await enqueue(QUEUES.task, { taskId }, taskId))) return;
 
   const { executeTask } = await import('@/server/services/task.service');
-  const run = jobRunner() === 'direct' ? executeTask(taskId) : withLease('tasks', taskId, () => executeTask(taskId));
+  /*
+   * Under the task's lease in every mode (P1-D). Direct mode ran without one,
+   * so a second instance resuming "interrupted" work could run a task that was
+   * still running elsewhere, and re-execute its steps.
+   */
+  const run = withLease('tasks', taskId, () => executeTask(taskId));
 
   void Promise.resolve(run).catch((error: unknown) => {
     logger.error('task.crashed', { taskId, error: String(error) });
+  });
+}
+
+/**
+ * Advances a research run in the background (P1-D). Queued when the queue is
+ * available; otherwise run in this process under the run's own lease (the
+ * executor claims it), so a queue outage never runs a step twice. Research
+ * runs are refused in `direct` mode before they get here.
+ */
+export async function dispatchResearchRun(runId: string): Promise<void> {
+  if (jobRunner() !== 'direct' && (await enqueue(QUEUES.run, { runId }, runId))) return;
+  const { advanceRun } = await import('@/server/runs/executor');
+  void advanceRun(runId).catch((error: unknown) => {
+    logger.error('run.crashed', { runId, error: String(error) });
   });
 }
 

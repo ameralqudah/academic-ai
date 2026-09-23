@@ -4920,5 +4920,38 @@ console.log('\nwhat a model costs');
   check('with no history, the interface decides a mixed message', decideConversationLanguage({ request: 'حلل SmartPLS', interfaceLocale: 'en' }), 'en');
 }
 
+/* -------------------------------------------------------------------------- */
+/*          P0.1 — patched transitive dependencies still work in use          */
+/* -------------------------------------------------------------------------- */
+
+{
+  /*
+   * `uuid` and `image-size` are pinned by `overrides` to their patched majors.
+   * Both are used only deep inside exceljs and pptxgenjs, so a break would show
+   * up only when a researcher exports — this exercises exactly those paths.
+   */
+  const { generatePptx, validateArtifactBytes } = await import('@/server/generators/documents');
+  const { generateXlsx } = await import('@/server/generators/spreadsheet');
+  const ExcelJS = (await import('exceljs')).default;
+
+  const deck = await generatePptx('P0 check', [{ title: 'Slide', bullets: ['one', 'two'] }]);
+  check('a PowerPoint file is still produced after the override', (await validateArtifactBytes(deck, 'pptx')).valid, true);
+
+  const sheet = await generateXlsx([{ name: 'Data', headers: ['a', 'b'], rows: [[1, 2]] }]);
+  check('a workbook is still produced after the override', (await validateArtifactBytes(sheet, 'xlsx')).valid, true);
+
+  /* The data-bar extension is the one exceljs path that calls uuid.v4(). */
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('cf');
+  ws.addRow([1]);
+  ws.addRow([2]);
+  ws.addConditionalFormatting({
+    ref: 'A1:A2',
+    rules: [{ type: 'dataBar', priority: 1, cfvo: [{ type: 'min' }, { type: 'max' }] } as never],
+  });
+  const written = new Uint8Array(await workbook.xlsx.writeBuffer());
+  check('exceljs writes a rule that needs uuid', written.byteLength > 1000, true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -5449,9 +5449,20 @@ console.log('\nmodel routing');
   );
 
   /* Candidates are the providers with keys — a keyless model is not an option. */
+  /*
+   * Asserted on behaviour, not on the text of the check: the router filters by
+   * `isUsableApiKey`, the same rule the providers apply to themselves, so a
+   * blank or placeholder key is never a candidate.
+   */
+  const { isUsableApiKey } = await import('@/ai/key');
   assertTrue(
     'only configured providers are candidates',
-    routerSource.includes('ANTHROPIC_API_KEY') && routerSource.includes('key.trim().length > 0'),
+    routerSource.includes('ANTHROPIC_API_KEY') &&
+      routerSource.includes('isUsableApiKey(key)') &&
+      !isUsableApiKey('') &&
+      !isUsableApiKey('   ') &&
+      !isUsableApiKey('paste your key here') &&
+      isUsableApiKey('sk-ant-api03-' + 'x'.repeat(40)),
   );
 
   /* The reason is logged, and never the key. */

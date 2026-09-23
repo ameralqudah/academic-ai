@@ -3976,7 +3976,13 @@ console.log('\nmodel routing by plan, and provider resilience');
     route({ tier, configured, defaultProvider, needsReasoning: false, latencySensitive: false, contextTokens: 1000 });
 
   check('a free account is routed away from the premium model', plan('free', [claude, gemini]).chosen.provider, 'google');
-  check('unless the premium model is the only one there is', plan('free', [claude]).chosen.provider, 'anthropic');
+  let premiumOnly = 'routed';
+  try {
+    plan('free', [claude]);
+  } catch (error) {
+    premiumOnly = error instanceof GatewayError ? `${error.errorClass}:${error.detail}` : 'other';
+  }
+  check('even when the premium model is the only one there is: refused, no eligible model', premiumOnly, 'entitlement:no_eligible_model');
   check('a paid account gets the premium model first', plan('paid', [gemini, claude], 'google').chosen.provider, 'anthropic');
   check('but not when its key is unusable (not configured)', plan('paid', [gemini]).chosen.provider, 'google');
   check('with no known user the gateway routes as the free plan', [plan(undefined, [claude, gemini]).tier, plan(undefined, [claude, gemini]).chosen.provider], ['free', 'google']);
@@ -5386,6 +5392,23 @@ console.log('\nwhat a model costs');
     if (/\brecordAIUsage\(/.test(await readFile(file, 'utf8'))) ledgerWriters.push(file);
   }
   check('no application code meters a model call itself (recordAIUsage has no callers)', ledgerWriters, []);
+
+  /*
+   * The per-plan output cap is enforced in the gateway. It is set above every
+   * call site's own request, so it changes no feature on the free plan; this
+   * keeps that true when a call site asks for more (raise the cap deliberately).
+   */
+  const { OUTPUT_TOKEN_CAP } = await import('../src/server/ai/gateway/policy');
+  const overCap: string[] = [];
+  for (const file of files) {
+    if (file.startsWith('src/server/ai/gateway/')) continue;
+    const source = await readFile(file, 'utf8');
+    for (const match of source.matchAll(/(?:maxTokens|maxOutputTokens)\s*:\s*(?:Math\.min\(\s*)?([\d_]+)|tokensPerRound\s*\?\?\s*\(([^)]*)\)/g)) {
+      const numbers = (match[1] ?? match[2] ?? '').match(/\d[\d_]*/g) ?? [];
+      for (const n of numbers) if (Number(n.replaceAll('_', '')) > OUTPUT_TOKEN_CAP.free) overCap.push(`${file}: ${n}`);
+    }
+  }
+  check('no call site asks for more output than the free plan’s cap (so the cap changes no feature)', overCap, []);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

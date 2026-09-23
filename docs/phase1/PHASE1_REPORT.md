@@ -140,5 +140,6 @@ Full report: `docs/phase1/P1B_REPORT.md`. Plan and audit: `docs/phase1/P1B_PLAN.
 - **Tool calls.** Tool calls are validated, checked against the run's permissions and recorded in `ai_tool_calls`. Tools are projected from the existing capability registry; no second registry was created.
 - **Resilience.** Timeouts per kind, at most 3 attempts, and classified errors (only transient classes are retried). Streams are cancelled on client disconnect.
 - **Migration:** `0012_p1b_model_gateway`, additive (3 tables).
-- **Tests:** gateway unit (80) and database (34) suites, both in CI, with mock providers only. Mutation checks cover the entitlement filter, the failover class filter, the retry guard, the reservation lock, the word check and the project check.
+- **Final review:** a free user on a premium-only deployment is refused ("no eligible model for this plan", never served premium). Output tokens are capped per plan by the gateway (free 8,192 · paid 32,768 · admin 64,000), above every current call site's request.
+- **Tests:** gateway unit (87) and database (37) suites, both in CI, with mock providers only. Mutation checks cover the entitlement filter, the failover class filter, the retry guard, the reservation lock, the word check and the project check.
 - **Deferred:** RLS on the new tables (P1-D); moving the text parsers for titles, evidence and extraction to structured output; embedding call sites (P1-G); the tool registry and policy engine (P1-C/D).

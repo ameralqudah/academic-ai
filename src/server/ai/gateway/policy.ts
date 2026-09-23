@@ -7,6 +7,17 @@ import type { RequestKind } from './contract';
 import { isRetryable, type GatewayError } from './errors';
 
 /** Hard ceilings. A caller may ask for less, never more. */
+/**
+ * The most output tokens one call may ask for, by the plan's tier. Enforced by
+ * the gateway on every call (`prepare`), never by call sites: a larger request
+ * is lowered to the cap, and the cap is recorded on the routing decision.
+ *
+ * The free cap sits above every current call site's request (the largest is
+ * 8,000, a generated section), so today it changes no feature; it bounds the
+ * cost of any one call, including one a future call site or a bug asks for.
+ */
+export const OUTPUT_TOKEN_CAP: Record<'free' | 'paid' | 'admin', number> = { free: 8_192, paid: 32_768, admin: 64_000 };
+
 export const TIMEOUTS: Record<RequestKind | 'longForm', number> = {
   generate: 120_000,
   structured: 60_000,

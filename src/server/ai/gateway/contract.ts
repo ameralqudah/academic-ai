@@ -161,6 +161,8 @@ export interface RoutingDecision {
   /** Allowed substitutes, in order, all within the entitlement. */
   fallbacks: { provider: Provider; model: string; modelClass: ModelClass }[];
   reason: string;
+  /** The plan's output-token cap, and whether it lowered what the call asked for. */
+  output?: { cap: number; requested: number; capped: boolean };
 }
 
 export interface GatewayResponse {

@@ -161,6 +161,14 @@ export function toAppError(error: GatewayError): AppError {
     case 'quota':
       return error.cause instanceof AppError ? error.cause : AppError.planLimit('aiRequests', 0, 0);
     case 'entitlement':
+      if (error.detail === 'no_eligible_model') {
+        return new AppError(
+          'PLAN_LIMIT',
+          'No AI model is available on your plan. Upgrade to Pro, or ask the administrator to configure a model your plan includes.',
+          'لا يتوفر نموذج ذكاء اصطناعي ضمن خطتك. ارتقِ إلى Pro، أو اطلب من المسؤول إعداد نموذج مشمول في خطتك.',
+          { metric: 'model', errorClass: error.errorClass, reason: 'no_eligible_model' },
+        );
+      }
       return new AppError('FORBIDDEN', 'That model is not included in your plan.', 'هذا النموذج غير مشمول في خطتك.', {
         errorClass: error.errorClass,
       });

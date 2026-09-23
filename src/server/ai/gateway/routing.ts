@@ -66,6 +66,9 @@ function order(input: RoutingInput, pool: ConfiguredModel[], premiumFirst: boole
   return ranked;
 }
 
+/** `GatewayError.detail` when no configured model is inside the plan (as opposed to a requested model outside it). */
+export const NO_ELIGIBLE_MODEL = 'no_eligible_model';
+
 export function route(input: RoutingInput): RoutingDecision {
   const tier: Tier = input.tier ?? 'free';
   const ceiling = ENTITLEMENT[tier];
@@ -75,16 +78,15 @@ export function route(input: RoutingInput): RoutingDecision {
     throw new GatewayError('not_configured', 'No AI provider is configured.');
   }
 
-  let pool = input.configured.filter((m) => within(modelClass(m.provider, m.model), ceiling));
-  let reason = 'entitled';
+  const pool = input.configured.filter((m) => within(modelClass(m.provider, m.model), ceiling));
+  const reason = 'entitled';
   if (pool.length === 0) {
     /*
-     * A deployment whose only model is premium serves everyone with it: that is
-     * a fact about the deployment, not a fallback, and it is named as such.
-     * With any non-premium model configured this branch is unreachable.
+     * No configured model is inside this plan (a deployment whose only model is
+     * premium, seen by a free user). Refused, never served with a model the
+     * plan does not include: a premium model is never a fallback.
      */
-    pool = input.configured;
-    reason = 'only_model_configured';
+    throw new GatewayError('entitlement', 'No eligible model for this plan.', { detail: NO_ELIGIBLE_MODEL });
   }
 
   if (input.requested) {

@@ -167,7 +167,7 @@ src/server/ai/gateway/              (server-only; nothing here is importable fro
 - **Entitlement per tier:**
   - `free` → `standard` and `economy`;
   - `paid` and `admin` → all classes.
-- **The existing single-provider rule is kept and made explicit:** when the only configured model is premium, a free user is served by it, with routing reason `only_model_configured`. This is a deployment fact rather than a fallback, and it is observable and tested. It never happens when a non-premium model is configured.
+- **Superseded in the final review (`P1B_REPORT.md` §11.1): a free user on a premium-only deployment is now refused with "no eligible model for this plan".** Original plan text: *The existing single-provider rule is kept and made explicit:* when the only configured model is premium, a free user is served by it, with routing reason `only_model_configured`. This is a deployment fact rather than a fallback, and it is observable and tested. It never happens when a non-premium model is configured.
 - **Candidate order:**
   - the user's explicit choice (validated against the entitlement again inside the gateway: defence in depth over `resolveRequestedModel`);
   - otherwise the existing preference order (context size, reasoning, latency) within the entitlement.

@@ -22,7 +22,7 @@ import { db } from '@/server/db';
 import { aiQuotaReservations, aiToolCalls, aiUsageEvents, usageTracking } from '@/server/db/schema';
 import { forgetPlan, productionDeps, recordToolExecution, setGatewayForTests } from '@/server/ai/gateway';
 import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
-import { GatewayError } from '@/server/ai/gateway/errors';
+import { GatewayError, toAppError } from '@/server/ai/gateway/errors';
 import { createGateway, type GatewayDeps } from '@/server/ai/gateway/gateway';
 import { releaseExpired, reserve } from '@/server/ai/gateway/quota';
 import { defineTool } from '@/server/ai/gateway/tools';
@@ -127,6 +127,35 @@ async function main() {
     const viaRouter = await runForUser(free, async () => (await selectModel(requirementsFor({ capability: 'literature.review' }))).provider.complete({ task: 'chat', locale: 'en', system: '', messages: [{ role: 'user', content: 'x' }] }));
     const viaResolver = await runForUser(free, async () => (await resolveProvider()).complete({ task: 'chat', locale: 'en', system: '', messages: [{ role: 'user', content: 'x' }] }));
     check('no alternate path reaches the premium model for a free user (router, resolver)', [viaRouter.provider, viaResolver.provider], ['google', 'google']);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nL/M. A deployment whose only model is premium');
+  {
+    const premiumOnly = createGateway({ ...deps, models: async () => ({ configured: [CLAUDE], defaultProvider: 'anthropic', siblings: {} }) });
+    const u = await user('premium-only');
+    const claudeBefore = claude.calls.length;
+    let publicError: AppError | null = null;
+    const refused = await runForUser(u, () =>
+      outcome(async () => {
+        try {
+          await premiumOnly.generate(ask('x'));
+        } catch (error) {
+          if (error instanceof GatewayError) publicError = toAppError(error);
+          throw error;
+        }
+      }),
+    );
+    const reservations = await db.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.userId, u));
+    check(
+      'a free user is refused (no eligible model), and nothing is sent, reserved or counted',
+      [refused, claude.calls.length - claudeBefore, reservations.length, (await events(u)).length, (await ledger(u)).requests],
+      ['gateway:entitlement', 0, 0, 0, 0],
+    );
+    const shown = publicError as AppError | null;
+    check('the user is told why, in both languages, with the upgrade path', [shown?.code, shown?.message.includes('No AI model is available on your plan'), Boolean(shown?.messageAr)], ['PLAN_LIMIT', true, true]);
+    const served = await runForUser(paid, () => premiumOnly.generate(ask('x')));
+    check('a paid user on the same deployment is served by it', served.provider, 'anthropic');
   }
 
   /* ------------------------------------------------------------------ */

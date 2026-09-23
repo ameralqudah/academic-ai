@@ -19,7 +19,7 @@ import type { Provider, StreamEvent } from '@/server/ai/gateway/contract';
 import { classifyHttp, GatewayError, redact, toAppError } from '@/server/ai/gateway/errors';
 import { createGateway, type CallScope, type GatewayDeps, type PlanInfo } from '@/server/ai/gateway/gateway';
 import { attemptCost, type AttemptRecord } from '@/server/ai/gateway/metering';
-import { backoffMs, MAX_ATTEMPTS, type Clock } from '@/server/ai/gateway/policy';
+import { backoffMs, MAX_ATTEMPTS, OUTPUT_TOKEN_CAP, type Clock } from '@/server/ai/gateway/policy';
 import type { Reservation } from '@/server/ai/gateway/quota';
 import { modelClass, route } from '@/server/ai/gateway/routing';
 import { capabilityTool, defineTool, validateToolCalls } from '@/server/ai/gateway/tools';
@@ -290,8 +290,16 @@ async function main() {
   check('free user requesting the premium model is refused', await Promise.resolve().then(() => { try { route({ ...base, tier: 'free', requested: all[0] }); return 'routed'; } catch (e) { return (e as GatewayError).errorClass; } }), 'entitlement');
   const chosen = route({ ...base, tier: 'paid', requested: all[1] });
   check('an explicit choice is honoured with no cross-provider substitute', [chosen.chosen.provider, chosen.fallbacks.length, chosen.reason], ['openai', 0, 'user_selected']);
-  const only = route({ ...base, tier: 'free', configured: [all[0]!] });
-  check('only premium configured: served, and named as such', [only.chosen.provider, only.reason.startsWith('only_model_configured')], ['anthropic', true]);
+  const refusal = (() => {
+    try {
+      route({ ...base, tier: 'free', configured: [all[0]!] });
+      return 'routed';
+    } catch (e) {
+      return `${(e as GatewayError).errorClass}:${(e as GatewayError).detail}`;
+    }
+  })();
+  check('only premium configured: a free user is refused (no eligible model), never served premium', refusal, 'entitlement:no_eligible_model');
+  check('… while a paid user on the same deployment is served', route({ ...base, tier: 'paid', configured: [all[0]!] }).chosen.provider, 'anthropic');
   check('google sibling offered as an economy substitute', route({ ...base, tier: 'free', configured: [all[2]!] }).fallbacks.map((f) => `${f.provider}:${f.model}`), ['google:gemini-3.5-flash']);
   check('model classes', [modelClass('anthropic', 'claude-haiku-4-5'), modelClass('google', 'gemini-3.5-flash'), modelClass('openai', 'gpt-4.1-mini'), modelClass('openai', 'gpt-4.1')], ['premium', 'economy', 'economy', 'standard']);
 
@@ -314,6 +322,29 @@ async function main() {
     const r = await gw.generate(ask('hello', { needsReasoning: true }));
     check('free user routed off the premium model even for reasoning work', r.provider, 'openai');
     check('usage row carries the user, project, task and job ids', [h.meter[0]!.userId, h.meter[0]!.projectId, h.meter[0]!.taskId, h.meter[0]!.jobId], ['user-1', 'p1', 't1', 'j1']);
+  }
+
+  /* ====================== S. per-plan output cap ====================== */
+  console.log('\nS. Output tokens capped by the plan, in the gateway');
+  {
+    const o = new FakeAdapter('openai');
+    const h = harness({ openai: o }, { models: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai' });
+    const gw = createGateway(h.deps);
+    const big = await gw.generate(ask('x', { maxOutputTokens: 20_000 }));
+    check('a free call asking for more than the plan allows is lowered to the cap before the provider sees it', [o.calls.at(-1)!.request.maxOutputTokens, big.routing.output], [OUTPUT_TOKEN_CAP.free, { cap: OUTPUT_TOKEN_CAP.free, requested: 20_000, capped: true }]);
+    await gw.generate(ask('x', { maxOutputTokens: 8_000 }));
+    check('the largest request any call site makes today (8,000) is untouched on the free plan', o.calls.at(-1)!.request.maxOutputTokens, 8_000);
+    h.setPlan({ tier: 'paid' });
+    const paidCall = await gw.generate(ask('x', { maxOutputTokens: 20_000 }));
+    check('the paid plan has its own, higher cap', [o.calls.at(-1)!.request.maxOutputTokens, paidCall.routing.output?.capped], [20_000, false]);
+    await gw.generate(ask('x', { maxOutputTokens: 64_000 }));
+    check('… and is capped too', o.calls.at(-1)!.request.maxOutputTokens, OUTPUT_TOKEN_CAP.paid);
+    h.setPlan({ tier: 'free' });
+    const chunks: string[] = [];
+    o.push({ stream: ['a'] });
+    for await (const event of gw.stream(ask('x', { maxOutputTokens: 30_000 }))) if (event.type === 'text_delta') chunks.push(event.text);
+    check('streams are capped by the same rule', o.calls.at(-1)!.request.maxOutputTokens, OUTPUT_TOKEN_CAP.free);
+    check('caps rise with the plan', OUTPUT_TOKEN_CAP.free < OUTPUT_TOKEN_CAP.paid && OUTPUT_TOKEN_CAP.paid <= OUTPUT_TOKEN_CAP.admin, true);
   }
 
   /* ====================== G/H/R. retry and failover ====================== */

@@ -1,6 +1,6 @@
 # P1-B report: Production Model Gateway
 
-**Date:** 2026-09-23 · **Plan:** `docs/phase1/P1B_PLAN.md` (audit findings G-1 to G-13) · **Status:** implemented, all suites green locally; ready for review. `FF_GRAPH` stays off in production. P1-C has not been started.
+**Date:** 2026-09-23 · **Plan:** `docs/phase1/P1B_PLAN.md` (audit findings G-1 to G-13) · **Status:** implemented, including the final review decisions in §11; all suites green locally; ready for merge. `FF_GRAPH` stays off in production. P1-C has not been started.
 
 **Goal.** Every model call in Academic AI goes through one controlled path. That path:
 
@@ -132,7 +132,7 @@ The ledger is still `usage_tracking`, and the plan limits and the admin dashboar
   - computed results stay writable only by `recordRun` with an engine actor (P1-A.1), and the gateway never constructs one;
   - the LLM cannot create or alter a `verified` value.
 - **Excessive tokens:**
-  - the contract caps `maxOutputTokens` (64k), messages (400), system prompt size and parts;
+  - output tokens are capped per plan by the gateway (§11); the contract also caps `maxOutputTokens` (64k), messages (400), system prompt size and parts;
   - a request estimated to exceed the model's context window fails as `context_length` before any provider call.
 - **Observability:**
   - `ai.gateway.request`, `.route`, `.attempt`, `.tool` and `.result` log ids and metadata only, never prompts, outputs, dataset contents or keys;
@@ -150,16 +150,16 @@ The ledger is still `usage_tracking`, and the plan limits and the admin dashboar
 | Smoke | ✅ all passed (includes the new gateway gate) |
 | Analysis (statistics) | ✅ 1,329 |
 | Knowledge providers | ✅ |
-| **Gateway unit** (`test:gateway`, new, CI checks job) | ✅ 80 / 80 |
-| **Gateway database** (`test:gateway:db`, new, CI database job) | ✅ 34 / 34 |
+| **Gateway unit** (`test:gateway`, new, CI checks job) | ✅ 87 / 87 |
+| **Gateway database** (`test:gateway:db`, new, CI database job) | ✅ 37 / 37 |
 | Integration | ✅ 801 (was 807: seven assertions on the removed `runWithFailover` were replaced by four gateway assertions and the six-scenario gateway failover section) |
 | Jobs | ✅ 22 |
 | Research Graph | ✅ 170 |
 | Production build | ✅ |
-| Browser tests, `FF_GRAPH` unset (off) | ✅ 66 passed, 1 skipped (an earlier run on this branch had 1 flaky test, see below) |
+| Browser tests, `FF_GRAPH=false` | ✅ 66 passed, 1 skipped (an earlier run on this branch had 1 flaky test, see below) |
 | Browser tests, `FF_GRAPH=true` | ✅ 66 passed, 1 skipped |
 
-**The flaky browser test** is `chat.spec.ts` "an abandoned question can be dismissed from the top of the chat". In one of the three full runs on this branch it failed once and passed on its automatic retry. It is fully stubbed in the browser (`/api/tasks/*`) and touches no model call. It is a race inside the test: the UI removes the task before the stubbed DELETE handler sets its flag, and the test reads the flag once instead of polling. It is not changed in this PR (out of scope). The fix is one line: `await expect.poll(() => cancelled).toBe(true)`.
+**The flaky browser test** is `chat.spec.ts` "an abandoned question can be dismissed from the top of the chat". In one of the five full runs on this branch it failed once and passed on its automatic retry. It is fully stubbed in the browser (`/api/tasks/*`) and touches no model call. It is a race inside the test: the UI removes the task before the stubbed DELETE handler sets its flag, and the test reads the flag once instead of polling. It is not changed in this PR (out of scope). The fix is one line: `await expect.poll(() => cancelled).toBe(true)`.
 
 **Live provider checks** (`test:gateway:live`, new) run only with `GATEWAY_LIVE=1` and real keys. They check text generation, streaming, native structured output and a forced native tool call per configured provider. **They are not in CI**; no CI job depends on a paid API.
 
@@ -200,6 +200,8 @@ Each guard was removed in turn, and the suites were run against the mutant:
 | Remove the per-user reservation lock | 1 db failure. The first run showed that the gateway-level race alone did not catch it, so a direct `reserve()` race was added (6–7 grants for 5 without the lock). |
 | Replace the at-least-one-word check with the raw estimate | 1 db failure |
 | Remove the project access check (`prepare` and `embed`) | 2 unit + 3 db failures |
+| Put back the premium fallback for a plan with no eligible model | 1 unit + 2 db + 1 smoke failures |
+| Remove the output-cap clamp | 3 unit failures |
 
 ### 6.4 Test assertions that were replaced
 
@@ -215,9 +217,10 @@ These tests checked the removed implementation, and each was re-pointed at its g
 | Plan | As built | Why |
 |---|---|---|
 | Plan lookup failure → route as `free` | **Refused** | Stricter. Without a plan there is also no quota to reserve against. |
+| A premium-only deployment serves free users (`only_model_configured`) | **Refused: no eligible model for this plan** (§11) | It was never an explicit product policy. |
 | Separate `context.ts` and `structured.ts` | Folded into `gateway.ts` | Small; one lifecycle. |
 | Adapters import `server-only` | Not added; enforced by a smoke gate instead | `server-only` throws under `tsx`, which the test suites and the worker use. The gate fails the build if any client file imports the gateway, the registry or the router. |
-| `maxOutputTokens` clamped per purpose and plan | Capped by the contract (64k) plus a context-window pre-check | A per-plan output clamp is a product decision (it would change answer lengths). Listed below. |
+| `maxOutputTokens` clamped per purpose and plan | Clamped **per plan** by the gateway (§11); per purpose stays with the call sites, under that cap | A per-purpose table would duplicate what each call site already sets. |
 | Stream events `tool_call`, `usage`, `error` | `text_delta`, `notice`, `done` (usage is on `done`; errors are thrown) | No streamed tool use has a caller yet. |
 | `continuation` flag | New contract field | Needed so internal steps need headroom while chapters and repairs are not cut off at the limit (§4). |
 
@@ -227,7 +230,7 @@ These tests checked the removed implementation, and each was re-pointed at its g
 - **Per-instance caches.** The plan (30 s) and admin settings are cached per instance, so a plan upgrade or downgrade takes up to 30 s to affect routing.
 - **Quota semantics change.** Task-path generations (chapters, reviews) now count against the plan (G-4). Users who relied on the bypass will hit their limit sooner. This is intended, but worth a release note.
 - **Word estimates.** A reservation holds `estimatedWords` until it settles. Callers that over-estimate can briefly block a user near the word limit; the reservation is corrected at commit.
-- **Single premium model.** When the only configured model is premium, free users are served by it (`only_model_configured`, observable). This is the existing product rule, kept deliberately.
+- **Premium-only deployments.** A deployment configured with only a premium model now refuses free users (§11). Before switching production to such a configuration, configure a standard or economy model, or accept that free users cannot use AI features.
 
 ## 9. Intentionally deferred
 
@@ -235,7 +238,8 @@ These tests checked the removed implementation, and each was re-pointed at its g
 - **Titles, evidence and extraction parsers** in ai.service still parse text, behind the gateway (limits, metering and timeouts already apply). Moving them to `generateStructured` is follow-up work.
 - **Embeddings:** contract, adapters and tests exist, with no call sites until P1-G.
 - **Full tool registry, policy engine (autonomy modes), agent loop and approvals:** P1-C and P1-D. P1-B provides the gateway side: validated, permission-checked, recorded tool calls, with `recordToolExecution` for the executor.
-- **Per-plan output clamp**, and streamed tool-call events.
+- Streamed tool-call events.
+- An admin-editable output cap per plan (a `subscription_plans` column). Today the cap is keyed on the plan's tier (§11).
 - **Live provider tests in CI:** deliberately never.
 
 ## 10. Rollback
@@ -243,3 +247,65 @@ These tests checked the removed implementation, and each was re-pointed at its g
 - Migration 0012 is additive, and only the gateway reads the new tables.
 - Reverting the code returns to the old provider path. The old providers are restored with the revert.
 - The ledger format is unchanged, so no data migration is needed either way.
+
+## 11. Final review decisions
+
+### 11.1 Premium model when it is the only one configured: refused
+
+**Finding.** This was **not** an explicit product policy.
+
+- On `main` it existed only as a code comment in `candidatesFor` (`src/server/ai/model-requirements.ts`): "with one usable provider … everyone gets it: refusing to answer a free user is not a pricing strategy".
+- The P1-B plan carried it forward as `only_model_configured`.
+- No plan setting, admin option, pricing document or user-facing notice ever stated it.
+- It was an implementation fallback, so it has been removed.
+
+**Behaviour now.**
+
+- **Where it is enforced:** `route()` in `src/server/ai/gateway/routing.ts`. When no configured model is inside the plan's entitlement, it throws `GatewayError('entitlement', 'No eligible model for this plan.', { detail: 'no_eligible_model' })`. It never falls back to a model the plan does not include. There is no other route to a model: the smoke gate fails the build on any path around the gateway.
+- **Nothing is spent:** the refusal happens in `prepare`, before any quota is reserved and before any provider is contacted. No usage row is written and nothing counts against the plan.
+- **It is observable:** it is logged as `ai.gateway.route.refused` with the tier, the error class and the reason.
+- **How the user is informed:**
+  - `toAppError` returns `PLAN_LIMIT` (the code the UI already treats as an upgrade prompt), with `details.reason = 'no_eligible_model'`;
+  - English: "No AI model is available on your plan. Upgrade to Pro, or ask the administrator to configure a model your plan includes.";
+  - Arabic: "لا يتوفر نموذج ذكاء اصطناعي ضمن خطتك. ارتقِ إلى Pro، أو اطلب من المسؤول إعداد نموذج مشمول في خطتك."
+- **Paid and admin users** on the same deployment are served as before.
+- **Unchanged:** a free user who explicitly requests the premium model is still refused with `FORBIDDEN` ("That model is not included in your plan.").
+
+**Tests:**
+
+- unit: routing refuses the free user, with the reason, and still serves a paid user;
+- database: a free user on a premium-only deployment is refused; nothing is sent, reserved, metered or counted; the bilingual `PLAN_LIMIT` message is shown; a paid user is served;
+- smoke: the legacy-routing scenario now expects the refusal;
+- mutation: putting the fallback back fails 1 unit, 2 database and 1 smoke check.
+
+### 11.2 Per-plan output-length cap: implemented in the gateway
+
+- **Rule:** `OUTPUT_TOKEN_CAP` in `src/server/ai/gateway/policy.ts`. The cap is keyed on the plan's tier:
+
+  | Tier | Cap (output tokens per call) |
+  |---|---|
+  | free | 8,192 |
+  | paid | 32,768 |
+  | admin | 64,000 |
+
+- **Where it is enforced:** the gateway's `prepare`, on every call kind (generate, stream, structured, tool calls, structured repair), after the plan is resolved and before the context-window check and any provider call.
+  - A larger request is lowered to the cap. It is not refused, because the output is only bounded, and callers already handle a `length` finish.
+  - Call sites do not enforce it and cannot bypass it.
+- **It is observable:**
+  - logged as `ai.gateway.output.capped`;
+  - recorded on the routing decision as `output: { cap, requested, capped }`, both in the `ai.gateway.route` log and on every `ai_usage_events.routing` row.
+- **No existing feature is affected.** The free cap sits above every current call site's request. The largest is 8,000 (a generated section); long-form rounds ask for up to 3,500. A new smoke gate scans every call site's `maxTokens`, `maxOutputTokens` and `tokensPerRound` values and fails if any exceeds the free cap. It was checked against a mutant that raised one call site to 9,000.
+- **Cost exposure:** per call, output is at most 8,192 tokens on free, 32,768 on paid and 64,000 on admin. Per month, spend is still bounded by the request and word limits, which are enforced by the reservation.
+
+**Tests:**
+
+- unit (section S): a free call over the cap is lowered before the provider sees it; 8,000 is untouched on free; paid has its higher cap and is capped too; streams follow the same rule;
+- smoke: the call-site gate;
+- mutation: removing the clamp fails 3 unit checks.
+
+**Deferred:** an admin-editable cap per plan (a nullable `subscription_plans` column that overrides the tier default). It needs a schema change and an admin UI field, and the tier-keyed cap already bounds cost centrally.
+
+### 11.3 Final regression (head after these changes)
+
+typecheck ✅ · lint ✅ · audit ✅ 0 vulnerabilities · smoke ✅ · statistics ✅ 1,329 · gateway unit ✅ 87/87 · gateway database ✅ 37/37 · integration ✅ 801 · jobs ✅ 22 · Research Graph ✅ 170 · production build ✅ · browser tests `FF_GRAPH=false` ✅ 66 passed, 1 skipped · browser tests `FF_GRAPH=true` ✅ 66 passed, 1 skipped.
+

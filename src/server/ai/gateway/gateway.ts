@@ -46,7 +46,7 @@ import {
 } from './contract';
 import { classifyThrown, GatewayError } from './errors';
 import { attemptCost, type Meter } from './metering';
-import { backoffMs, nextTarget, shouldRetry, STREAM_IDLE_MS, timeoutFor, type Clock } from './policy';
+import { backoffMs, nextTarget, OUTPUT_TOKEN_CAP, shouldRetry, STREAM_IDLE_MS, timeoutFor, type Clock } from './policy';
 import type { Reservation, ReserveInput } from './quota';
 import { modelClass, route, type ConfiguredModel, type Tier } from './routing';
 import { offeredTools, validateToolCalls, type RejectedToolCall } from './tools';
@@ -170,7 +170,7 @@ export function createGateway(deps: GatewayDeps) {
     if (!parsed.success) {
       throw new GatewayError('invalid_request', `Invalid gateway request: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
     }
-    const request = parsed.data;
+    let request = parsed.data;
     const base = deps.scope();
     const scope = base ? { ...base, ...Object.fromEntries(Object.entries(options.ids ?? {}).filter(([, v]) => v)) } : null;
     if (!scope?.userId) {
@@ -191,16 +191,34 @@ export function createGateway(deps: GatewayDeps) {
     const available = deps.adapters();
     const usable = configured.filter((m) => available[m.provider]?.configured());
     const contextTokens = estimateTokens(inputText(request));
-    const decision = route({
-      tier: plan.tier,
-      configured: usable,
-      defaultProvider,
-      requested: request.requested ?? null,
-      needsReasoning: request.needsReasoning,
-      latencySensitive: request.latencySensitive,
-      contextTokens,
-      siblingModels: siblings,
-    });
+    let decision: RoutingDecision;
+    try {
+      decision = route({
+        tier: plan.tier,
+        configured: usable,
+        defaultProvider,
+        requested: request.requested ?? null,
+        needsReasoning: request.needsReasoning,
+        latencySensitive: request.latencySensitive,
+        contextTokens,
+        siblingModels: siblings,
+      });
+    } catch (error) {
+      /* A refusal is a routing decision too: observable, and nothing is reserved or sent. */
+      if (error instanceof GatewayError) {
+        logger.warn('ai.gateway.route.refused', { purpose: request.purpose, userId: scope.userId, tier: plan.tier, errorClass: error.errorClass, reason: error.detail ?? null });
+      }
+      throw error;
+    }
+
+    /* The plan's output cap, applied here for every kind of call; the context check below sees the capped value. */
+    const cap = OUTPUT_TOKEN_CAP[plan.tier];
+    const asked = request.maxOutputTokens;
+    if (asked > cap) {
+      request = { ...request, maxOutputTokens: cap };
+      logger.info('ai.gateway.output.capped', { purpose: request.purpose, tier: plan.tier, requested: asked, cap });
+    }
+    decision = { ...decision, output: { cap, requested: asked, capped: asked > cap } };
 
     const window = available[decision.chosen.provider]!.capabilities(decision.chosen.model).contextTokens;
     if (contextTokens + request.maxOutputTokens > window) {

@@ -47,6 +47,8 @@ import { extractDocument, isReadableDocument } from '@/server/files/extract';
 import { chunkDocument } from '@/server/files/retrieve';
 import type { Dataset as DatasetRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
+import { ensureInitialVersion, recordLegacyClean, verifiedRunCount, versionObjectKeys } from '@/server/stats/versions';
 import { resolveReason } from '@/server/http/reasons';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import {
@@ -170,6 +172,8 @@ async function storeDocument(input: SaveDatasetInput): Promise<SavedDataset> {
 
 export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset> {
   const { userId, file } = input;
+  await assertProjectLink(userId, input.projectId);
+  await assertConversationLink(userId, input.conversationId);
 
   if (file.bytes.byteLength > MAX_FILE_BYTES) {
     throw new AppError(
@@ -266,6 +270,11 @@ export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset>
       .catch(() => undefined);
     throw error;
   }
+
+  /* Version 1, with how the file was read (P1-C). Best effort: it is also created on first use. */
+  await ensureInitialVersion(dataset, parsed).catch((error: unknown) => {
+    logger.warn('dataset.versionDeferred', { datasetId, error: String(error).slice(0, 200) });
+  });
 
   logger.info('dataset.saved', {
     datasetId,
@@ -445,6 +454,11 @@ export async function saveCleanedCopy(input: {
     throw error;
   }
 
+  /* The copy's version records the actions that made it, derived from the parent's version (P1-C). */
+  await recordLegacyClean(row, source.row, input.actions, report as unknown as Record<string, unknown>).catch((error: unknown) => {
+    logger.warn('dataset.cleanVersionDeferred', { datasetId, error: String(error).slice(0, 200) });
+  });
+
   logger.info('dataset.cleaned', {
     parent: source.row.id,
     datasetId,
@@ -464,13 +478,15 @@ export interface DeletionImpact {
   name: string;
   analyses: number;
   cleanedCopies: number;
+  /** Verified statistics runs (P1-C) whose data would no longer be re-runnable. Their records stay. */
+  verifiedRuns?: number;
 }
 
 /** What "delete everything" would destroy, so the confirmation can say it. */
 export async function deletionImpact(datasetId: string, userId: string): Promise<DeletionImpact> {
   const row = await requireOwned(datasetId, userId);
   const counts = await datasetsRepo.countDependents(datasetId, userId);
-  return { datasetId, name: row.originalName, ...counts };
+  return { datasetId, name: row.originalName, ...counts, verifiedRuns: await verifiedRunCount(datasetId) };
 }
 
 /**
@@ -493,6 +509,10 @@ export async function deleteFileOnly(datasetId: string, userId: string): Promise
     .catch((error) => {
       logger.warn('dataset.objectDeleteFailed', { datasetId, error: String(error) });
     });
+  /* The files of its later versions go too (P1-C); the version records and the runs on them stay. */
+  for (const key of await versionObjectKeys([datasetId], [row.storageKey])) {
+    await storageProvider().delete(key).catch(() => undefined);
+  }
 
   await datasetsRepo.softDelete(datasetId, userId);
 
@@ -554,6 +574,9 @@ export async function deleteEverything(
   }
 
   await provider.delete(row.storageKey).catch(() => undefined);
+  for (const key of await versionObjectKeys([datasetId, ...children.map((child) => child.id)], [row.storageKey, ...children.map((child) => child.storageKey)])) {
+    await provider.delete(key).catch(() => undefined);
+  }
 
   /*
    * A local provider can remove the whole dataset folder, which also sweeps up

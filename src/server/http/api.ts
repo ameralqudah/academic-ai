@@ -49,6 +49,8 @@ interface Options<TBody> {
   admin?: boolean;
   /** Route-specific limit; falls back to the global one. */
   rateLimit?: { max: number; windowSeconds?: number; key: string };
+  /** Largest accepted JSON body, in bytes (checked against Content-Length and the bytes read). */
+  maxBodyBytes?: number;
 }
 
 type RouteArgs<TParams> = { params: Promise<TParams> } | undefined;
@@ -115,9 +117,20 @@ export function withApi<TBody = undefined, TParams = Record<string, string>>(
       let body = undefined as TBody;
       if (options.schema) {
         let raw: unknown;
+        const limit = options.maxBodyBytes;
+        if (limit && Number(request.headers.get('content-length') ?? 0) > limit) {
+          throw AppError.validation({ body: `The request body is larger than ${limit} bytes.` });
+        }
         try {
-          raw = await request.json();
-        } catch {
+          if (limit) {
+            const text = await request.text();
+            if (new TextEncoder().encode(text).byteLength > limit) throw new RangeError('too large');
+            raw = JSON.parse(text);
+          } else {
+            raw = await request.json();
+          }
+        } catch (error) {
+          if (error instanceof RangeError) throw AppError.validation({ body: `The request body is larger than ${limit} bytes.` });
           throw AppError.validation({ body: 'Expected a JSON body.' });
         }
         body = options.schema.parse(raw);

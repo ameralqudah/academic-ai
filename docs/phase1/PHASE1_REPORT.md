@@ -8,7 +8,8 @@ Each step gets a section when it is merged.
 |---|---|---|
 | P1.0 Security hardening | ✅ CI green | [#29](https://github.com/ameralqudah/academic-ai/pull/29) |
 | P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`) | [#30](https://github.com/ameralqudah/academic-ai/pull/30) |
-| P1-B Model Gateway | ✅ implemented (`P1B_PLAN.md`, `P1B_REPORT.md`); all suites green locally; in review | — |
+| P1-B Model Gateway | ✅ merged (`P1B_PLAN.md`, `P1B_REPORT.md`) | [#31](https://github.com/ameralqudah/academic-ai/pull/31) |
+| P1-C Deterministic statistics engine + graph integration (re-scoped) | ✅ implemented (`P1C_PLAN.md`, `P1C_REPORT.md`); all suites green locally; in review | [#32](https://github.com/ameralqudah/academic-ai/pull/32) |
 
 ---
 
@@ -143,3 +144,31 @@ Full report: `docs/phase1/P1B_REPORT.md`. Plan and audit: `docs/phase1/P1B_PLAN.
 - **Final review:** a free user on a premium-only deployment is refused ("no eligible model for this plan", never served premium). Output tokens are capped per plan by the gateway (free 8,192 · paid 32,768 · admin 64,000), above every current call site's request.
 - **Tests:** gateway unit (87) and database (37) suites, both in CI, with mock providers only. Mutation checks cover the entitlement filter, the failover class filter, the retry guard, the reservation lock, the word check and the project check.
 - **Deferred:** RLS on the new tables (P1-D); moving the text parsers for titles, evidence and extraction to structured output; embedding call sites (P1-G); the tool registry and policy engine (P1-C/D).
+
+---
+
+## P1-C Deterministic statistics engine + Research Graph integration
+
+Full report: `docs/phase1/P1C_REPORT.md`. Plan and audit: `docs/phase1/P1C_PLAN.md`.
+
+- **Re-scoped.** The P1-C brief replaced "tool registry + policy engine" with the statistics engine and its graph integration. Only the 7 analysis tools are here; the general registry and policy engine have not been built.
+- **One chain for research numbers:** immutable, hashed dataset versions → recorded transformations → validation (INFO, WARNING, ERROR, BLOCKING) → hashed, seeded specification → pure, versioned engine (`academic-ai-ts-core` 1.0.0) → immutable run → write-once estimates, tables and figures → Research Graph (computed, idempotent) → manuscript claims rendered from `{{value:key}}` tokens.
+- **Enforced by PostgreSQL.** Triggers make results write-once, refuse direct DELETE and TRUNCATE, allow only legal run transitions, and refuse results inserted outside the running transaction.
+- **Methods (R-checked goldens, no R at runtime):**
+  - descriptives, reliability, correlation;
+  - regression with diagnostics;
+  - ANOVA with Tukey and Games-Howell;
+  - EFA (PAF or PCA, varimax or promax);
+  - CFA (std.all as lavaan);
+  - PLS;
+  - mediation (PROCESS 4, seeded bootstrap) and moderation (PROCESS 1).
+
+  Full CB-SEM is deferred to an R worker.
+- **LLM boundary.** The tools can propose, validate, run and read; none writes a number. Model text with a typed digit is withheld. The legacy RESULTS guardrail now checks numbers against attached runs.
+- **Changes to completed phases:**
+  - P1-A currency: a node whose own dependency chain contains the replacement of a superseded node is not stale. This was a blocker found by the P1-C tests.
+  - P0 jobs: status changes are conditional.
+  - Legacy statistics correctness and ownership fixes.
+- **Migration:** `0013_p1c_statistics`, additive (7 tables and 3 columns).
+- **Tests:** engine 361 and database 105 (both in CI), e2e with the flag on and off, and smoke gates.
+

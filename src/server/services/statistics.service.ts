@@ -55,6 +55,9 @@ import {
 import { logger } from '@/lib/logger';
 import type { AnalysisRun } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
+import { ensureInitialVersion } from '@/server/stats/versions';
+import { ENGINE } from '@/analysis/engine/types';
 import * as runsRepo from '@/server/repositories/analysis-runs.repository';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 
@@ -148,12 +151,46 @@ export async function recommend(input: {
 /* -------------------------------------------------------------------------- */
 
 export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisOutcome> {
+  await assertProjectLink(request.userId, request.projectId);
+  await assertConversationLink(request.userId, request.conversationId);
   const loaded = await loadForAnalysis(request.datasetId, request.userId);
   const started = Date.now();
 
   const result = compute(loaded.data, request);
 
+  /*
+   * Rows the service dropped before the test saw them (a blank or non-numeric
+   * value, a missing group) are counted here: the test only sees what it is
+   * given, and reported "0 dropped" when the service had already removed some
+   * (P1-C audit).
+   */
+  const supplied = loaded.data.rows.length;
+  const counted = result as unknown as { rowsSupplied?: unknown; rowsDropped?: unknown; n?: unknown; warnings?: unknown };
+  if (typeof counted.rowsSupplied === 'number' && typeof counted.n === 'number' && Array.isArray(counted.warnings) && counted.rowsSupplied < supplied) {
+    const warnings = counted.warnings as { code: string; severity: string; columns: string[]; params?: Record<string, string | number> }[];
+    const dropped = Math.max(0, supplied - counted.n);
+    counted.rowsSupplied = supplied;
+    counted.rowsDropped = dropped;
+    if (dropped > 0 && !warnings.some((warning) => warning.code === 'listwise-deletion')) {
+      warnings.push({
+        code: 'listwise-deletion',
+        severity: dropped / supplied > 0.2 ? 'warning' : 'info',
+        columns: request.columns ? Object.values(request.columns).filter((value): value is string => typeof value === 'string') : [],
+        params: { dropped, supplied, used: counted.n, percent: Number(((dropped / supplied) * 100).toFixed(1)) },
+      });
+    }
+  }
+
+  /* Pinned to the exact data (P1-C): the dataset version, its content hash, and the engine version. */
+  const version = await ensureInitialVersion(loaded.row).catch((error: unknown) => {
+    logger.warn('analysis.run.versionUnavailable', { datasetId: request.datasetId, error: String(error).slice(0, 200) });
+    return null;
+  });
+
   const run = await runsRepo.create({
+    datasetVersionId: version?.id ?? null,
+    datasetContentHash: version?.contentHash ?? null,
+    engineVersion: ENGINE.version,
     userId: request.userId,
     datasetId: request.datasetId,
     projectId: request.projectId ?? null,
@@ -552,6 +589,7 @@ export async function attachRun(input: {
   projectId: string;
   sectionKey: string;
 }): Promise<AnalysisRun> {
+  await assertProjectLink(input.userId, input.projectId);
   const run = await runsRepo.attachToSection(
     input.runId,
     input.userId,

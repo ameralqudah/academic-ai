@@ -30,6 +30,11 @@ export async function runAnalysisJob(jobId: string): Promise<'ran' | 'busy' | 's
         await runBootstrapJob(jobId);
         return;
       }
+      case 'stats.run': {
+        const { runStatsJob } = await import('@/server/stats/runs');
+        await runStatsJob(jobId);
+        return;
+      }
       case 'research.deep': {
         const { runResearchJob } = await import('@/server/services/deep-research.service');
         await runResearchJob(jobId);

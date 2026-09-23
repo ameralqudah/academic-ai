@@ -57,6 +57,20 @@ export function datasetKey(input: {
   return key;
 }
 
+/**
+ * A dataset version created by a transformation (P1-C). Version 1 reuses the
+ * uploaded file's key; later versions are new, never-overwritten objects:
+ *
+ *   datasets/{userId}/{datasetId}/versions/v{n}-{uuid}.csv
+ */
+export function datasetVersionKey(input: { userId: string; datasetId: string; versionNo: number; unique: string }): string {
+  if (!Number.isInteger(input.versionNo) || input.versionNo < 2) throw new Error('Version 1 uses the upload key.');
+  if (!/^[0-9a-f-]{36}$/.test(input.unique)) throw new Error('A version key needs a UUID.');
+  const key = `datasets/${input.userId}/${input.datasetId}/versions/v${input.versionNo}-${input.unique}.csv`;
+  assertSafeKey(key);
+  return key;
+}
+
 /** Every key belonging to one user, for bulk deletion when an account closes. */
 export function userPrefix(userId: string): string {
   const prefix = `datasets/${userId}/`;

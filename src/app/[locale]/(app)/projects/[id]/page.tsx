@@ -10,6 +10,7 @@ import { Progress } from '@/components/ui/progress';
 import { Link } from '@/i18n/navigation';
 import { requirePageUser } from '@/server/auth/guards';
 import { computeProgress } from '@/server/services/project.service';
+import { graphEnabled } from '@/server/graph/access';
 import { requireProjectWithSectionsPage } from '@/server/pages/project-page';
 import { getSummary } from '@/server/services/usage.service';
 import { sectionI18nKey } from '@/lib/sections';
@@ -31,6 +32,9 @@ export default async function ProjectPage({ params }: Props) {
   const td = await getTranslations({ locale, namespace: 'documents' });
   const tp = await getTranslations({ locale, namespace: 'projects' });
   const ts = await getTranslations({ locale, namespace: 'sections' });
+  const tstats = await getTranslations({ locale, namespace: 'stats' });
+  /* The analysis workbench is part of the research workspace, behind FF_GRAPH (P1-C). */
+  const graphOn = graphEnabled();
   const number = new Intl.NumberFormat(locale === 'ar' ? 'ar-EG' : 'en-US');
   const Arrow = locale === 'ar' ? ArrowLeft : ArrowRight;
 
@@ -181,6 +185,14 @@ export default async function ProjectPage({ params }: Props) {
                 >
                   {td('references')}
                 </Link>
+                {graphOn ? (
+                  <Link
+                    href={`/projects/${project.id}/analysis`}
+                    className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink-soft transition-colors hover:border-line-strong hover:text-ink"
+                  >
+                    {tstats('title')}
+                  </Link>
+                ) : null}
               </div>
 
               <div className="mt-2 border-t border-line pt-3">

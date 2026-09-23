@@ -125,6 +125,10 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       rows: z.number().int().nonnegative().optional(),
       storageKey: z.string().max(500).optional(),
       description: text.optional(),
+      /* P1-C: the relational record this node stands for. */
+      datasetVersionId: z.string().max(64).optional(),
+      schemaHash: z.string().max(128).optional(),
+      fileChecksum: z.string().max(128).optional(),
     })
     .strict(),
   analysis: z
@@ -144,6 +148,12 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       status: z.enum(['queued', 'running', 'succeeded', 'failed']).default('succeeded'),
       seed: z.number().int().optional(),
       legacyRunId: z.string().max(64).optional(),
+      /* P1-C: the reproducibility record, copied from the engine's run. */
+      method: z.string().max(100).optional(),
+      runtime: z.string().max(64).optional(),
+      specHash: z.string().max(128).optional(),
+      resultHash: z.string().max(128).optional(),
+      datasetContentHash: z.string().max(128).optional(),
     })
     .strict(),
   result_value: z
@@ -154,6 +164,36 @@ const PAYLOADS: Partial<Record<NodeType, z.ZodType<Record<string, unknown>>>> = 
       df: z.array(z.number()).optional(),
       p: z.number().min(0).max(1).optional(),
       ci: z.tuple([z.number(), z.number()]).optional(),
+      /* P1-C: the engine estimate this value is (stable key within its run), with its inference. */
+      key: z.string().max(1000).optional(),
+      estimateId: z.string().max(64).optional(),
+      se: z.number().optional(),
+      statistic: z.number().optional(),
+      statisticName: z.string().max(16).optional(),
+      n: z.number().int().nonnegative().optional(),
+      ciLevel: z.number().gt(0).lt(1).optional(),
+      ciMethod: z.string().max(32).optional(),
+    })
+    .strict(),
+  result_table: z
+    .object({
+      ...common,
+      title: z.string().trim().max(300).optional(),
+      kind: z.string().max(40).optional(),
+      tableId: z.string().max(64).optional(),
+      /* P1-C: the output's stable key within its run ("table:<position>"). */
+      key: z.string().max(40).optional(),
+      keys: z.array(z.string().max(1000)).max(2000).optional(),
+    })
+    .strict(),
+  figure: z
+    .object({
+      ...common,
+      title: z.string().trim().max(300).optional(),
+      kind: z.string().max(40).optional(),
+      figureId: z.string().max(64).optional(),
+      key: z.string().max(40).optional(),
+      keys: z.array(z.string().max(1000)).max(2000).optional(),
     })
     .strict(),
   source: z

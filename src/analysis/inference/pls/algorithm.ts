@@ -203,6 +203,17 @@ export function validateModel(model: PlsModel, availableColumns: string[]): void
       throw new PlsError('analysis.pls.error.selfPath', { construct: path.from });
     }
   }
+  /*
+   * A construct on no path has no inner proxy: its score would be built from
+   * nothing, and its weights come out as NaN or zero. Refused rather than
+   * estimated (P1-C audit).
+   */
+  const connected = new Set(model.paths.flatMap((path) => [path.from, path.to]));
+  const isolated = model.constructs.find((construct) => !connected.has(construct.name));
+  if (isolated) {
+    throw new PlsError('analysis.pls.error.isolatedConstruct', { construct: isolated.name });
+  }
+
 
   /*
    * The cycle check is the shared implementation, not a second copy. Both the

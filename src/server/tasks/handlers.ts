@@ -216,6 +216,24 @@ function say(
   return language === 'ar' ? ar : en;
 }
 
+
+/**
+ * Results for a prompt, within a budget, without ever cutting a number in half.
+ * The old `JSON.stringify(result).slice(0, 2000)` could turn 0.4567 into 0.45
+ * mid-string (P1-C audit). Whole fields are dropped instead, and said to be.
+ */
+function boundedJson(value: Record<string, unknown>, budget: number): string {
+  const round = (_key: string, raw: unknown) => (typeof raw === 'number' && Number.isFinite(raw) && !Number.isInteger(raw) ? Number(raw.toFixed(4)) : raw);
+  const kept: Record<string, unknown> = {};
+  const omitted: string[] = [];
+  for (const [key, field] of Object.entries(value)) {
+    const candidate = JSON.stringify({ ...kept, [key]: field }, round);
+    if (candidate.length <= budget) kept[key] = field;
+    else omitted.push(key);
+  }
+  return `${JSON.stringify(kept, round)}${omitted.length ? ` (omitted for length: ${omitted.join(', ')})` : ''}`;
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                  Handlers                                  */
 /* -------------------------------------------------------------------------- */
@@ -844,7 +862,7 @@ export function registerAllHandlers(): void {
       ...readAllOutputs<Record<string, unknown>>(context.available, 'pls-results.v1'),
       ...readAllOutputs<Record<string, unknown>>(context.available, 'analysis.v1'),
     ]
-      .map((result) => `\n\nAnalysis results: ${JSON.stringify(result).slice(0, 2000)}`)
+      .map((result) => `\n\nAnalysis results: ${boundedJson(result, 4000)}`)
       .join('');
 
     /*

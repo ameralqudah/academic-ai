@@ -126,22 +126,22 @@ function averageVarianceExtracted(loadings: number[]): number {
 }
 
 /**
- * Cronbach's alpha from the loadings.
- *
- * Computed from the implied correlations rather than the raw items, so it
- * describes the construct as the model estimated it rather than as a simple
- * sum of columns.
+ * Cronbach's alpha on the standardised indicators: from their observed
+ * correlations on the rows the model was estimated on, as SmartPLS and seminr
+ * report it. (It used to be computed from products of loadings — implied
+ * rather than observed correlations — which is not Cronbach's alpha; P1-C audit.)
  */
-function alphaFromLoadings(loadings: number[]): number {
-  const k = loadings.length;
+function alphaFromIndicators(indicators: string[], data: Map<string, number[]>, rows: number[]): number {
+  const k = indicators.length;
   if (k < 2) return Number.NaN;
 
+  const columns = indicators.map((name) => rows.map((row) => (data.get(name) as number[])[row] as number));
   let sumCorrelations = 0;
   let pairs = 0;
 
   for (let i = 0; i < k; i += 1) {
     for (let j = i + 1; j < k; j += 1) {
-      sumCorrelations += (loadings[i] as number) * (loadings[j] as number);
+      sumCorrelations += pearson(columns[i] as number[], columns[j] as number[]);
       pairs += 1;
     }
   }
@@ -165,7 +165,7 @@ export function assessMeasurement(
 
     const ave = averageVarianceExtracted(loadings);
     const rho = compositeReliability(loadings);
-    const alpha = alphaFromLoadings(loadings);
+    const alpha = alphaFromIndicators(construct.indicators, data, estimate.rows);
 
     const indicators: IndicatorAssessment[] = outer.map((entry) => {
       /*

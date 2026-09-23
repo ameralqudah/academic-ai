@@ -34,6 +34,8 @@ export interface CurrencyLoader {
   nodes(ids: string[]): Promise<CurrencyNode[]>;
   /** Dependency edges whose `src` is one of these nodes. */
   dependencies(ids: string[]): Promise<CurrencyEdge[]>;
+  /** `supersedes` edges whose `dst` (the replaced node) is one of these nodes. */
+  replacements?(ids: string[]): Promise<CurrencyEdge[]>;
 }
 
 /** An object's own state, from its status and its open marks. */
@@ -153,18 +155,31 @@ export async function assessCurrency(rootId: string, loader: CurrencyLoader): Pr
     let frontier = [start];
     let state: Currency = 'current';
     const reasons: CurrencyReport['reasons'] = [];
+    const replaced: CurrencyNode[] = [];
     while (frontier.length > 0 && seen.size < MAX_UPSTREAM) {
       const edges = (await loader.dependencies(frontier)).filter((edge) => carriesCurrency(edge.rel));
       const next = [...new Set(edges.map((edge) => edge.dstId))].filter((id) => !seen.has(id));
       for (const id of next) seen.add(id);
       for (const node of await load(next)) {
         const own = ownState(node);
-        if (own !== 'current') {
+        if (own === 'superseded') replaced.push(node);
+        else if (own !== 'current') {
           state = worst(RANK, state, asUpstream(own));
           if (reasons.length < 50) reasons.push({ nodeId: node.id, type: node.type, state: own });
         }
       }
       frontier = next;
+    }
+    /*
+     * A replaced node upstream makes this stale, unless its replacement is also
+     * upstream (or is this node): a cleaned dataset version that replaced the
+     * version it was derived from is the current data, not stale data (P1-C).
+     */
+    const replacers = replaced.length && loader.replacements ? await loader.replacements(replaced.map((node) => node.id)) : [];
+    for (const node of replaced) {
+      if (replacers.some((edge) => edge.dstId === node.id && seen.has(edge.srcId))) continue;
+      state = worst(RANK, state, asUpstream('superseded'));
+      if (reasons.length < 50) reasons.push({ nodeId: node.id, type: node.type, state: 'superseded' });
     }
     return { state, reasons };
   };

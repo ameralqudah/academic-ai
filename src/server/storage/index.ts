@@ -191,7 +191,7 @@ export function resetStorageCache(): void {
   lastProbe = null;
 }
 
-export { assertSafeKey, datasetKey, datasetPrefix, keyBelongsTo, userPrefix } from './keys';
+export { assertSafeKey, datasetKey, datasetPrefix, datasetVersionKey, keyBelongsTo, userPrefix } from './keys';
 export type { DatasetKind } from './keys';
 export { checksumOf, LocalStorageProvider } from './local';
 export { StorageError } from './provider';

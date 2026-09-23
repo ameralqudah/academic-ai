@@ -8,7 +8,7 @@
 
 import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
-import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
+import { inspectOutput, numberSpellings, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
 import { buildResultsContext } from '@/ai/context/results';
 import { generalPrompt } from '@/ai/prompts/general';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
@@ -354,6 +354,19 @@ export interface GeneratedSection {
   guardrails: GuardrailResult;
 }
 
+/** Every finite number inside stored analysis results. */
+function numbersIn(values: unknown[]): number[] {
+  const out: number[] = [];
+  const walk = (value: unknown, depth: number) => {
+    if (depth > 8) return;
+    if (typeof value === 'number' && Number.isFinite(value)) out.push(value);
+    else if (Array.isArray(value)) for (const item of value.slice(0, 5000)) walk(item, depth + 1);
+    else if (value && typeof value === 'object') for (const item of Object.values(value)) walk(item, depth + 1);
+  };
+  for (const value of values) walk(value, 0);
+  return out;
+}
+
 export async function generateSection(
   userId: string,
   projectId: string,
@@ -404,8 +417,11 @@ export async function generateSection(
     temperature: 0.6,
   });
 
+  const resultsSection = sectionKey === 'RESULTS' || sectionKey === 'CHAPTER_4';
   const guardrails = inspectOutput(result.text, {
-    expectsNoStatistics: sectionKey !== 'RESULTS' && sectionKey !== 'CHAPTER_4',
+    expectsNoStatistics: !resultsSection,
+    /* Numbers in a results section must be ones the attached, verified analyses produced (P1-C). */
+    ...(resultsSection ? { verifiedNumbers: numberSpellings(numbersIn(attachedRuns.map((run) => run.result))) } : {}),
   });
 
   await saveSection({

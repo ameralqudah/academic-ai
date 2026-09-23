@@ -194,6 +194,8 @@ export function fromRecords(records: string[][], source: string): Dataset {
   const usable = truncated ? body.slice(0, MAX_ROWS) : body;
 
   let skipped = 0;
+  let ragged = 0;
+  const markers = new Map<string, number>();
   const rows: CellValue[][] = [];
 
   for (const record of usable) {
@@ -202,9 +204,13 @@ export function fromRecords(records: string[][], source: string): Dataset {
       skipped += 1;
       continue;
     }
+    /* A row longer than the header loses its extra fields: counted, so the import record can say so (P1-C). */
+    if (record.length > columns.length && record.slice(columns.length).some((value) => value.trim() !== '')) ragged += 1;
     const row: CellValue[] = new Array(columns.length).fill(null);
     for (let c = 0; c < columns.length; c += 1) {
       row[c] = normaliseCell(record[c]);
+      const raw = record[c]?.trim();
+      if (row[c] === null && raw) markers.set(raw, (markers.get(raw) ?? 0) + 1);
     }
     rows.push(row);
   }
@@ -216,6 +222,8 @@ export function fromRecords(records: string[][], source: string): Dataset {
     rows,
     source,
     skippedRows: skipped,
+    ...(ragged ? { raggedRows: ragged } : {}),
+    ...(markers.size ? { missingMarkers: Object.fromEntries(markers) } : {}),
     ...(truncated ? { truncatedTo: MAX_ROWS } : {}),
   };
 }

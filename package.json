@@ -25,6 +25,8 @@
     "test:jobs": "tsx scripts/jobs-integration.ts",
     "test:graph": "tsx scripts/graph-integration.ts",
     "test:gateway": "tsx scripts/gateway.ts",
+    "test:stats": "tsx scripts/stats-engine.ts",
+    "test:stats:db": "tsx scripts/stats-integration.ts",
     "test:gateway:db": "tsx scripts/gateway-integration.ts",
     "test:gateway:live": "tsx scripts/gateway-live.ts"
   },

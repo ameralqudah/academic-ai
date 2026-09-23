@@ -13,6 +13,7 @@
 import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
+  doublePrecision,
   foreignKey,
   index,
   integer,
@@ -734,6 +735,10 @@ export const analysisRuns = pgTable(
     spec: jsonb('spec').$type<Record<string, unknown>>().notNull(),
     /** The full `InferentialResult`: statistic, p, effect, assumptions, warnings. */
     result: jsonb('result').$type<Record<string, unknown>>().notNull(),
+    /** P1-C: the exact data the result was computed on (null for runs before P1-C). */
+    datasetVersionId: text('dataset_version_id'),
+    datasetContentHash: varchar('dataset_content_hash', { length: 64 }),
+    engineVersion: varchar('engine_version', { length: 64 }),
     createdAt: createdAt(),
   },
   (table) => [
@@ -1540,3 +1545,235 @@ export const aiToolCalls = pgTable(
 export type AIUsageEvent = typeof aiUsageEvents.$inferSelect;
 export type AIQuotaReservation = typeof aiQuotaReservations.$inferSelect;
 export type AIToolCall = typeof aiToolCalls.$inferSelect;
+
+/* -------------------------------------------------------------------------- */
+/*                 P1-C: deterministic statistics and provenance              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * An immutable version of a dataset: exactly these rows, under exactly this
+ * column schema. Uploading creates version 1 (with an `import` transformation
+ * that records how the file was read); every change — cleaning, a declared
+ * type, a missing code — is a recorded transformation that creates the next
+ * version. A run always names the version it used, and the version's content
+ * hash is re-verified whenever it is loaded.
+ */
+export const datasetVersions = pgTable(
+  'dataset_versions',
+  {
+    id: id(),
+    /** Null once the dataset row is deleted; the version record (and its hash) stays for the runs that used it. */
+    datasetId: text('dataset_id').references(() => datasets.id, { onDelete: 'set null' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'cascade' }),
+    versionNo: integer('version_no').notNull(),
+    parentVersionId: text('parent_version_id').references((): AnyPgColumn => datasetVersions.id, { onDelete: 'set null' }),
+    /** SHA-256 of the canonical cell content (independent of CSV formatting). */
+    contentHash: varchar('content_hash', { length: 64 }).notNull(),
+    /** SHA-256 of the declared column schema. */
+    schemaHash: varchar('schema_hash', { length: 64 }).notNull(),
+    /** SHA-256 of the stored file's bytes, checked on every load. */
+    fileChecksum: varchar('file_checksum', { length: 64 }).notNull(),
+    storageKey: text('storage_key').notNull(),
+    rowCount: integer('row_count').notNull(),
+    columnCount: integer('column_count').notNull(),
+    /** `ColumnSchema[]`: name, type, declared range, missing codes. */
+    columns: jsonb('columns').$type<Record<string, unknown>[]>().notNull(),
+    graphNodeId: text('graph_node_id'),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex('dataset_versions_dataset_no_idx').on(table.datasetId, table.versionNo),
+    index('dataset_versions_project_idx').on(table.projectId),
+    index('dataset_versions_user_idx').on(table.userId),
+  ],
+);
+
+/** A deterministic operation that produced a dataset version, with its parameters and report. */
+export const datasetTransformations = pgTable(
+  'dataset_transformations',
+  {
+    id: id(),
+    datasetId: text('dataset_id').references(() => datasets.id, { onDelete: 'set null' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'cascade' }),
+    /** Null for `import` (the first version). */
+    inputVersionId: text('input_version_id').references(() => datasetVersions.id, { onDelete: 'cascade' }),
+    outputVersionId: text('output_version_id')
+      .notNull()
+      .references(() => datasetVersions.id, { onDelete: 'cascade' }),
+    /** import | clean | set-schema */
+    operation: varchar('operation', { length: 32 }).notNull(),
+    parameters: jsonb('parameters').$type<Record<string, unknown>>().notNull(),
+    report: jsonb('report').$type<Record<string, unknown>>().notNull(),
+    engineVersion: varchar('engine_version', { length: 64 }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex('dataset_transformations_output_idx').on(table.outputVersionId), index('dataset_transformations_input_idx').on(table.inputVersionId)],
+);
+
+/** A machine-readable analysis specification, pinned to a dataset version. Immutable. */
+export const statSpecs = pgTable(
+  'stat_specs',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'cascade' }),
+    datasetVersionId: text('dataset_version_id')
+      .notNull()
+      .references(() => datasetVersions.id, { onDelete: 'no action' }),
+    analysisType: varchar('analysis_type', { length: 32 }).notNull(),
+    /** The parsed `MethodSpec`, defaults and seed resolved. */
+    spec: jsonb('spec').$type<Record<string, unknown>>().notNull(),
+    specHash: varchar('spec_hash', { length: 64 }).notNull(),
+    label: varchar('label', { length: 200 }),
+    /** Research Graph hypothesis / construct node ids this analysis tests or measures. */
+    hypothesisIds: jsonb('hypothesis_ids').$type<string[]>().default([]).notNull(),
+    constructIds: jsonb('construct_ids').$type<string[]>().default([]).notNull(),
+    /** Who proposed it: `user`, or `assistant` (an LLM proposal a person then ran). */
+    origin: varchar('origin', { length: 16 }).default('user').notNull(),
+    graphNodeId: text('graph_node_id'),
+    createdAt: createdAt(),
+  },
+  (table) => [index('stat_specs_project_idx').on(table.projectId, table.createdAt), index('stat_specs_version_idx').on(table.datasetVersionId)],
+);
+
+/**
+ * One execution of a specification. Everything needed to reproduce it is on
+ * the row. Its identity and inputs never change; its outcome is written once,
+ * when it finishes (enforced by trigger).
+ */
+export const statRuns = pgTable(
+  'stat_runs',
+  {
+    id: id(),
+    specId: text('spec_id')
+      .notNull()
+      .references(() => statSpecs.id, { onDelete: 'no action' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'cascade' }),
+    datasetVersionId: text('dataset_version_id')
+      .notNull()
+      .references(() => datasetVersions.id, { onDelete: 'no action' }),
+    datasetContentHash: varchar('dataset_content_hash', { length: 64 }).notNull(),
+    specHash: varchar('spec_hash', { length: 64 }).notNull(),
+    analysisType: varchar('analysis_type', { length: 32 }).notNull(),
+    engine: varchar('engine', { length: 64 }).notNull(),
+    engineVersion: varchar('engine_version', { length: 32 }).notNull(),
+    /** Node version and platform, for the reproducibility record. */
+    runtime: varchar('runtime', { length: 64 }).notNull(),
+    /** queued | running | succeeded | failed | refused | cancelled */
+    status: varchar('status', { length: 16 }).notNull(),
+    method: varchar('method', { length: 100 }),
+    seed: integer('seed'),
+    parameters: jsonb('parameters').$type<Record<string, unknown>>(),
+    missingStrategy: varchar('missing_strategy', { length: 16 }),
+    nSupplied: integer('n_supplied'),
+    nUsed: integer('n_used'),
+    nExcluded: integer('n_excluded'),
+    issues: jsonb('issues').$type<Record<string, unknown>[]>().default([]).notNull(),
+    error: jsonb('error').$type<Record<string, unknown>>(),
+    assumptions: jsonb('assumptions').$type<Record<string, unknown>[]>(),
+    payload: jsonb('payload').$type<Record<string, unknown>>(),
+    /** SHA-256 of the canonical normalised result: the same inputs must give the same hash. */
+    resultHash: varchar('result_hash', { length: 64 }),
+    supersedesRunId: text('supersedes_run_id').references((): AnyPgColumn => statRuns.id, { onDelete: 'set null' }),
+    /** The Impact Report hash the user confirmed when asking this run to replace an earlier one. */
+    impactAcknowledged: varchar('impact_acknowledged', { length: 128 }),
+    /** Same (spec, key) → the same run: a retried request never runs twice. */
+    idempotencyKey: varchar('idempotency_key', { length: 200 }),
+    jobId: text('job_id'),
+    graphRunNodeId: text('graph_run_node_id'),
+    queuedAt: timestamp('queued_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'date' }),
+  },
+  (table) => [
+    uniqueIndex('stat_runs_idempotency_idx').on(table.specId, table.idempotencyKey),
+    index('stat_runs_project_idx').on(table.projectId, table.queuedAt),
+    index('stat_runs_spec_idx').on(table.specId),
+  ],
+);
+
+/** One reported number of a run, with everything needed to cite it. Written once, with the run's outcome. */
+export const statEstimates = pgTable(
+  'stat_estimates',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => statRuns.id, { onDelete: 'cascade' }),
+    key: varchar('key', { length: 1000 }).notNull(),
+    label: varchar('label', { length: 1000 }).notNull(),
+    family: varchar('family', { length: 40 }).notNull(),
+    term: varchar('term', { length: 1000 }),
+    stat: varchar('stat', { length: 40 }).notNull(),
+    estimate: doublePrecision('estimate').notNull(),
+    se: doublePrecision('se'),
+    statistic: doublePrecision('statistic'),
+    statisticName: varchar('statistic_name', { length: 16 }),
+    df: doublePrecision('df'),
+    df2: doublePrecision('df2'),
+    p: doublePrecision('p'),
+    ciLow: doublePrecision('ci_low'),
+    ciHigh: doublePrecision('ci_high'),
+    ciLevel: doublePrecision('ci_level'),
+    ciMethod: varchar('ci_method', { length: 32 }),
+    n: integer('n'),
+    graphNodeId: text('graph_node_id'),
+  },
+  (table) => [uniqueIndex('stat_estimates_run_key_idx').on(table.runId, table.key)],
+);
+
+/** A table generated from a run's estimates (every cell names its estimate). */
+export const statTables = pgTable(
+  'stat_tables',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => statRuns.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    kind: varchar('kind', { length: 40 }).notNull(),
+    title: varchar('title', { length: 300 }).notNull(),
+    content: jsonb('content').$type<Record<string, unknown>>().notNull(),
+    keys: jsonb('keys').$type<string[]>().notNull(),
+    graphNodeId: text('graph_node_id'),
+  },
+  (table) => [uniqueIndex('stat_tables_run_position_idx').on(table.runId, table.position)],
+);
+
+/** A figure (SVG) generated from a run's estimates. */
+export const statFigures = pgTable(
+  'stat_figures',
+  {
+    id: id(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => statRuns.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    kind: varchar('kind', { length: 40 }).notNull(),
+    title: varchar('title', { length: 300 }).notNull(),
+    svg: text('svg').notNull(),
+    keys: jsonb('keys').$type<string[]>().notNull(),
+    graphNodeId: text('graph_node_id'),
+  },
+  (table) => [uniqueIndex('stat_figures_run_position_idx').on(table.runId, table.position)],
+);
+
+export type DatasetVersion = typeof datasetVersions.$inferSelect;
+export type DatasetTransformation = typeof datasetTransformations.$inferSelect;
+export type StatSpec = typeof statSpecs.$inferSelect;
+export type StatRun = typeof statRuns.$inferSelect;
+export type StatEstimate = typeof statEstimates.$inferSelect;
+export type StatTable = typeof statTables.$inferSelect;
+export type StatFigure = typeof statFigures.$inferSelect;
+

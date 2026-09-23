@@ -196,6 +196,13 @@ function currencyLoader(executor: Executor, projectId: string): CurrencyLoader {
         .from(graphEdges)
         .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.dependency, true), inArray(graphEdges.srcId, ids)));
     },
+    async replacements(ids) {
+      if (ids.length === 0) return [];
+      return executor
+        .select({ srcId: graphEdges.srcId, rel: graphEdges.rel, dstId: graphEdges.dstId })
+        .from(graphEdges)
+        .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'supersedes'), inArray(graphEdges.dstId, ids)));
+    },
   };
 }
 
@@ -984,6 +991,25 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
   }
 
   return db.transaction(async (tx) => {
+    /*
+     * Idempotent on the engine's own run id (P1-C): a retried job, or a second
+     * worker, gets the run already recorded instead of recording it twice.
+     */
+    const engineRunId = typeof input.run.legacyRunId === 'string' ? input.run.legacyRunId : null;
+    if (engineRunId) {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`graph-run:${projectId}:${engineRunId}`}))`);
+      const [already] = await tx
+        .select()
+        .from(graphNodes)
+        .where(and(eq(graphNodes.projectId, projectId), eq(graphNodes.type, 'analysis_run'), sql`${graphNodes.data} ->> 'legacyRunId' = ${engineRunId}`))
+        .limit(1);
+      if (already) {
+        const produced = await tx.select({ srcId: graphEdges.srcId }).from(graphEdges).where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'produced_by'), eq(graphEdges.dstId, already.id)));
+        const nodes = produced.length ? await tx.select().from(graphNodes).where(inArray(graphNodes.id, produced.map((edge) => edge.srcId))) : [];
+        const outputs = Object.fromEntries(nodes.map((node) => [String((node.data as { key?: string }).key ?? node.id), node])) as Record<string, GraphNode>;
+        return { run: already as GraphNode, outputs, report: null, alreadyRecorded: true };
+      }
+    }
     const analysis = await loadNode(tx, projectId, input.analysisId, 'share');
     if (analysis.type !== 'analysis') throw AppError.validation({ analysisId: 'Not an analysis.' });
     const inputs = [analysis];
@@ -1070,8 +1096,60 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
       );
     }
 
-    return { run, outputs, report };
+    return { run, outputs, report, alreadyRecorded: false };
   });
+}
+
+/**
+ * A manuscript claim together with its evidence, in one transaction (P1-C):
+ * the claim, a `reports` edge to every value it cites, and — when given — the
+ * block that asserts it. Every value must be a current result; if anything is
+ * refused, nothing is written, so a claim never exists without its evidence.
+ */
+export async function createClaim(
+  projectId: string,
+  actor: Actor,
+  input: { text: string; label?: string | null; reportIds: string[]; blockId?: string | null },
+): Promise<GraphNode> {
+  await authorize(projectId, actor, 'EDITOR');
+  if (input.reportIds.length === 0) throw AppError.validation({ reportIds: 'A claim reports at least one value.' });
+  return db.transaction(async (tx) => {
+    const values: GraphNode[] = [];
+    for (const id of input.reportIds) {
+      const value = await loadNode(tx, projectId, id, 'share');
+      if (!(RESULT_TYPES as readonly string[]).includes(value.type)) throw AppError.validation({ reportIds: `${id} is not a result.` });
+      const currency = await currencyOf(tx, projectId, value.id);
+      if (NOT_CURRENT.has(currency.effective)) {
+        throw refuse('stale_target', 'A cited value is out of date (replaced or invalidated); cite the current result.', 'قيمة مستشهد بها غير محدَّثة؛ استشهد بالنتيجة الحالية.', { nodeId: value.id, currency });
+      }
+      values.push(value);
+    }
+    let block: GraphNode | null = null;
+    if (input.blockId) {
+      block = await loadNode(tx, projectId, input.blockId, 'share');
+      if (block.type !== 'block') throw AppError.validation({ blockId: 'Not a manuscript block.' });
+      if (block.status === 'superseded') throw refuse('superseded', 'This block has been replaced.', 'استُبدلت هذه الكتلة.');
+    }
+    const claim = await insertNode(tx, projectId, actor, { type: 'claim', label: input.label ?? null, payload: parsePayload('claim', { text: input.text }), status: 'active' });
+    const edge = (srcId: string, rel: string, dstId: string, dstVersion: number | null) =>
+      tx.insert(graphEdges).values({ projectId, srcId, rel, dstId, dstVersion, dependency: true, createdByUserId: actor.userId, createdByRunId: actor.runId ?? null, origin: actor.origin ?? 'user' });
+    for (const value of values) await edge(claim.id, 'reports', value.id, value.currentVersion);
+    if (block) await edge(block.id, 'asserts', claim.id, claim.currentVersion);
+    return claim;
+  });
+}
+
+/**
+ * The Impact Report a re-run replacing `runId` would produce, so the user can
+ * review and acknowledge it before the new run is recorded (P1-C). Same
+ * proposal and same dependents as `recordRun` computes, hence the same hash.
+ */
+export async function previewRerun(projectId: string, actor: Actor, runId: string): Promise<ImpactReport> {
+  await authorize(projectId, actor, 'VIEWER');
+  const previous = await loadNode(db, projectId, runId);
+  if (previous.type !== 'analysis_run') throw AppError.validation({ runId: 'Not a run.' });
+  const { report } = await buildReport(db, projectId, { nodeId: previous.id, fromVersion: previous.currentVersion, kind: 'structural', proposalHash: `rerun:${previous.id}` });
+  return report;
 }
 
 /* -------------------------------------------------------------------------- */

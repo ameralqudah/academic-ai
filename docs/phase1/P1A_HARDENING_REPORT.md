@@ -142,7 +142,22 @@ section ⊃ block ⊃ claim —reports→ value, —cites→ citation —of_sour
 
 ### Complete results (local: PostgreSQL 16, production build)
 
-RESULTS_TABLE
+| Suite | Command | Result |
+|---|---|---|
+| Typecheck | `npx tsc --noEmit` | ✅ |
+| Lint | `npx eslint .` | ✅ |
+| Dependency audit | `npm audit --omit=dev` | ✅ 0 vulnerabilities |
+| Unit / smoke (includes the graph unit checks and the route-guard check) | `npm run test:smoke` | ✅ all passed (1,972 checks) |
+| Statistics (includes lavaan and semTools parity) | `npm run test:analysis` | ✅ 1,328 assertions (unchanged) |
+| Knowledge providers | `npm run test:knowledge` | ✅ exit 0. The live OpenAlex call gets HTTP 403 in this sandbox (no network); this is handled and not a failure, as before |
+| Integration (PostgreSQL; auth, security, billing, projects) | `npm run test:integration` | ✅ 807 assertions (unchanged) |
+| Durable jobs (PostgreSQL) | `npm run test:jobs` | ✅ 22 assertions |
+| **Research Graph (PostgreSQL)** | `npm run test:graph` | ✅ **170 assertions**, 0 failed |
+| Production build | `npx next build` | ✅ 88 pages; all 11 `/api/v1` routes built |
+| **Browser, `FF_GRAPH=false`** | `npx playwright test` | ✅ **66 passed**, 1 skipped (the existing seeded-admin test, skipped as before) |
+| **Browser, `FF_GRAPH=true`** | `FF_GRAPH=true npx playwright test` | ✅ **66 passed**, 1 skipped. The full graph flow over HTTP; every other feature is unchanged with the flag on |
+
+No existing security or statistics test was removed or weakened. The integration (807), statistics (1,328) and jobs (22) counts are exactly as before. The browser suite grew from 64 to 66 with the graph tests.
 
 ## 8. Remaining risks, and what is intentionally deferred to P1-D
 

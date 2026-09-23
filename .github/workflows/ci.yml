@@ -79,6 +79,8 @@ jobs:
         run: npm run test:integration
       - name: Durable job suite
         run: npm run test:jobs
+      - name: Research Graph suite
+        run: npm run test:graph
 
   build-and-e2e:
     name: Production build and browser tests

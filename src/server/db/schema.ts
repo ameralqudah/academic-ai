@@ -13,6 +13,7 @@
 import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -1232,3 +1233,197 @@ export type AnalysisRun = typeof analysisRuns.$inferSelect;
 export type NewAnalysisRun = typeof analysisRuns.$inferInsert;
 export type AgentTask = typeof agentTasks.$inferSelect;
 export type NewAgentTask = typeof agentTasks.$inferInsert;
+
+/* -------------------------------------------------------------------------- */
+/*                        Research Graph core (P1-A)                          */
+/* -------------------------------------------------------------------------- */
+/*
+ * The project as a graph of versioned research objects (TARGET_ARCHITECTURE
+ * §C.3, §G). Edges point from the dependent object to what it depends on:
+ * `src` depends on `dst`, so a change to `dst` can make `src` stale.
+ *
+ * Integrity is enforced by the database, not only by the service:
+ * - every row carries `project_id`, and composite foreign keys on
+ *   `(project_id, node_id)` make a cross-project edge, version or mark
+ *   impossible;
+ * - `node_versions` rows cannot be updated or deleted (trigger, migration 0011),
+ *   except by the cascade that removes their node.
+ *
+ * Typed detail tables per node type come later; until then each version's
+ * payload is validated by a zod schema per type (`src/server/graph/types.ts`).
+ */
+
+export const projectRoleEnum = pgEnum('project_role', ['OWNER', 'EDITOR', 'COMMENTER', 'VIEWER']);
+
+export const projectMembers = pgTable(
+  'project_members',
+  {
+    projectId: text('project_id')
+      .notNull()
+      .references(() => researchProjects.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: projectRoleEnum('role').notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.userId] }),
+    index('project_members_user_idx').on(table.userId),
+  ],
+);
+
+export const graphNodes = pgTable(
+  'graph_nodes',
+  {
+    id: id(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => researchProjects.id, { onDelete: 'cascade' }),
+    type: varchar('type', { length: 40 }).notNull(),
+    label: text('label'),
+    /** The payload of `currentVersion`, duplicated here for reads. */
+    data: jsonb('data').$type<Record<string, unknown>>().notNull(),
+    currentVersion: integer('current_version').default(1).notNull(),
+    /** draft | active | stale | superseded | archived */
+    status: varchar('status', { length: 16 }).default('active').notNull(),
+    /**
+     * For statistical outputs only: `computed` (written by the analysis engine
+     * with its run, immutable) or `manual` (typed in by a person, never shown
+     * as verified). Null for every other type.
+     */
+    provenance: varchar('provenance', { length: 16 }),
+    /** Set when a run has used this data (or data derived from it): no further edits. */
+    frozenAt: timestamp('frozen_at', { withTimezone: true, mode: 'date' }),
+    createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdByRunId: text('created_by_run_id'),
+    /** user | agent | import | engine */
+    origin: varchar('origin', { length: 16 }).default('user').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index('graph_nodes_project_idx').on(table.projectId, table.type, table.status),
+    uniqueIndex('graph_nodes_project_id_unique').on(table.projectId, table.id),
+  ],
+);
+
+export const nodeVersions = pgTable(
+  'node_versions',
+  {
+    projectId: text('project_id').notNull(),
+    nodeId: text('node_id').notNull(),
+    version: integer('version').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    /** sha256 of the canonical payload. */
+    hash: varchar('hash', { length: 64 }).notNull(),
+    /** cosmetic | substantive | structural; null for the first version. */
+    changeKind: varchar('change_kind', { length: 16 }),
+    changeNote: text('change_note'),
+    /** Hash of the Impact Report the author acknowledged for this change (R6). */
+    impactReportHash: varchar('impact_report_hash', { length: 64 }),
+    createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdByRunId: text('created_by_run_id'),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.nodeId, table.version] }),
+    foreignKey({
+      name: 'node_versions_node_fk',
+      columns: [table.projectId, table.nodeId],
+      foreignColumns: [graphNodes.projectId, graphNodes.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+export const graphEdges = pgTable(
+  'graph_edges',
+  {
+    id: id(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => researchProjects.id, { onDelete: 'cascade' }),
+    srcId: text('src_id').notNull(),
+    rel: varchar('rel', { length: 40 }).notNull(),
+    dstId: text('dst_id').notNull(),
+    /**
+     * The version of `dst` that `src` was last validated against (null =
+     * follows the latest). Informational for impact analysis — every
+     * dependency is followed whatever its pin — and the record of which
+     * version a run actually used.
+     */
+    dstVersion: integer('dst_version'),
+    /** Whether a change to `dst` can make `src` stale. */
+    dependency: boolean('dependency').notNull(),
+    attrs: jsonb('attrs').$type<Record<string, unknown>>().default({}).notNull(),
+    createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdByRunId: text('created_by_run_id'),
+    /** user | agent | import | engine */
+    origin: varchar('origin', { length: 16 }).default('user').notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex('graph_edges_unique').on(table.srcId, table.rel, table.dstId),
+    index('graph_edges_dst_idx').on(table.dstId),
+    index('graph_edges_project_rel_idx').on(table.projectId, table.rel),
+    foreignKey({
+      name: 'graph_edges_src_fk',
+      columns: [table.projectId, table.srcId],
+      foreignColumns: [graphNodes.projectId, graphNodes.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'graph_edges_dst_fk',
+      columns: [table.projectId, table.dstId],
+      foreignColumns: [graphNodes.projectId, graphNodes.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+export const staleMarks = pgTable(
+  'stale_marks',
+  {
+    projectId: text('project_id').notNull(),
+    nodeId: text('node_id').notNull(),
+    causeNodeId: text('cause_node_id').notNull(),
+    causeVersion: integer('cause_version').notNull(),
+    /**
+     * `stale`: something it depends on changed. `untraced`: a provenance link
+     * (the result a text reports, the source it cites) was removed.
+     * `stale_input`: it was linked to something already out of date.
+     */
+    kind: varchar('kind', { length: 16 }).default('stale').notNull(),
+    /** The flagged node's own version when the mark was made. */
+    nodeVersion: integer('node_version').notNull(),
+    /** Node ids from the cause to this node. */
+    path: text('path').array().notNull(),
+    /** info | review | invalidates */
+    severity: varchar('severity', { length: 16 }).notNull(),
+    reason: text('reason'),
+    createdAt: createdAt(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true, mode: 'date' }),
+    resolvedByUserId: text('resolved_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** accepted | regenerated | dismissed */
+    resolution: varchar('resolution', { length: 16 }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.nodeId, table.causeNodeId, table.causeVersion, table.kind] }),
+    index('stale_marks_open_idx').on(table.nodeId, table.resolvedAt),
+    index('stale_marks_project_idx').on(table.projectId, table.resolvedAt),
+    foreignKey({
+      name: 'stale_marks_node_fk',
+      columns: [table.projectId, table.nodeId],
+      foreignColumns: [graphNodes.projectId, graphNodes.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'stale_marks_cause_fk',
+      columns: [table.projectId, table.causeNodeId],
+      foreignColumns: [graphNodes.projectId, graphNodes.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+export type ProjectMember = typeof projectMembers.$inferSelect;
+export type GraphNode = typeof graphNodes.$inferSelect;
+export type NodeVersion = typeof nodeVersions.$inferSelect;
+export type GraphEdge = typeof graphEdges.$inferSelect;
+export type StaleMark = typeof staleMarks.$inferSelect;

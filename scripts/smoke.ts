@@ -5240,5 +5240,94 @@ console.log('\nwhat a model costs');
   check('the seed keeps admin-edited plans', seedSource.includes("process.env.SEED_OVERWRITE_PLANS !== 'true'"), true);
 }
 
+{
+  console.log('\nResearch Graph: change classes and edge rules (P1-A)');
+  const { classifyChange, canonicalJson, NODE_TYPES } = await import('@/server/graph/types');
+  const { EDGE_RULES, ruleFor } = await import('@/server/graph/rules');
+  const { payloadHash } = await import('@/server/graph/impact');
+
+  const construct = { name: 'Trust', definition: 'Willingness', kind: 'reflective' };
+  check('no change is no change', classifyChange('construct', construct, { ...construct }), null);
+  check('a translation is cosmetic', classifyChange('construct', construct, { ...construct, nameAr: 'الثقة' }), 'cosmetic');
+  check('a definition is substantive', classifyChange('construct', construct, { ...construct, definition: 'Belief' }), 'substantive');
+  check('a measurement kind is structural', classifyChange('construct', construct, { ...construct, kind: 'formative' }), 'structural');
+  check('the largest change wins', classifyChange('construct', construct, { ...construct, nameAr: 'x', kind: 'formative' }), 'structural');
+  check('an unknown field is substantive', classifyChange('note', { a: 1 }, { a: 2 }), 'substantive');
+  check('reverse coding an item is structural', classifyChange('instrument_item', { wording: 'x', reverseCoded: false }, { wording: 'x', reverseCoded: true }), 'structural');
+  check('a citation becoming contradicted is structural', classifyChange('citation', { support: 'supports' }, { support: 'contradicts' }), 'structural');
+  check('a citation becoming supported is substantive', classifyChange('citation', { support: 'unverified' }, { support: 'supports' }), 'substantive');
+  check('a retraction is structural', classifyChange('source', { title: 't', retracted: false }, { title: 't', retracted: true }), 'structural');
+  check('canonical JSON ignores key order', canonicalJson({ b: 1, a: { d: 2, c: 3 } }), canonicalJson({ a: { c: 3, d: 2 }, b: 1 }));
+  check('equal payloads hash equally', payloadHash({ b: 1, a: 2 }), payloadHash({ a: 2, b: 1 }));
+
+  const known = new Set<string>(NODE_TYPES);
+  const rels = EDGE_RULES.map((rule) => rule.rel);
+  check('relation names are unique', new Set(rels).size, rels.length);
+  check('every rule names known node types', EDGE_RULES.every((rule) => [...rule.from, ...rule.to].every((type) => known.has(type))), true);
+  check('every dependency rule says what it does downstream', EDGE_RULES.every((rule) => !rule.dependency || Boolean(rule.downstream)), true);
+  check('non-dependency rules never flag anything', EDGE_RULES.every((rule) => rule.dependency || (!rule.downstream && !rule.upstream && !rule.onLink)), true);
+  check('cosmetic changes never flag anything', EDGE_RULES.every((rule) => !rule.downstream?.cosmetic && !rule.upstream?.cosmetic), true);
+  check('a reported number depends on its result', ruleFor('reports')?.downstream?.structural, 'invalidates');
+
+  // P1-A.1 invariants of the rule table.
+  check('a run’s record is provenance, engine-only and a dependency', EDGE_RULES.filter((rule) => rule.engineOnly).every((rule) => rule.provenance && rule.dependency), true);
+  check('the run record is exactly executes, uses_data, produced_by', EDGE_RULES.filter((rule) => rule.engineOnly).map((rule) => rule.rel).sort(), ['executes', 'produced_by', 'uses_data']);
+  check('no relation both carries provenance and changes its target when linked', EDGE_RULES.every((rule) => !(rule.provenance && rule.onLink)), true);
+  check('text reaches values only through provenance links', ['reports', 'cites', 'contains_value', 'supported_by'].every((rel) => ruleFor(rel)?.provenance), true);
+  check('sections contain their blocks, blocks their claims (containers)', [ruleFor('has_block')?.container, ruleFor('asserts')?.container], [true, true]);
+  const chain: [string, string, string][] = [
+    ['construct', 'scoped_by', 'research_question'],
+    ['hypothesis', 'answers', 'research_question'],
+    ['model_element', 'indicated_by', 'instrument_item'],
+    ['model_element', 'connects', 'model_element'],
+    ['analysis', 'uses_column', 'dataset_column'],
+    ['result_table', 'contains_value', 'result_value'],
+    ['claim', 'reports', 'result_value'],
+    ['claim', 'supported_by', 'evidence'],
+    ['block', 'presents', 'interpretation'],
+  ];
+  check('the traceability chain has every link (F-11)', chain.filter(([from, rel, to]) => !((ruleFor(rel)?.from as readonly string[] | undefined)?.includes(from) && (ruleFor(rel)?.to as readonly string[] | undefined)?.includes(to))), []);
+  check('a model path’s role is structural', classifyChange('model_element', { kind: 'path', role: 'direct' }, { kind: 'path', role: 'moderation' }), 'structural');
+  const { immutableFieldChanges } = await import('@/server/graph/types');
+  check('a dataset version’s content hash is immutable', immutableFieldChanges('dataset_version', { contentHash: 'a' }, { contentHash: 'b' }), ['contentHash']);
+
+  const { assessCurrency, ownState } = await import('@/server/graph/currency');
+  const graphOf = (nodes: { id: string; type: string; status?: string; provenance?: string | null; marks?: { severity: string; kind: string }[] }[], edges: [string, string, string][]) => ({
+    nodes: async (ids: string[]) => nodes.filter((n) => ids.includes(n.id)).map((n) => ({ id: n.id, type: n.type, status: n.status ?? 'active', provenance: n.provenance ?? null, openMarks: n.marks ?? [] })),
+    dependencies: async (ids: string[]) => edges.filter(([src]) => ids.includes(src)).map(([srcId, rel, dstId]) => ({ srcId, rel, dstId })),
+  });
+  check('own state: superseded beats everything', ownState({ id: 'x', type: 'block', status: 'superseded', provenance: null, openMarks: [{ severity: 'review', kind: 'stale' }] }), 'superseded');
+  const text = [['b', 'reports', 'v'], ['v', 'produced_by', 'r']] as [string, string, string][];
+  const verified = await assessCurrency('b', graphOf([{ id: 'b', type: 'block' }, { id: 'v', type: 'result_value', provenance: 'computed' }, { id: 'r', type: 'analysis_run', provenance: 'computed' }], text));
+  check('computed and current → verified', [verified.effective, verified.verification], ['current', 'verified']);
+  const replaced = await assessCurrency('b', graphOf([{ id: 'b', type: 'block' }, { id: 'v', type: 'result_value', provenance: 'computed' }, { id: 'r', type: 'analysis_run', status: 'superseded', provenance: 'computed' }], text));
+  check('from a replaced run → not current', [replaced.effective, replaced.verification], ['superseded_input', 'not_current']);
+  const typed = await assessCurrency('b', graphOf([{ id: 'b', type: 'block' }, { id: 'v', type: 'result_value', provenance: 'manual' }], [['b', 'reports', 'v']]));
+  check('typed in → manual, never verified', typed.verification, 'manual');
+  const verdictOnly = await assessCurrency('v', graphOf([{ id: 'v', type: 'result_value', provenance: 'computed' }, { id: 'h', type: 'hypothesis', marks: [{ severity: 'invalidates', kind: 'stale' }] }], [['v', 'tests', 'h']]));
+  check('a hypothesis under revision does not make its test value non-current', verdictOnly.effective, 'current');
+
+  const { readdirSync, statSync } = await import('node:fs');
+  const routeFiles: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const path = `${dir}/${entry}`;
+      if (statSync(path).isDirectory()) walk(path);
+      else if (entry === 'route.ts') routeFiles.push(path);
+    }
+  };
+  walk('src/app/api/v1');
+  const unguarded: string[] = [];
+  for (const file of routeFiles) {
+    const source = await readFile(file, 'utf8');
+    const handlers = source.match(/export const (GET|POST|PATCH|PUT|DELETE)\b/g) ?? [];
+    const flaggedCount = source.match(/= flagged\(/g)?.length ?? 0;
+    const limitedCount = source.match(/rateLimit: GRAPH_(READ|WRITE)_LIMIT/g)?.length ?? 0;
+    if (handlers.length === 0 || flaggedCount !== handlers.length || limitedCount !== handlers.length) unguarded.push(file);
+    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !source.includes('GRAPH_WRITE_LIMIT') && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
+  }
+  check(`every /api/v1 handler (${routeFiles.length} routes) is behind the flag and rate-limited`, unguarded, []);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

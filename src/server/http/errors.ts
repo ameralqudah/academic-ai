@@ -12,6 +12,7 @@ export type ErrorCode =
   | 'NOT_FOUND'
   | 'VALIDATION'
   | 'CONFLICT'
+  | 'IMPACT_ACK_REQUIRED'
   | 'RATE_LIMITED'
   | 'PLAN_LIMIT'
   | 'AI_UNAVAILABLE'
@@ -23,6 +24,8 @@ const STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
   VALIDATION: 422,
   CONFLICT: 409,
+  /** A change with downstream consequences, sent without its acknowledged Impact Report (R6). */
+  IMPACT_ACK_REQUIRED: 428,
   RATE_LIMITED: 429,
   PLAN_LIMIT: 402,
   AI_UNAVAILABLE: 503,

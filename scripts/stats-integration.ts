@@ -238,12 +238,19 @@ async function main() {
   const mediationAgain = await createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'mediation', x: 'x', m: 'm', y: 'y', bootstrap: { resamples: 1000 } } });
   check('a randomised specification without a seed gets a recorded, deterministic one', [Number.isInteger(seed) && seed > 0, (mediationAgain.spec as { bootstrap: { seed: number } }).bootstrap.seed === seed], [true, true]);
   const queued = await startRun(me, mediationSpec.id, { projectId: P, execution: 'job' });
+  /*
+   * The run commits its result first; the job is completed after it (and after
+   * the graph is recorded). Wait for both, so the check never reads the job
+   * between the two commits.
+   */
   let final = queued.status;
-  for (let i = 0; i < 100 && !['succeeded', 'failed', 'refused', 'cancelled'].includes(final); i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  let job: typeof analysisJobs.$inferSelect | undefined;
+  for (let i = 0; i < 200; i += 1) {
     final = (await db.select({ status: statRuns.status }).from(statRuns).where(eq(statRuns.id, queued.id)))[0]!.status;
+    [job] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, queued.jobId ?? ''));
+    if (['succeeded', 'failed', 'refused', 'cancelled'].includes(final) && job && !['QUEUED', 'RUNNING'].includes(job.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const [job] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, queued.jobId ?? ''));
   check('a heavy run goes through the existing job queue and completes', [Boolean(queued.jobId), final, job?.kind, job?.status], [true, 'succeeded', 'stats.run', 'COMPLETED']);
   const done = await getRun(me, queued.id, P);
   check('the seed is on the run record', done.run.seed, seed);

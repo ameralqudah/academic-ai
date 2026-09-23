@@ -30,14 +30,35 @@ export function isOwnerEmail(email: string | null | undefined): boolean {
 }
 
 /**
- * Administrative access: granted by the stored role, or by being the owner.
+ * The owner, proven: the configured address **and** a verified mailbox.
+ *
+ * The address alone is not enough. Registration does not prove that someone
+ * controls the address they typed, so an owner address that had not yet been
+ * registered — or whose holder only ever signed in with Google — could be
+ * claimed by whoever registered it first, together with admin rights and the
+ * top plan. Verification is what ties the address to a person.
+ */
+export function isVerifiedOwner(user: {
+  email?: string | null;
+  emailVerified?: boolean | Date | null;
+}): boolean {
+  return isOwnerEmail(user.email) && Boolean(user.emailVerified);
+}
+
+/**
+ * Administrative access: granted by the stored role, or by being the verified
+ * owner.
  *
  * The owner is an administrator without needing a row in the database to say
  * so — which matters on a fresh deployment, or if the role is ever cleared by
- * accident from the admin panel.
+ * accident from the admin panel — but only once their address is verified.
  */
-export function hasAdminAccess(user: { email?: string | null; role?: string | null }): boolean {
-  return user.role === 'ADMIN' || isOwnerEmail(user.email);
+export function hasAdminAccess(user: {
+  email?: string | null;
+  role?: string | null;
+  emailVerified?: boolean | Date | null;
+}): boolean {
+  return user.role === 'ADMIN' || isVerifiedOwner(user);
 }
 
 /** True when the owner override is configured at all. */

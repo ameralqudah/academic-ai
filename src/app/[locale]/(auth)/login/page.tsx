@@ -19,13 +19,21 @@ export async function generateMetadata({
 
 export default async function LoginPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ locale: string }>;
+  searchParams: Promise<{ error?: string }>;
 }) {
   const { locale } = await params;
+  const { error } = await searchParams;
   const user = await getCurrentUser();
   if (user) redirect(`/${locale}${SIGNED_IN_HOME}`);
 
   const env = getEnv();
-  return <LoginForm googleEnabled={Boolean(env.AUTH_GOOGLE_ID && env.AUTH_GOOGLE_SECRET)} />;
+  return (
+    <LoginForm
+      googleEnabled={Boolean(env.AUTH_GOOGLE_ID && env.AUTH_GOOGLE_SECRET)}
+      initialErrorCode={error}
+    />
+  );
 }

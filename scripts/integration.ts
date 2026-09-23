@@ -727,6 +727,25 @@ async function main() {
   resetEnvCache();
 
   const ownerId = await newUser('owner');
+
+  /*
+   * P0.3: the address alone grants nothing. Whoever registers the owner
+   * address first has not proven they hold it — only a verified address
+   * carries owner rights.
+   */
+  const unverifiedPlan = await resolvePlanForUser(ownerId);
+  check('an unverified owner address stays on the free plan', unverifiedPlan.plan.code, 'FREE');
+  assertTrue('an unverified owner address is not flagged owner', !unverifiedPlan.isOwner);
+  {
+    const { hasAdminAccess } = await import('@/server/auth/owner');
+    assertTrue('an unverified owner address has no admin access', !hasAdminAccess({ email: ownerEmail, role: 'USER', emailVerified: false }));
+    const { requestEmailVerification, verifyEmail } = await import('@/server/services/account.service');
+    const request = await requestEmailVerification(ownerId, 'en');
+    const token = new URL(request.devUrl as string).searchParams.get('token') as string;
+    await verifyEmail({ userId: ownerId, token });
+    assertTrue('a verified owner has admin access', hasAdminAccess({ email: ownerEmail, role: 'USER', emailVerified: true }));
+  }
+
   const ownerPlan = await resolvePlanForUser(ownerId);
 
   check('the owner lands on the paid plan', ownerPlan.plan.code, 'PRO');
@@ -6026,6 +6045,56 @@ async function main() {
     await expectAppError('and an unknown one the same way', 'NOT_FOUND', () =>
       requireOwned('00000000-0000-0000-0000-000000000000', intruder),
     );
+  }
+
+  /* ------------------------------------------------ P0.3 email verification */
+  {
+    section('P0.3 — email verification');
+
+    const { requestEmailVerification, verifyEmail } = await import('@/server/services/account.service');
+    const usersRepo = await import('@/server/repositories/users.repository');
+    const tokensRepo = await import('@/server/repositories/tokens.repository');
+    const { createHash } = await import('node:crypto');
+
+    const id = await newUser('p03-verify');
+    check('a new account starts unverified', (await usersRepo.findById(id))?.emailVerified ?? null, null);
+
+    const first = await requestEmailVerification(id, 'en');
+    const firstToken = new URL(first.devUrl as string).searchParams.get('token') as string;
+    const second = await requestEmailVerification(id, 'ar');
+    const secondToken = new URL(second.devUrl as string).searchParams.get('token') as string;
+
+    await expectAppError('asking again invalidates the earlier link', 'CONFLICT', () =>
+      verifyEmail({ userId: id, token: firstToken }),
+    );
+    await expectAppError('a wrong token is refused', 'CONFLICT', () =>
+      verifyEmail({ userId: id, token: 'f'.repeat(64) }),
+    );
+
+    /* The refused attempts above consumed nothing that belongs to the live link. */
+    const third = await requestEmailVerification(id, 'en');
+    const liveToken = new URL(third.devUrl as string).searchParams.get('token') as string;
+    void secondToken;
+    await verifyEmail({ userId: id, token: liveToken });
+    assertTrue('the link verifies the address', Boolean((await usersRepo.findById(id))?.emailVerified));
+
+    await expectAppError('a used link does not work twice', 'CONFLICT', () =>
+      verifyEmail({ userId: id, token: liveToken }),
+    );
+    check('a verified account is not sent another link', (await requestEmailVerification(id, 'en')).alreadyVerified, true);
+
+    /* An expired link is refused even with the right token. */
+    const late = await newUser('p03-expired');
+    const expiredToken = 'a'.repeat(64);
+    await tokensRepo.put(
+      `email-verify:${late}`,
+      createHash('sha256').update(expiredToken).digest('hex'),
+      new Date(Date.now() - 1000),
+    );
+    await expectAppError('an expired link is refused', 'CONFLICT', () =>
+      verifyEmail({ userId: late, token: expiredToken }),
+    );
+    check('and the address stays unverified', (await usersRepo.findById(late))?.emailVerified ?? null, null);
   }
 
   /* --------------------------------------------------------------- cleanup */

@@ -23,6 +23,7 @@ export interface SessionUser {
   name: string | null;
   role: 'USER' | 'ADMIN';
   locale: 'ar' | 'en';
+  emailVerified: boolean;
 }
 
 export interface ApiContext<TBody, TParams> {
@@ -106,6 +107,7 @@ export function withApi<TBody = undefined, TParams = Record<string, string>>(
           name: session.user.name ?? null,
           role: session.user.role,
           locale: session.user.locale,
+          emailVerified: session.user.verified === true,
         };
         if (options.admin && !hasAdminAccess(user)) throw AppError.forbidden();
       }

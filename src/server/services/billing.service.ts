@@ -1,6 +1,6 @@
 import { billingProvider, type BillingEvent } from '@/server/billing';
 import { PayPalBillingProvider } from '@/server/billing/paypal';
-import { isOwnerEmail } from '@/server/auth/owner';
+import { isVerifiedOwner } from '@/server/auth/owner';
 import { logger } from '@/lib/logger';
 import { AppError } from '@/server/http/errors';
 import * as paymentsRepo from '@/server/repositories/payments.repository';
@@ -17,7 +17,7 @@ export async function startCheckout(input: {
 
   // The owner already has the top plan. Sending them to a payment page would
   // take money for something they cannot be charged for and cannot lose.
-  if (isOwnerEmail(user.email)) {
+  if (isVerifiedOwner(user)) {
     throw AppError.conflict(
       'This account already has full access and does not need a subscription.',
       'هذا الحساب يملك جميع الصلاحيات بالفعل ولا يحتاج اشتراكًا.',

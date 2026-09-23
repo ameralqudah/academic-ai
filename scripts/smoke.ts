@@ -4986,5 +4986,55 @@ console.log('\nwhat a model costs');
   check('the chat route refuses a conversation that is not the caller\'s', route.includes('await requireOwned(body.conversationId, user.id)'), true);
 }
 
+/* -------------------------------------------------------------------------- */
+/*          P0.3 — owner rights need a verified address; safe linking         */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { hasAdminAccess, isVerifiedOwner } = await import('@/server/auth/owner');
+  const { decideOAuthSignIn } = await import('@/server/auth/policy');
+  const { resetEnvCache } = await import('@/config/env');
+
+  /* The smoke suite runs without a real environment; owner lookup reads it. */
+  const saved = { OWNER_EMAIL: process.env.OWNER_EMAIL, DATABASE_URL: process.env.DATABASE_URL, AUTH_SECRET: process.env.AUTH_SECRET };
+  process.env.DATABASE_URL ??= 'postgresql://smoke@localhost/smoke';
+  process.env.AUTH_SECRET ??= 'smoke-secret-smoke-secret-smoke-secret';
+  process.env.OWNER_EMAIL = 'owner@example.test';
+  resetEnvCache();
+
+  check('owner address, unverified: no admin', hasAdminAccess({ email: 'owner@example.test', role: 'USER', emailVerified: false }), false);
+  check('owner address, verified: admin', hasAdminAccess({ email: 'owner@example.test', role: 'USER', emailVerified: true }), true);
+  check('owner address, verified date: admin', hasAdminAccess({ email: 'OWNER@example.test', role: 'USER', emailVerified: new Date() }), true);
+  check('other address, verified: no admin', hasAdminAccess({ email: 'x@example.test', role: 'USER', emailVerified: true }), false);
+  check('stored ADMIN role: admin regardless', hasAdminAccess({ email: 'x@example.test', role: 'ADMIN', emailVerified: false }), true);
+  check('verified owner needs both parts', isVerifiedOwner({ email: 'owner@example.test', emailVerified: null }), false);
+
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  resetEnvCache();
+
+  const decide = (providerEmailVerified: boolean, alreadyLinked: boolean, existing: Parameters<typeof decideOAuthSignIn>[0]['existing']) =>
+    decideOAuthSignIn({ providerEmailVerified, alreadyLinked, existing });
+
+  check('google, new user, verified by Google: allowed', decide(true, false, null), { allow: true });
+  check('google, address not verified by Google: refused', decide(false, false, null), { allow: false, reason: 'provider-email-unverified' });
+  check('google, already linked: allowed', decide(true, true, { hasPassword: true, emailVerified: false, suspended: false }), { allow: true });
+  check(
+    'google into an unverified password account: refused (pre-account takeover)',
+    decide(true, false, { hasPassword: true, emailVerified: false, suspended: false }),
+    { allow: false, reason: 'local-account-unverified' },
+  );
+  check('google into a verified password account: allowed', decide(true, false, { hasPassword: true, emailVerified: true, suspended: false }), { allow: true });
+  check('google into an OAuth-only account: allowed', decide(true, false, { hasPassword: false, emailVerified: false, suspended: false }), { allow: true });
+  check('google into a suspended account: refused', decide(true, true, { hasPassword: false, emailVerified: true, suspended: true }), { allow: false, reason: 'suspended' });
+
+  const { passwordResetEmail, emailVerificationEmail } = await import('@/server/email/templates');
+  const hostile = '<img src=x onerror=alert(1)>';
+  check('a user name is escaped in the reset email', passwordResetEmail({ to: 'a@b.c', name: hostile, url: 'https://x', locale: 'en', expiresMinutes: 30 }).html.includes('<img'), false);
+  check('and in the verification email', emailVerificationEmail({ to: 'a@b.c', name: hostile, url: 'https://x', locale: 'ar', expiresHours: 24 }).html.includes('<img'), false);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

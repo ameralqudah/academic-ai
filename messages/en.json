@@ -174,8 +174,25 @@
       "weakPassword": "Use at least 8 characters, including a letter and a number.",
       "passwordMismatch": "The two passwords don't match.",
       "suspended": "This account is suspended. Contact support to restore it.",
-      "generic": "Something went wrong. Please try again."
-    }
+      "generic": "Something went wrong. Please try again.",
+      "accountSuspended": "This account is suspended. Contact support if you think this is a mistake.",
+      "providerEmailUnverified": "Your Google account's email address is not verified with Google.",
+      "linkRequiresVerification": "An account with this email already exists. Sign in with your password and confirm your email in Settings before signing in with Google.",
+      "rateLimitedLogin": "Too many sign-in attempts. Wait a few minutes and try again."
+    },
+    "verifyTitle": "Confirm your email",
+    "verifyWorking": "Confirming your email address…",
+    "verifyDoneTitle": "Email confirmed",
+    "verifyDoneBody": "Thank you — your email address is now confirmed.",
+    "verifyInvalid": "This confirmation link is invalid or has expired. Request a new one from Settings.",
+    "verifyError": "We couldn't confirm your email right now. Please try again.",
+    "verifyContinue": "Go to settings",
+    "verifySectionTitle": "Email address",
+    "verifyStatusVerified": "Confirmed:",
+    "verifyStatusUnverified": "Not yet confirmed:",
+    "verifyStatusBody": "Confirming your address protects your account and is required to link a Google sign-in.",
+    "verifyResend": "Send confirmation email",
+    "verifyResent": "A confirmation link is on its way. Check your inbox."
   },
   "dashboard": {
     "greeting": "Welcome back, {name}",

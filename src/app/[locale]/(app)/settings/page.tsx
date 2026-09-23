@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { getTranslations } from 'next-intl/server';
 
+import { EmailVerification } from '@/components/settings/email-verification';
 import { SettingsForm } from '@/components/settings/settings-form';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Card, CardHeader } from '@/components/ui/card';
@@ -29,6 +30,8 @@ export default async function SettingsPage({
   const tc = await getTranslations({ locale, namespace: 'common' });
 
   const settings = await usersRepo.ensureSettings(user.id);
+  /* Read from the database, not the session: a link confirmed a moment ago shows at once. */
+  const account = await usersRepo.findById(user.id);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-7">
@@ -49,6 +52,8 @@ export default async function SettingsPage({
           }}
         />
       </Card>
+
+      <EmailVerification email={user.email} verified={Boolean(account?.emailVerified)} />
 
       <Card className="flex flex-row items-center justify-between gap-4">
         <div className="flex flex-col gap-0.5">

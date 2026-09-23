@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 import { getEnv } from '@/config/env';
 import { logger } from '@/lib/logger';
 import { emailProvider } from '@/server/email';
-import { passwordResetEmail } from '@/server/email/templates';
+import { emailVerificationEmail, passwordResetEmail } from '@/server/email/templates';
 import { AppError } from '@/server/http/errors';
 import * as tokensRepo from '@/server/repositories/tokens.repository';
 import * as usersRepo from '@/server/repositories/users.repository';
@@ -33,6 +33,17 @@ export async function register(input: RegisterInput): Promise<{ id: string; emai
 
   await usersRepo.ensureSettings(user.id);
   await attachDefaultPlan(user.id);
+
+  /*
+   * The confirmation email goes out with the account, but registration never
+   * waits on it or fails because of it: an unverified account works normally,
+   * and only owner rights and account linking wait for the proof.
+   */
+  await requestEmailVerification(user.id, input.locale).catch((error: unknown) => {
+    logger.error('auth.verify.sendOnRegisterFailed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 
   return { id: user.id, email: user.email };
 }
@@ -152,4 +163,75 @@ export async function resetPassword(input: {
   });
 
   logger.info('auth.reset.completed', { userId: input.userId });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                             Email verification                             */
+/* -------------------------------------------------------------------------- */
+
+const VERIFY_TTL_HOURS = 24;
+const VERIFY_PREFIX = 'email-verify:';
+
+export interface EmailVerificationRequestResult {
+  /** Already verified — nothing was sent. */
+  alreadyVerified?: boolean;
+  /** As with password reset: only outside production with the console provider. */
+  devUrl?: string;
+}
+
+/**
+ * Sends a link proving the user controls their address.
+ *
+ * The token is stored only as a SHA-256 hash in the same single-use table the
+ * password reset uses, one live link per user: asking again invalidates the
+ * previous link.
+ */
+export async function requestEmailVerification(
+  userId: string,
+  locale: 'ar' | 'en',
+): Promise<EmailVerificationRequestResult> {
+  const user = await usersRepo.findById(userId);
+  if (!user || user.status === 'SUSPENDED') return {};
+  if (user.emailVerified) return { alreadyVerified: true };
+
+  const token = randomBytes(32).toString('hex');
+  const expires = new Date(Date.now() + VERIFY_TTL_HOURS * 3_600_000);
+  await tokensRepo.put(`${VERIFY_PREFIX}${user.id}`, hashToken(token), expires);
+
+  const url = `${baseUrl()}/${locale}/verify-email?uid=${encodeURIComponent(user.id)}&token=${token}`;
+  const provider = emailProvider();
+
+  try {
+    await provider.send(
+      emailVerificationEmail({ to: user.email, name: user.name, url, locale, expiresHours: VERIFY_TTL_HOURS }),
+    );
+  } catch (error) {
+    logger.error('auth.verify.emailFailed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const env = getEnv();
+  return provider.name === 'console' && env.NODE_ENV !== 'production' ? { devUrl: url } : {};
+}
+
+/** Consumes a verification link. The token works once, and not after it expires. */
+export async function verifyEmail(input: { userId: string; token: string }): Promise<void> {
+  const valid = await tokensRepo.take(`${VERIFY_PREFIX}${input.userId}`, hashToken(input.token));
+
+  if (!valid) {
+    throw AppError.conflict(
+      'This confirmation link is invalid or has expired. Request a new one.',
+      'رابط التأكيد غير صالح أو انتهت صلاحيته. اطلب رابطًا جديدًا.',
+    );
+  }
+
+  const user = await usersRepo.findById(input.userId);
+  if (!user || user.status === 'SUSPENDED') throw AppError.notFound('user');
+
+  if (!user.emailVerified) {
+    await usersRepo.updateUser(input.userId, { emailVerified: new Date() });
+  }
+
+  logger.info('auth.verify.completed', { userId: input.userId });
 }

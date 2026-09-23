@@ -6069,6 +6069,165 @@ console.log('\nuploaded documents are attributed');
     assertTrue('no analysis service converts cells with Number()', services.every((text) => !text.includes(': Number(value);')));
   }
 
+  /* ------------------------------ P0.7 / P0.8 CFA against lavaan references */
+  {
+    console.log('P0.7/P0.8 — CFA estimates, standard errors and fit match lavaan');
+
+    const { readFile: read } = await import('node:fs/promises');
+    const { numericColumns } = await import('@/analysis/numeric-columns');
+
+    type Ref = {
+      n: number;
+      fit: { chisq: number; df: number; cfi: number; tli: number; rmsea: number; srmr: number };
+      loadings: { lhs: string; rhs: string; est: number; se: number }[];
+      residuals: { lhs: string; est: number; se: number }[];
+      factorCorrelations: { lhs: string; rhs: string; 'est.std': number; se: number }[];
+    };
+
+    const cases: { file: string; data: string; model: Parameters<typeof confirmatoryFactorAnalysis>[0] }[] = [
+      {
+        file: 'cfa-hs1939.json',
+        data: 'holzinger_swineford_1939.csv',
+        model: {
+          constructs: [
+            { name: 'visual', indicators: ['x1', 'x2', 'x3'], mode: 'reflective' },
+            { name: 'textual', indicators: ['x4', 'x5', 'x6'], mode: 'reflective' },
+            { name: 'speed', indicators: ['x7', 'x8', 'x9'], mode: 'reflective' },
+          ],
+          paths: [],
+        } as never,
+      },
+      {
+        file: 'cfa-survey-blanks.json',
+        data: 'survey_with_blanks.csv',
+        model: {
+          constructs: [
+            { name: 'TRUST', indicators: ['TR1', 'TR2', 'TR3'], mode: 'reflective' },
+            { name: 'ATT', indicators: ['AT1', 'AT2', 'AT3'], mode: 'reflective' },
+            { name: 'INT', indicators: ['IN1', 'IN2', 'IN3'], mode: 'reflective' },
+          ],
+          paths: [],
+        } as never,
+      },
+    ];
+
+    for (const entry of cases) {
+      const reference = JSON.parse(await read(`evals/fixtures/references/${entry.file}`, 'utf8')) as Ref;
+      const data = numericColumns(parseCsv(await read(`evals/fixtures/datasets/${entry.data}`, 'utf8'), entry.data));
+      const result = confirmatoryFactorAnalysis(entry.model, data);
+      const tag = entry.file.replace('.json', '');
+
+      check(`${tag}: n`, result.n, reference.n);
+      check(`${tag}: df`, result.fit.df, reference.fit.df);
+      close(`${tag}: χ² (Wishart)`, result.fit.chiSquare, reference.fit.chisq, reference.fit.chisq * 1e-5);
+      close(`${tag}: CFI`, result.fit.cfi, reference.fit.cfi, 1e-5);
+      close(`${tag}: TLI`, result.fit.tli, reference.fit.tli, 1e-5);
+      close(`${tag}: RMSEA`, result.fit.rmsea, reference.fit.rmsea, 1e-5);
+      close(`${tag}: SRMR`, result.fit.srmr, reference.fit.srmr, 1e-4);
+
+      for (const expected of reference.loadings) {
+        const actual = result.loadings.find((row) => row.indicator === expected.rhs);
+        close(`${tag}: loading ${expected.rhs}`, actual?.estimate ?? Number.NaN, expected.est, 1e-4);
+        close(`${tag}: SE of loading ${expected.rhs}`, actual?.standardError ?? Number.NaN, expected.se, Math.max(1e-6, expected.se * 0.005));
+      }
+      for (const expected of reference.residuals) {
+        const at = result.loadings.find((row) => row.indicator === expected.lhs);
+        close(`${tag}: residual variance ${expected.lhs}`, at?.residualVariance ?? Number.NaN, expected.est, 1e-4);
+      }
+      for (const expected of reference.factorCorrelations) {
+        const actual = result.factorCorrelations.find((row) => row.first === expected.lhs && row.second === expected.rhs);
+        close(`${tag}: factor correlation ${expected.lhs}~${expected.rhs}`, actual?.estimate ?? Number.NaN, expected['est.std'], 1e-4);
+        close(`${tag}: its SE (delta method)`, actual?.standardError ?? Number.NaN, expected.se, expected.se * 0.005);
+      }
+    }
+
+    /* A standard error must shrink with the sample: doubling the rows scales it by √((n−1)/(2n−1)). */
+    const hs = numericColumns(parseCsv(await read('evals/fixtures/datasets/holzinger_swineford_1939.csv', 'utf8'), 'hs.csv'));
+    const doubled = new Map([...hs].map(([name, values]) => [name, [...values, ...values]]));
+    const hsModel = cases[0]?.model as Parameters<typeof confirmatoryFactorAnalysis>[0];
+    const once = confirmatoryFactorAnalysis(hsModel, hs);
+    const twice = confirmatoryFactorAnalysis(hsModel, doubled);
+    const ratio = (twice.loadings.find((row) => row.indicator === 'x2')?.standardError ?? 0) / (once.loadings.find((row) => row.indicator === 'x2')?.standardError ?? 1);
+    close('SEs scale with 1/√(n − 1), not with the number of indicators', ratio, Math.sqrt(300 / 601), 1e-6);
+    check('a reference loading has no standard error', once.loadings.find((row) => row.indicator === 'x1')?.standardError, 0);
+
+    /*
+     * The exact null model, recomputed independently: CFI from χ²₀ =
+     * (n − 1)·(Σ ln sᵢᵢ − ln|S|), with |S| by Cholesky. Twelve items at r ≈ .5
+     * is where the old pairwise approximation overstated χ²₀ most.
+     */
+    {
+      const p = 12;
+      const n = 300;
+      let seed = 7;
+      const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+      const normal = () => Math.sqrt(-2 * Math.log(random() + 1e-12)) * Math.cos(2 * Math.PI * random());
+      const common = Array.from({ length: n }, normal);
+      /* Two factors, so the one-factor model misfits and CFI is informative (not ~1). */
+      const second = Array.from({ length: n }, normal);
+      const columns = new Map(
+        Array.from({ length: p }, (_, j) => [
+          `q${j}`,
+          Array.from({ length: n }, (_, i) => 0.7 * (common[i] as number) + (j < 6 ? 0.4 : -0.4) * (second[i] as number) + 0.55 * normal()),
+        ] as [string, number[]]),
+      );
+      const oneFactor = { constructs: [{ name: 'F', indicators: [...columns.keys()], mode: 'reflective' }], paths: [] } as never;
+      const fit = confirmatoryFactorAnalysis(oneFactor, columns).fit;
+
+      const values = [...columns.values()];
+      const means = values.map((column) => column.reduce((sum, x) => sum + x, 0) / n);
+      const cov = values.map((a, i) => values.map((b, j) => a.reduce((sum, x, k) => sum + (x - (means[i] as number)) * ((b[k] as number) - (means[j] as number)), 0) / (n - 1)));
+      /* ln|S| by Cholesky. */
+      const L = cov.map(() => new Array(p).fill(0) as number[]);
+      let logDet = 0;
+      for (let i = 0; i < p; i += 1) {
+        for (let j = 0; j <= i; j += 1) {
+          let sum = (cov[i] as number[])[j] as number;
+          for (let k = 0; k < j; k += 1) sum -= ((L[i] as number[])[k] as number) * ((L[j] as number[])[k] as number);
+          if (i === j) {
+            (L[i] as number[])[i] = Math.sqrt(sum);
+            logDet += 2 * Math.log(Math.sqrt(sum));
+          } else (L[i] as number[])[j] = sum / ((L[j] as number[])[j] as number);
+        }
+      }
+      const nullChi = (n - 1) * (cov.reduce((sum, row, i) => sum + Math.log(row[i] as number), 0) - logDet);
+      const nullDf = (p * (p - 1)) / 2;
+      const d = Math.max(0, fit.chiSquare - fit.df);
+      const expectedCfi = 1 - d / Math.max(d, nullChi - nullDf);
+      const expectedTli = (nullChi / nullDf - fit.chiSquare / fit.df) / (nullChi / nullDf - 1);
+      close('CFI uses the exact independence-model χ²', fit.cfi, expectedCfi, 1e-9);
+      close('and so does TLI', fit.tli, expectedTli, 1e-9);
+      assertTrue('a two-factor structure fit as one factor is not reported as good', fit.cfi < 0.95);
+    }
+
+    /* Three indicators on one factor: six moments, six parameters. */
+    {
+      const three = new Map(['a', 'b', 'c'].map((name, k) => [name, (hs.get(`x${k + 1}`) ?? []).slice()]));
+      const result = confirmatoryFactorAnalysis({ constructs: [{ name: 'F', indicators: ['a', 'b', 'c'], mode: 'reflective' }], paths: [] } as never, three);
+      check('a just-identified model reports df = 0, not 1', result.fit.df, 0);
+      assertTrue('and says its fit cannot be tested', result.warnings.some((warning) => warning.code === 'just-identified'));
+      assertTrue('with no χ² p-value', Number.isNaN(result.fit.pValue));
+    }
+
+    /* A Heywood case: r12 = r13 = .8, r23 = .4 puts λ₁² = .8·.8/.4 = 1.6 above 1. */
+    {
+      let seed = 11;
+      const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+      const normal = () => Math.sqrt(-2 * Math.log(random() + 1e-12)) * Math.cos(2 * Math.PI * random());
+      const n = 500;
+      /* Cholesky factor of [[1,.8,.8],[.8,1,.4],[.8,.4,1]]. */
+      const l21 = 0.8, l22 = 0.6, l31 = 0.8, l32 = (0.4 - 0.64) / 0.6, l33 = Math.sqrt(1 - 0.64 - ((0.4 - 0.64) / 0.6) ** 2);
+      const z = Array.from({ length: n }, () => [normal(), normal(), normal()]);
+      const columns = new Map([
+        ['h1', z.map((row) => row[0] as number)],
+        ['h2', z.map((row) => l21 * (row[0] as number) + l22 * (row[1] as number))],
+        ['h3', z.map((row) => l31 * (row[0] as number) + l32 * (row[1] as number) + l33 * (row[2] as number))],
+      ]);
+      const result = confirmatoryFactorAnalysis({ constructs: [{ name: 'H', indicators: ['h1', 'h2', 'h3'], mode: 'reflective' }], paths: [] } as never, columns);
+      assertTrue('a Heywood case is detected, no longer hidden by the residual floor', result.warnings.some((warning) => warning.code === 'heywood-case'));
+    }
+  }
+
 console.log(
     failed === 0
       ? `\n✓ ${passed} analysis assertions passed\n`

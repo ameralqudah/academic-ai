@@ -95,7 +95,7 @@ The fixture project (37 nodes, 48 edges) covers design, instrument, data, analys
 |---|---|
 | `npm run test:graph` (new, PostgreSQL, also in CI) | ✅ 103 assertions. Covers the R6 table above, the write path (acknowledgement refused / wrong / for another proposal / accepted; versions immutable; conflict; no-op; cosmetic; invalid payload), marks with their paths, statuses, resolution and audit, version pinning and re-pinning, supersede, trace up and down, edge validation, unlink with acknowledgement, isolation between projects, roles, the feature flag, cycle termination and cascade. **Mutation check:** weakening one rule (`represents`) makes 8 assertions fail. |
 | Smoke (pure) | ✅ adds 18 checks: the change classifier, canonical hashing and the consistency of the rule table |
-| Playwright `e2e/graph.spec.ts` | Flag off (CI default): the routes 404 and require a session. Flag on: the full flow over HTTP (create, link, invalid link 422, dry run, 428 then acknowledged 200, 409 conflict, stale list, resolve, trace, versions, foreign project 404). |
+| Playwright `e2e/graph.spec.ts` | Flag off (CI default): the routes 404 and require a session. Flag on: the full flow over HTTP (create, link, invalid link 422, dry run, 428 then acknowledged 200, 409 conflict, stale list, resolve, trace, versions, foreign project 404). ✅ Both ways locally; the full e2e suite with the flag off: 66 passed, 1 skipped. |
 | Regression | typecheck, lint, smoke, statistics 1,328, knowledge, integration 807, jobs 22, production build: all ✅ |
 
 ### Migration and rollback

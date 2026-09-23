@@ -1,6 +1,6 @@
 import { MAX_FILE_BYTES } from '@/analysis';
 import { AppError } from '@/server/http/errors';
-import { ok, withApi } from '@/server/http/api';
+import { assertBodySize, ok, withApi } from '@/server/http/api';
 import { inspectUpload } from '@/server/services/analysis.service';
 
 /**
@@ -14,6 +14,7 @@ import { inspectUpload } from '@/server/services/analysis.service';
 export const POST = withApi(
   { rateLimit: { max: 20, windowSeconds: 300, key: 'analysis.profile' } },
   async ({ request }) => {
+    assertBodySize(request, MAX_FILE_BYTES);
     const form = await request.formData().catch(() => null);
     const file = form?.get('file');
 

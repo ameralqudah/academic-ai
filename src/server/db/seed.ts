@@ -4,7 +4,8 @@
  *   npm run db:push   # create the tables
  *   npm run db:seed
  *
- * Safe to re-run: plans are upserted by `code`, the admin by email.
+ * Safe to re-run: plans are created when missing (never overwritten unless
+ * SEED_OVERWRITE_PLANS=true), the admin by email.
  */
 
 import 'dotenv/config';
@@ -43,6 +44,17 @@ async function seedPlans() {
       isActive: true,
       isDefault: seed.isDefault,
     };
+
+    /*
+     * An existing plan belongs to the admin panel, where prices, limits and
+     * visibility are edited. Every deploy runs this seed, and overwriting the
+     * row here silently undid those edits. It is only created when missing;
+     * SEED_OVERWRITE_PLANS=true restores the old overwrite deliberately.
+     */
+    if (existing && process.env.SEED_OVERWRITE_PLANS !== 'true') {
+      console.log(`· plan ${seed.code} exists — kept as edited (SEED_OVERWRITE_PLANS=true to reset)`);
+      continue;
+    }
 
     let planId: string;
     if (existing) {

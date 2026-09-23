@@ -5130,5 +5130,115 @@ console.log('\nwhat a model costs');
   resetRateLimitStore();
 }
 
+/* -------------------------------------------------------------------------- */
+/*          P1.0 — SSRF: every address form, every redirect hop               */
+/* -------------------------------------------------------------------------- */
+
+{
+  const { guardedFetch, guardedLookup, isPublicUrl: publicUrl, BlockedAddressError, MAX_REDIRECTS } = await import('@/server/security/net-guard');
+
+  const refused = [
+    'http://[::ffff:169.254.169.254]/latest/meta-data',
+    'http://[::ffff:a9fe:a9fe]/',
+    'http://[64:ff9b::a9fe:a9fe]/',
+    'http://[2002:a9fe:a9fe::1]/',
+    'http://[fd00::1]/',
+    'http://[fe80::1]/',
+    'http://[::]/',
+    'http://[::1]/',
+    'http://2130706433/',
+    'http://0x7f.1/',
+    'http://100.64.0.1/',
+    'http://192.0.2.10/',
+    'http://user:pass@example.com/',
+    'ftp://example.com/',
+    'http://metadata.google.internal/',
+    'http://service.internal/',
+  ];
+  for (const url of refused) check(`refused: ${url}`, publicUrl(url), false);
+  check('a public IPv6 literal is allowed', publicUrl('http://[2606:4700:4700::1111]/'), true);
+  check('a public name is allowed', publicUrl('https://example.com/a'), true);
+
+  /* Redirects are followed by hand, and every hop is checked. */
+  const redirectTo = (location: string) => new Response(null, { status: 302, headers: { location } });
+  const hops: string[] = [];
+  const toMetadata = await guardedFetch('https://example.com/a', {}, async (url) => {
+    hops.push(url);
+    return url.includes('example.com') ? redirectTo('http://169.254.169.254/latest/meta-data') : new Response('secret');
+  });
+  check('a redirect to the metadata service is refused', toMetadata, null);
+  check('and the private hop is never requested', hops, ['https://example.com/a']);
+
+  const loop = await guardedFetch('https://example.com/0', {}, async (url) => redirectTo(`https://example.com/${Number(url.split('/').pop()) + 1}`));
+  check(`more than ${MAX_REDIRECTS} redirects are refused`, loop, null);
+
+  const followed = await guardedFetch('https://example.com/old', {}, async (url) =>
+    url.endsWith('/old') ? redirectTo('/new') : new Response('page', { status: 200 }),
+  );
+  check('a relative redirect to a public page is followed', followed?.finalUrl, 'https://example.com/new');
+
+  /* The connect-time lookup refuses a name that resolves somewhere private. */
+  const lookupError = await new Promise<unknown>((resolve) => guardedLookup('localhost', {}, (error) => resolve(error)));
+  check('a name resolving to loopback is refused at connect time', lookupError instanceof BlockedAddressError, true);
+}
+
+/* -------------------------------------------------------------------------- */
+/*          P1.0 — compressed uploads are inflated within ceilings            */
+/* -------------------------------------------------------------------------- */
+
+{
+  const JSZipModule = (await import('jszip')).default;
+  const { inspectZip, readZipEntry, ArchiveRejected, looksLikePdf, looksLikeZip } = await import('@/server/security/archive-guard');
+  const { readUpload } = await import('@/analysis');
+  const { generateXlsx } = await import('@/server/generators/spreadsheet');
+
+  /* 80 MB of zeros compresses to well under a megabyte: a small zip bomb. */
+  const bombZip = new JSZipModule();
+  bombZip.file('xl/worksheets/sheet1.xml', Buffer.alloc(80 * 1024 * 1024));
+  const bomb = new Uint8Array(await bombZip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  check('the bomb is small on disk', bomb.byteLength < 1024 * 1024, true);
+
+  let rejected: unknown = null;
+  try {
+    inspectZip(bomb);
+  } catch (error) {
+    rejected = error;
+  }
+  check('an entry that inflates past the ceiling is refused', rejected instanceof ArchiveRejected && (rejected as InstanceType<typeof ArchiveRejected>).reason, 'entry-too-large');
+
+  let workbookRefused = false;
+  try {
+    await readUpload({ name: 'bomb.xlsx', bytes: bomb.buffer.slice(bomb.byteOffset, bomb.byteOffset + bomb.byteLength) as ArrayBuffer });
+  } catch (error) {
+    workbookRefused = (error as { reasonKey?: string }).reasonKey === 'analysis.error.unreadableWorkbook';
+  }
+  check('a workbook that is a zip bomb is refused before ExcelJS sees it', workbookRefused, true);
+
+  const workbook = await generateXlsx([{ name: 'Data', headers: ['a'], rows: [[1]] }]);
+  check('a real workbook passes the archive check', inspectZip(workbook).entries > 3, true);
+  check('and still parses', (await readUpload({ name: 'ok.xlsx', bytes: workbook.buffer.slice(workbook.byteOffset, workbook.byteOffset + workbook.byteLength) as ArrayBuffer })).rows.length, 1);
+
+  const small = new JSZipModule();
+  small.file('word/document.xml', '<w:document/>');
+  const docx = new Uint8Array(await small.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  check('one entry is read within the ceiling', readZipEntry(docx, 'word/document.xml')?.toString('utf8'), '<w:document/>');
+  check('zip magic bytes', looksLikeZip(docx), true);
+  check('pdf magic bytes', looksLikePdf(new TextEncoder().encode('%PDF-1.7\n')), true);
+
+  const { assertBodySize } = await import('@/server/http/body-size');
+  let tooBig = false;
+  try {
+    assertBodySize(new Request('https://x.test/api/datasets', { method: 'POST', headers: { 'content-length': String(40 * 1024 * 1024) } }), 12 * 1024 * 1024);
+  } catch {
+    tooBig = true;
+  }
+  check('an oversized upload is refused before its body is read', tooBig, true);
+
+  const csp = await readFile('next.config.ts', 'utf8');
+  check('production CSP has no unsafe-eval', csp.includes(`? "script-src 'self' 'unsafe-inline'"`), true);
+  const seedSource = await readFile('src/server/db/seed.ts', 'utf8');
+  check('the seed keeps admin-edited plans', seedSource.includes("process.env.SEED_OVERWRITE_PLANS !== 'true'"), true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

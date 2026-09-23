@@ -103,3 +103,12 @@ test.describe('landing page', () => {
     await expect(page.getByText(/never invents references or DOIs/)).toBeVisible();
   });
 });
+
+/* P1.0 — the public health check says up or down, and nothing about the set-up. */
+test('the public health check reveals no configuration', async ({ request }) => {
+  const response = await request.get('/api/health');
+  expect(response.status()).toBe(200);
+  const body = (await response.json()) as Record<string, unknown>;
+  expect(Object.keys(body).sort()).toEqual(['checkedAt', 'status']);
+  expect(body.status).toBe('ok');
+});

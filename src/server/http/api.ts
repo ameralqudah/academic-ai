@@ -217,3 +217,6 @@ function toAppError(error: unknown, request: Request): AppError {
     'حدث خطأ لدينا. حاول مرة أخرى من فضلك.',
   );
 }
+
+
+export { assertBodySize } from './body-size';

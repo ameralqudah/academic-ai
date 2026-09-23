@@ -18,7 +18,10 @@
  * check is on the resolved host, before the request.
  */
 
+import { isIP } from 'node:net';
+
 import { logger } from '@/lib/logger';
+import { guardedFetch, isPublicIp, isPublicUrl } from '@/server/security/net-guard';
 
 /** Beyond this a page is not an article; it is a data file or an attack. */
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -85,28 +88,18 @@ export async function fetchSources(urls: string[]): Promise<FetchOutcome> {
 async function fetchOne(url: string): Promise<FetchedContent | FetchFailure> {
   if (!isPublicUrl(url)) return { url, reason: 'blocked' };
 
-  /*
-   * The name is resolved and its addresses checked before the request.
-   *
-   * The textual check above stops `http://10.0.0.1/`; it cannot stop
-   * `internal.example.com` resolving to the same place, and a name is precisely
-   * what someone who gets a page indexed controls. Without this, a search
-   * result can point the server at an internal service.
-   *
-   * A gap remains that this does not close: the address could change between
-   * the check and the request. Closing that needs a custom agent that pins the
-   * resolved address, which is more machinery than this warrants — the window
-   * is milliseconds and the attack needs control of the DNS response timing.
-   */
-  if (!(await isPublicHost(new URL(url).hostname))) {
-    return { url, reason: 'blocked' };
-  }
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, {
+    /*
+     * Every hop of a redirect is checked, and the address each connection
+     * goes to is checked as it is made (see `security/net-guard`). The old
+     * checks looked at the first URL and its DNS answer only: a 302 to
+     * 169.254.169.254, an IPv6 form of a private address, or a name that
+     * resolved differently at request time all got through.
+     */
+    const outcome = await guardedFetch(url, {
       signal: controller.signal,
       /*
        * A real user agent, because a large share of sites return 403 to
@@ -115,14 +108,15 @@ async function fetchOne(url: string): Promise<FetchedContent | FetchFailure> {
        * by defaults nobody chose.
        */
       headers: {
-        'user-agent':
-          'Mozilla/5.0 (compatible; AcademicAI/1.0; +https://academic-ai-app.onrender.com)',
+        'user-agent': 'Mozilla/5.0 (compatible; AcademicAI/1.0)',
         accept: 'text/html,application/xhtml+xml',
       },
-      redirect: 'follow',
     });
 
-    if (!response.ok) return { url, reason: 'http-error' };
+    if (!outcome) return { url, reason: 'blocked' };
+    const { response } = outcome;
+
+  if (!response.ok) return { url, reason: 'http-error' };
 
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('html') && !contentType.includes('text/plain')) {
@@ -195,116 +189,23 @@ async function readBounded(response: Response, limit: number): Promise<string | 
   return text + decoder.decode();
 }
 
-/**
- * Whether a URL points somewhere public.
- *
- * Search results are attacker-influenced: a page can be indexed on purpose. A
- * server that fetches any URL it is handed can be aimed at internal services,
- * cloud metadata endpoints, or localhost — so private ranges are refused
- * outright.
- *
- * This checks the hostname as written, which stops the obvious attempts. The
- * name is also resolved and its addresses checked in `isPublicHost` below,
- * because `internal.example.com` pointing at 10.0.0.5 passes every textual
- * test — and a name is exactly what an attacker controls.
- */
-export function isPublicUrl(url: string): boolean {
-  let parsed: URL;
-
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
-
-  const host = parsed.hostname.toLowerCase();
-
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return false;
-  if (host === '0.0.0.0' || host === '[::1]' || host === '::1') return false;
-
-  /* Cloud metadata: the classic target, and reachable from any container. */
-  if (host === '169.254.169.254' || host === 'metadata.google.internal') return false;
-
-  const parts = host.split('.');
-  if (parts.length === 4 && parts.every((part) => /^\d+$/.test(part))) {
-    const [a, b] = parts.map(Number) as [number, number, number, number];
-
-    if (a === 127 || a === 10) return false;
-    if (a === 172 && b >= 16 && b <= 31) return false;
-    if (a === 192 && b === 168) return false;
-    if (a === 169 && b === 254) return false;
-  }
-
-  return true;
-}
-
+export { isPublicUrl };
 
 /**
- * Whether every address a hostname resolves to is public.
- *
- * Every, not any: a name resolving to both a public and a private address is
- * refused, because which one the request reaches is not something this can
- * control.
- *
- * A resolution failure is refused too. A name that does not resolve is not a
- * page worth fetching, and treating the failure as permission would let a
- * temporary DNS outage open the check.
+ * Whether every address a hostname resolves to is public. Kept for callers
+ * that check a name up front; fetches themselves are guarded at connect time.
  */
 export async function isPublicHost(hostname: string): Promise<boolean> {
-  /* An IP literal was already checked textually; resolving it adds nothing. */
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(':')) {
-    return isPublicUrl(`http://${hostname}`);
-  }
+  const bare = hostname.replace(/^\[|\]$/g, '');
+  if (isIP(bare)) return isPublicIp(bare);
 
   try {
     const { lookup } = await import('node:dns/promises');
-    const addresses = await lookup(hostname, { all: true });
-
-    if (addresses.length === 0) return false;
-
-    return addresses.every((address) =>
-      address.family === 6 ? isPublicIpv6(address.address) : isPublicIpv4(address.address),
-    );
+    const addresses = await lookup(bare, { all: true });
+    return addresses.length > 0 && addresses.every((address) => isPublicIp(address.address));
   } catch {
     return false;
   }
-}
-
-function isPublicIpv4(address: string): boolean {
-  const parts = address.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return false;
-
-  const [a, b] = parts as [number, number, number, number];
-
-  if (a === 0 || a === 127 || a === 10) return false;
-  if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 192 && b === 168) return false;
-  /* Link-local, which includes the cloud metadata endpoint. */
-  if (a === 169 && b === 254) return false;
-  /* Carrier-grade NAT and the reserved blocks above it. */
-  if (a === 100 && b >= 64 && b <= 127) return false;
-  if (a >= 224) return false;
-
-  return true;
-}
-
-function isPublicIpv6(address: string): boolean {
-  const normalised = address.toLowerCase();
-
-  if (normalised === '::1' || normalised === '::') return false;
-  /* Unique local and link-local ranges. */
-  if (normalised.startsWith('fc') || normalised.startsWith('fd')) return false;
-  if (normalised.startsWith('fe80')) return false;
-
-  /*
-   * IPv4-mapped addresses carry an IPv4 address in the last segment, so the
-   * IPv4 rules apply — `::ffff:10.0.0.1` is 10.0.0.1.
-   */
-  if (normalised.startsWith('::ffff:')) return isPublicIpv4(normalised.slice(7));
-
-  return true;
 }
 
 /** The `<title>`, cleaned of the site name most pages append. */

@@ -1,6 +1,7 @@
 import { inflateSync } from 'node:zlib';
 
-import JSZip from 'jszip';
+import { inspectZip, looksLikeZip, PDF_STREAM_LIMIT, PDF_TOTAL_LIMIT, readZipEntry } from '@/server/security/archive-guard';
+
 
 import { logger } from '@/lib/logger';
 
@@ -87,8 +88,19 @@ export async function extractDocument(
  * back into the same shape.
  */
 async function extractDocx(bytes: Uint8Array): Promise<ExtractedDocument> {
-  const zip = await JSZip.loadAsync(bytes);
-  const documentXml = await zip.file('word/document.xml')?.async('string');
+  /*
+   * Read through the archive guard rather than JSZip: the guard inflates the
+   * one entry needed within a hard ceiling, so a DOCX that is really a zip
+   * bomb is refused instead of exhausting memory.
+   */
+  if (!looksLikeZip(bytes)) return { sections: [], wordCount: 0, limitation: 'unsupported-format' };
+  let documentXml: string | undefined;
+  try {
+    inspectZip(bytes);
+    documentXml = readZipEntry(bytes, 'word/document.xml')?.toString('utf8');
+  } catch {
+    return { sections: [], wordCount: 0, limitation: 'unsupported-format' };
+  }
 
   if (!documentXml) return { sections: [], wordCount: 0, limitation: 'unsupported-format' };
 
@@ -221,6 +233,8 @@ function extractPdf(bytes: Uint8Array): ExtractedDocument {
 function decompressStreams(buffer: Buffer): string {
   const raw = buffer.toString('latin1');
   const parts: string[] = [];
+  /* Every stream is inflated within a ceiling, and all of them within another. */
+  let inflatedTotal = 0;
 
   for (const match of raw.matchAll(/\/FlateDecode[\s\S]{0,200}?stream\r?\n/g)) {
     const start = (match.index ?? 0) + match[0].length;
@@ -228,7 +242,13 @@ function decompressStreams(buffer: Buffer): string {
     if (end < 0) continue;
 
     try {
-      parts.push(inflateSync(buffer.subarray(start, end)).toString('latin1'));
+      const remaining = PDF_TOTAL_LIMIT - inflatedTotal;
+      if (remaining <= 0) break;
+      const inflated = inflateSync(buffer.subarray(start, end), {
+        maxOutputLength: Math.min(PDF_STREAM_LIMIT, remaining),
+      });
+      inflatedTotal += inflated.byteLength;
+      parts.push(inflated.toString('latin1'));
     } catch {
       /* An image or a font, not text. */
     }

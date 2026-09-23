@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { MAX_FILE_BYTES } from '@/analysis';
 import { AppError } from '@/server/http/errors';
-import { ok, withApi } from '@/server/http/api';
+import { assertBodySize, ok, withApi } from '@/server/http/api';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import { saveUpload } from '@/server/services/dataset.service';
 
@@ -20,6 +20,7 @@ import { saveUpload } from '@/server/services/dataset.service';
 export const POST = withApi(
   { rateLimit: { max: 10, windowSeconds: 300, key: 'datasets.upload' } },
   async ({ request, user }) => {
+    assertBodySize(request, MAX_FILE_BYTES);
     const form = await request.formData().catch(() => null);
     const file = form?.get('file');
 

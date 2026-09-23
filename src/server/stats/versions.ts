@@ -15,7 +15,7 @@
  *   on the old schema stay pinned to the old version.
  */
 
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { applyCleaning } from '@/analysis/clean';
@@ -203,6 +203,61 @@ export async function ensureInitialVersion(row: DatasetRow, readReport?: Partial
     if (raced) return raced;
     throw error;
   }
+}
+
+/**
+ * The legacy "cleaned copy" (a new dataset row) recorded as what it is: version
+ * 1 of the copy, derived from the parent's version by a `clean` transformation
+ * with its actions and report. Before P1-C the actions were thrown away.
+ */
+export async function recordLegacyClean(child: DatasetRow, parent: DatasetRow, actions: CleaningAction[], report: Record<string, unknown>): Promise<DatasetVersion> {
+  const parentVersion = await ensureInitialVersion(parent);
+  const { bytes, data } = await readStored(child.storageKey);
+  const columns = inferredSchema(profileDataset(data));
+  const { cleanedAt: _clock, ...deterministic } = report;
+  return insertVersion(
+    {
+      datasetId: child.id,
+      userId: child.userId,
+      projectId: child.projectId,
+      versionNo: 1,
+      parentVersionId: parentVersion.id,
+      contentHash: contentHashOf(data),
+      schemaHash: hashOf(columns),
+      fileChecksum: checksumOf(bytes),
+      storageKey: child.storageKey,
+      rowCount: data.rows.length,
+      columnCount: data.columns.length,
+      columns: columns as unknown as Record<string, unknown>[],
+    },
+    {
+      datasetId: child.id,
+      userId: child.userId,
+      projectId: child.projectId,
+      inputVersionId: parentVersion.id,
+      operation: 'clean',
+      parameters: { actions: actions.map(({ kind, columns: names }) => ({ kind, columns: names })), order: 'fixed engine order (clean.ts)', via: 'legacy cleaned copy' },
+      report: deterministic,
+      engineVersion: ENGINE.version,
+    },
+  );
+}
+
+/** The project's tabular datasets and their versions (project VIEWER). */
+export async function listProjectDatasets(actor: StatsActor, projectId: string) {
+  const { requireProjectRole } = await import('@/server/graph/service');
+  await requireProjectRole(projectId, actor.userId, 'VIEWER');
+  const rows = await db
+    .select({ id: datasets.id, name: datasets.originalName, kind: datasets.kind, rows: datasets.rowCount, columns: datasets.columnCount, createdAt: datasets.createdAt })
+    .from(datasets)
+    .where(and(eq(datasets.projectId, projectId), isNull(datasets.deletedAt), eq(datasets.mimeType, 'text/csv')))
+    .orderBy(desc(datasets.createdAt))
+    .limit(200);
+  const versions = await db
+    .select({ id: datasetVersions.id, datasetId: datasetVersions.datasetId, versionNo: datasetVersions.versionNo, rows: datasetVersions.rowCount, contentHash: datasetVersions.contentHash, createdAt: datasetVersions.createdAt })
+    .from(datasetVersions)
+    .where(eq(datasetVersions.projectId, projectId));
+  return rows.map((row) => ({ ...row, versions: versions.filter((v) => v.datasetId === row.id).sort((a, b) => a.versionNo - b.versionNo) }));
 }
 
 export async function listVersions(actor: StatsActor, datasetId: string, projectId?: string | null) {

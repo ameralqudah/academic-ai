@@ -47,6 +47,8 @@ import { extractDocument, isReadableDocument } from '@/server/files/extract';
 import { chunkDocument } from '@/server/files/retrieve';
 import type { Dataset as DatasetRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
+import { ensureInitialVersion, recordLegacyClean } from '@/server/stats/versions';
 import { resolveReason } from '@/server/http/reasons';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
 import {
@@ -170,6 +172,8 @@ async function storeDocument(input: SaveDatasetInput): Promise<SavedDataset> {
 
 export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset> {
   const { userId, file } = input;
+  await assertProjectLink(userId, input.projectId);
+  await assertConversationLink(userId, input.conversationId);
 
   if (file.bytes.byteLength > MAX_FILE_BYTES) {
     throw new AppError(
@@ -266,6 +270,11 @@ export async function saveUpload(input: SaveDatasetInput): Promise<SavedDataset>
       .catch(() => undefined);
     throw error;
   }
+
+  /* Version 1, with how the file was read (P1-C). Best effort: it is also created on first use. */
+  await ensureInitialVersion(dataset, parsed).catch((error: unknown) => {
+    logger.warn('dataset.versionDeferred', { datasetId, error: String(error).slice(0, 200) });
+  });
 
   logger.info('dataset.saved', {
     datasetId,
@@ -444,6 +453,11 @@ export async function saveCleanedCopy(input: {
       .catch(() => undefined);
     throw error;
   }
+
+  /* The copy's version records the actions that made it, derived from the parent's version (P1-C). */
+  await recordLegacyClean(row, source.row, input.actions, report as unknown as Record<string, unknown>).catch((error: unknown) => {
+    logger.warn('dataset.cleanVersionDeferred', { datasetId, error: String(error).slice(0, 200) });
+  });
 
   logger.info('dataset.cleaned', {
     parent: source.row.id,

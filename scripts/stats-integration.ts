@@ -31,7 +31,10 @@ import * as graph from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
-import { saveUpload } from '@/server/services/dataset.service';
+import * as conversationsRepo from '@/server/repositories/conversations.repository';
+import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
+import { saveCleanedCopy, saveUpload } from '@/server/services/dataset.service';
+import { runAnalysis } from '@/server/services/statistics.service';
 import { hashOf } from '@/server/stats/access';
 import { previewReplacement, recordRunInGraph, replaceVersion } from '@/server/stats/graph';
 import { insertClaim, untracedStatistics } from '@/server/stats/manuscript';
@@ -281,6 +284,33 @@ async function main() {
   fake.push({ reply: { text: 'The effect is b = 0.25.' } }, { reply: { text: 'Still b = 0.25.' } });
   check('an explanation that keeps typing numbers is refused', await runForUser(owner, () => outcome(() => explainRun(me, P, rerunNew.id))), 'CONFLICT');
   setGatewayForTests(null);
+
+  /* ------------------------------------------------------------------ */
+  section('Legacy paths: ownership, pinning, counts, cleaning, job races');
+  const bytes = (text: string) => { const b = Buffer.from(text); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; };
+  check('an upload cannot be filed under someone else’s project', await outcome(() => saveUpload({ userId: owner, projectId: other.id, file: { name: 'a.csv', bytes: bytes('a\n1\n2\n') } })), 'NOT_FOUND');
+  const theirConversation = await conversationsRepo.findOrCreate({ userId: stranger, projectId: null, scope: 'TOOL', toolKey: 'rewriter' as never });
+  check('… nor into someone else’s conversation', await outcome(() => saveUpload({ userId: owner, conversationId: theirConversation.id, file: { name: 'a.csv', bytes: bytes('a\n1\n2\n') } })), 'NOT_FOUND');
+  const ragged = await saveUpload({ userId: owner, projectId: P, file: { name: 'r.csv', bytes: bytes('a,b\n1,2\n3,4,EXTRA\nNA,5\n6,7\n') } });
+  const [raggedV1] = await db.select().from(datasetVersions).where(eq(datasetVersions.datasetId, ragged.dataset.id));
+  const [raggedImport] = await db.select().from(datasetTransformations).where(eq(datasetTransformations.outputVersionId, raggedV1?.id ?? ''));
+  check('an upload gets version 1 at once, recording rows with extra fields and cells read as missing', [(raggedImport?.report as { rowsWithExtraFields?: number }).rowsWithExtraFields, (raggedImport?.report as { cellsReadAsMissing?: Record<string, number> }).cellsReadAsMissing?.NA], [1, 1]);
+  check('a legacy analysis cannot be filed under someone else’s project', await outcome(() => runAnalysis({ datasetId, userId: owner, test: 't.oneSample', columns: { dependent: 'x' }, projectId: other.id })), 'NOT_FOUND');
+  const legacy = await runAnalysis({ datasetId, userId: owner, test: 't.oneSample', columns: { dependent: 'x' }, options: { mu: 50 } });
+  const legacyResult = legacy.result as { rowsSupplied: number; rowsDropped: number; n: number };
+  check('a legacy run is pinned to the dataset version, its content hash and the engine version', [legacy.run.datasetVersionId === v1.id, legacy.run.datasetContentHash === v1.contentHash, legacy.run.engineVersion], [true, true, '1.0.0']);
+  check('rows the service drops before the test are counted (was always 0)', [legacyResult.rowsSupplied, legacyResult.rowsDropped, legacyResult.n], [240, 3, 237]);
+  const cleanedCopy = await saveCleanedCopy({ datasetId, userId: owner, actions: [{ kind: 'drop-rows-missing', columns: ['m'], reasonKey: 'x', recommended: true, destructive: true }] });
+  const [copyV1] = await db.select().from(datasetVersions).where(eq(datasetVersions.datasetId, cleanedCopy.dataset.id));
+  const [copyTransformation] = await db.select().from(datasetTransformations).where(eq(datasetTransformations.outputVersionId, copyV1?.id ?? ''));
+  check('a legacy cleaned copy records its actions as a clean transformation from the parent’s version', [copyTransformation?.operation, copyTransformation?.inputVersionId === v1.id, JSON.stringify(copyTransformation?.parameters).includes('drop-rows-missing')], ['clean', true, true]);
+  const [raceJob] = await db.insert(analysisJobs).values({ userId: owner, kind: 'pls.bootstrap', status: 'QUEUED', spec: {} }).returning();
+  await jobsRepo.markRunning(raceJob!.id);
+  await jobsRepo.cancel(raceJob!.id, owner);
+  const completed = await jobsRepo.complete(raceJob!.id, { late: true }, 10);
+  const [afterRace] = await db.select({ status: analysisJobs.status }).from(analysisJobs).where(eq(analysisJobs.id, raceJob!.id));
+  check('a job finishing after it was cancelled cannot overwrite the cancel', [completed, afterRace?.status], [false, 'CANCELLED']);
+  check('a cancelled job cannot be claimed again', await jobsRepo.markRunning(raceJob!.id), false);
 
   /* ------------------------------------------------------------------ */
   section('Reproducibility');

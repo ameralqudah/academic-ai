@@ -54,6 +54,7 @@ import { recordTurn } from '@/server/services/chat.service';
 import { assertCanUseAI, recordSimple } from '@/server/services/usage.service';
 import type { AnalysisJob } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
 import { resolveReason } from '@/server/http/reasons';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { loadForAnalysis } from '@/server/services/dataset.service';
@@ -107,6 +108,8 @@ export async function runPls(input: {
   conversationId?: string | null;
   projectId?: string | null;
 }): Promise<PlsAnalysis> {
+  await assertProjectLink(input.userId, input.projectId);
+  await assertConversationLink(input.userId, input.conversationId);
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
   const columns = numericColumns(loaded.data);
@@ -292,6 +295,7 @@ export async function runCbSem(input: {
   model: PlsModel;
   conversationId?: string | null;
 }): Promise<CbSemResult> {
+  await assertConversationLink(input.userId, input.conversationId);
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
   const columns = numericColumns(loaded.data);
@@ -359,6 +363,7 @@ export async function startBootstrap(input: {
   confidenceLevel?: number;
   seed?: number;
 }): Promise<AnalysisJob> {
+  await assertProjectLink(input.userId, input.projectId);
   if ((await jobsRepo.countActive(input.userId)) >= MAX_CONCURRENT_JOBS) {
     throw new AppError(
       'VALIDATION',

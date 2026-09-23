@@ -133,15 +133,19 @@ export async function decideApproval(actor: RunActor, projectId: string, runId: 
   }
   const decided = await store.decideApproval(actor.userId, approval, input.decision === 'approve' ? 'APPROVED' : 'REJECTED');
   if (!decided) throw new AppError('CONFLICT', 'This approval could not be decided (it changed or expired).', 'تعذّر حسم الطلب.', { reason: 'approval_not_pending' });
-  const run = await store.readRun(approval.userId === actor.userId ? actor.userId : actor.userId, runId, projectId);
   if (input.decision === 'reject') {
     /* The owner of the run settles its steps (RLS); a rejection ends the run. */
-    const steps = await store.readSteps(approval.userId, runId).catch(() => [] as RunStep[]);
-    const step = steps.find((candidate) => candidate.id === approval.stepId);
-    if (step) await store.transitionStep(approval.userId, step, ['WAITING_APPROVAL'], 'SKIPPED', { error: { code: 'approval_rejected' }, finishedAt: new Date() }).catch(() => false);
-    await stopRun(approval.userId, runId, 'approval_rejected').catch(() => false);
-  } else if (run) {
-    await dispatchResearchRun(run.id);
+    try {
+      const steps = await store.readSteps(approval.userId, runId);
+      const step = steps.find((candidate) => candidate.id === approval.stepId);
+      if (step) await store.transitionStep(approval.userId, step, ['WAITING_APPROVAL'], 'SKIPPED', { error: { code: 'approval_rejected' }, finishedAt: new Date() });
+      await stopRun(approval.userId, runId, 'approval_rejected');
+    } finally {
+      /* If settling failed part-way, the executor finishes it from the REJECTED approval. */
+      await dispatchResearchRun(runId);
+    }
+  } else {
+    await dispatchResearchRun(runId);
   }
   return getRun(actor, projectId, runId);
 }

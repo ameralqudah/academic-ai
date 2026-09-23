@@ -87,6 +87,12 @@ async function drive(userId: string, runId: string): Promise<void> {
       const steps = await store.readSteps(userId, runId);
       const waiting = steps.find((step) => step.status === 'WAITING_APPROVAL');
       const approvals = waiting ? await store.approvalsForStep(userId, waiting.id) : [];
+      if (waiting && !approvals.some((approval) => approval.status === 'APPROVED' || approval.status === 'PENDING') && approvals.some((approval) => approval.status === 'REJECTED')) {
+        /* Rejected, and the decision did not finish settling the run: settle it here. */
+        await store.transitionStep(userId, waiting, ['WAITING_APPROVAL'], 'SKIPPED', { error: { code: 'approval_rejected' }, finishedAt: new Date() });
+        await stopRun(userId, runId, 'approval_rejected');
+        return;
+      }
       if (!approvals.some((approval) => approval.status === 'APPROVED')) return;
       if (!(await store.transitionRun(userId, runId, ['WAITING_APPROVAL'], 'RUNNING', {}, { type: 'run.resumed' }))) return;
       continue;

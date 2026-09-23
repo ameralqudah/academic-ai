@@ -5446,6 +5446,7 @@ console.log('\nwhat a model costs');
   const runTableUsers: string[] = [];
   const executors: string[] = [];
   const engineImports: string[] = [];
+  const runStarters: string[] = [];
   const runRandom: string[] = [];
   for (const file of files.filter((candidate) => candidate.startsWith('src/'))) {
     const source = await read(file);
@@ -5454,12 +5455,14 @@ console.log('\nwhat a model costs');
     if (/\btool\.execute\(/.test(source)) executors.push(file);
     if (file.startsWith('src/server/runs/') && /Math\.random\s*\(/.test(source)) runRandom.push(file);
     if (file.startsWith('src/server/runs/tools/') && /^import (?!type)[^;]*from '@\/analysis\/engine/m.test(source)) engineImports.push(file);
+    if (file.startsWith('src/server/runs/tools/') && /from '(@\/server\/runs|\.\.)\/(service|executor|store|assistant|planner)'|dispatchResearchRun/.test(source)) runStarters.push(file);
   }
   check('gateway tools are defined only by the run registry', definers, ['src/server/runs/registry.ts']);
   check('the run tables are read and written only by the run store (under RLS)', runTableUsers.sort(), ['src/server/runs/store.ts']);
   check('tools are executed only by the run executor and the assistant (both after the policy)', executors.sort(), ['src/server/runs/assistant.ts', 'src/server/runs/executor.ts']);
   check('tool adapters do not reach the statistics engine directly (only P1-C services)', engineImports, []);
   check('no unseeded randomness in the run engine', runRandom, []);
+  check('no tool can start, drive or read a run (nested depth 0)', runStarters, []);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

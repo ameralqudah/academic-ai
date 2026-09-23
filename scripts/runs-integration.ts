@@ -328,6 +328,15 @@ async function main() {
   await decideApproval(me, P, replace, second.id, { decision: 'reject', actionHash: second.actionHash });
   const rejected = await store.readRun(owner, replace);
   check('a rejection ends the run with that reason', [rejected?.status, rejected?.stopReason], ['FAILED', 'approval_rejected']);
+  /* A rejection whose settling stopped part-way (the approval is REJECTED, the run still waits) is finished by the executor. */
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const halfRejected = (await createRun(me, P, { intent: 'Claim, then be rejected half-way.' })).run.id;
+  await drain(halfRejected);
+  const pendingClaim = (await getRun(me, P, halfRejected)).approvals[0]!;
+  await store.decideApproval(owner, (await store.readApproval(owner, pendingClaim.id))!, 'REJECTED');
+  await drain(halfRejected);
+  const settledReject = await getRun(me, P, halfRejected);
+  check('a rejected approval left half-settled still ends the run (never waits forever)', [settledReject.run.status, settledReject.run.stopReason, settledReject.steps[0]?.status], ['FAILED', 'approval_rejected', 'SKIPPED']);
 
   process.env.RUN_LIMITS = JSON.stringify({ free: { approvalTtlMs: 1 } });
   resetEnvCache();

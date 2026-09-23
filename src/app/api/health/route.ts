@@ -13,12 +13,6 @@ import { storageStatus } from '@/server/storage';
 
 export const dynamic = 'force-dynamic';
 
-/**
- * Post-deploy smoke check. Reports whether each dependency is actually wired,
- * never what it is wired with — no key, URL, or connection string is exposed.
- *
- *   curl https://<your-app>/api/health
- */
 /** Which env var backs the active provider, for the health report only. */
 function apiKeyFor(env: ReturnType<typeof getEnv>, provider: string): string | undefined {
   if (provider === 'openai') return env.OPENAI_API_KEY;
@@ -26,7 +20,7 @@ function apiKeyFor(env: ReturnType<typeof getEnv>, provider: string): string | u
   return env.ANTHROPIC_API_KEY;
 }
 
-export async function GET(): Promise<Response> {
+async function detailedReport(): Promise<Response> {
   const checks: Record<string, unknown> = {};
   let healthy = true;
   const problems: string[] = [];
@@ -163,5 +157,43 @@ export async function GET(): Promise<Response> {
       checkedAt: new Date().toISOString(),
     },
     { status: serving ? 200 : 503, headers: { 'cache-control': 'no-store' } },
+  );
+}
+
+/**
+ * Health.
+ *
+ * **Public:** up or down, decided by the database — enough for a platform
+ * health check (Render's `healthCheckPath`) and nothing more. The detailed
+ * report used to be public too: it named the AI provider and model, the email,
+ * billing and storage set-up, raw database errors and PayPal credential hints,
+ * and it made a live PayPal call on every request — a free outbound request
+ * for anyone who asked.
+ *
+ * **Signed-in administrators** get the full report, as before:
+ *
+ *   open https://<your-app>/api/health while signed in as an admin
+ */
+export async function GET(): Promise<Response> {
+  const { auth } = await import('@/server/auth');
+  const { hasAdminAccess } = await import('@/server/auth/owner');
+  const session = await auth().catch(() => null);
+  const user = session?.user;
+
+  if (user?.id && hasAdminAccess({ email: user.email, role: user.role, emailVerified: user.verified })) {
+    return detailedReport();
+  }
+
+  let up = false;
+  try {
+    await db.execute(sql`select 1`);
+    up = true;
+  } catch {
+    up = false;
+  }
+
+  return Response.json(
+    { status: up ? 'ok' : 'down', checkedAt: new Date().toISOString() },
+    { status: up ? 200 : 503, headers: { 'cache-control': 'no-store' } },
   );
 }

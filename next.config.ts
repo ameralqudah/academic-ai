@@ -59,7 +59,14 @@ const nextConfig: NextConfig = {
             key: 'Content-Security-Policy',
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+              /*
+               * 'unsafe-eval' only in development, where Next's hot reloading
+               * needs it. A production build never evaluates strings, and
+               * allowing it would let an injected string become code.
+               */
+              process.env.NODE_ENV === 'production'
+                ? "script-src 'self' 'unsafe-inline'"
+                : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
               "style-src 'self' 'unsafe-inline'",
               /* Fonts are self-hosted; the data: form is for inlined subsets. */
               "font-src 'self' data:",

@@ -1,5 +1,7 @@
 import ExcelJS from 'exceljs';
 
+import { inspectZip } from '@/server/security/archive-guard';
+
 import { DataParseError, fromRecords, MAX_COLUMNS, MAX_ROWS } from './parse';
 import type { Dataset } from './types';
 
@@ -16,6 +18,17 @@ import type { Dataset } from './types';
  * dataset stays a plain, serialisable value.
  */
 export async function parseXlsx(buffer: ArrayBuffer, source: string): Promise<Dataset> {
+  /*
+   * ExcelJS inflates the whole archive before reading a row, so the archive is
+   * checked first: every entry inflated within a ceiling. A workbook that is a
+   * zip bomb is refused here rather than taking the process's memory.
+   */
+  try {
+    inspectZip(new Uint8Array(buffer));
+  } catch {
+    throw new DataParseError('analysis.error.unreadableWorkbook');
+  }
+
   const workbook = new ExcelJS.Workbook();
 
   try {

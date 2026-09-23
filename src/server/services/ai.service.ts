@@ -1415,7 +1415,7 @@ export async function streamChat(
     title: project.title,
   });
 
-  const history = await conversationsRepo.listMessages(conversation.id, 20);
+  const history = await conversationsRepo.listMessagesOwned(conversation.id, userId, 20);
   const messages: AIChatMessage[] = [
     ...history
       .filter((row) => row.role !== 'SYSTEM')
@@ -1564,7 +1564,7 @@ export async function getConversation(userId: string, projectId: string, section
     scope: sectionKey ? 'SECTION' : 'PROJECT',
     sectionKey: sectionKey ?? null,
   });
-  const messages = await conversationsRepo.listMessages(conversation.id, 50);
+  const messages = await conversationsRepo.listMessagesOwned(conversation.id, userId, 50);
   return { conversation, messages };
 }
 

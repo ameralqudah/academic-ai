@@ -74,6 +74,34 @@ export async function findOrCreate(input: {
   return created;
 }
 
+/**
+ * The latest messages of a conversation **the user owns**, oldest first.
+ *
+ * The ownership condition is part of the query, so a conversation id supplied
+ * by a client — which any request body can carry — yields nothing unless it
+ * belongs to that user. Callers do not need to remember a separate check,
+ * which is how three of them came to read other users' messages into a prompt.
+ */
+export async function listMessagesOwned(
+  conversationId: string,
+  userId: string,
+  limit = 40,
+): Promise<AIMessageRow[]> {
+  const rows = await db
+    .select({ message: aiMessages })
+    .from(aiMessages)
+    .innerJoin(aiConversations, eq(aiConversations.id, aiMessages.conversationId))
+    .where(and(eq(aiMessages.conversationId, conversationId), eq(aiConversations.userId, userId)))
+    .orderBy(desc(aiMessages.createdAt))
+    .limit(limit);
+  return rows.map((row) => row.message).reverse();
+}
+
+/**
+ * @deprecated Unscoped: reads any conversation by id. Use `listMessagesOwned`.
+ * Kept only so nothing that still imports it breaks; the smoke suite fails if
+ * code outside this file calls it.
+ */
 export async function listMessages(conversationId: string, limit = 40): Promise<AIMessageRow[]> {
   const rows = await db
     .select()

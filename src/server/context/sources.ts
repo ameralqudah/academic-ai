@@ -126,7 +126,7 @@ async function conversationFragments(scope: SourceScope): Promise<ContextFragmen
    * instruction that matters.
    */
   const [messages, runs] = await Promise.all([
-    conversationsRepo.listMessages(scope.conversationId, 20),
+    conversationsRepo.listMessagesOwned(scope.conversationId, scope.userId, 20),
     analysisRunsRepo.listByConversation(scope.conversationId, scope.userId).catch(() => []),
   ]);
 

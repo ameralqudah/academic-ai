@@ -4953,5 +4953,38 @@ console.log('\nwhat a model costs');
   check('exceljs writes a rule that needs uuid', written.byteLength > 1000, true);
 }
 
+/* -------------------------------------------------------------------------- */
+/*             P0.2 — no unscoped reads of conversation messages              */
+/* -------------------------------------------------------------------------- */
+
+{
+  /*
+   * `listMessages` reads any conversation by id. Every caller now goes through
+   * `listMessagesOwned`, which carries the user in the query; a new caller of
+   * the unscoped reader is the bug this guards against.
+   */
+  const { readdir } = await import('node:fs/promises');
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (/\.(ts|tsx)$/.test(entry.name)) files.push(path);
+    }
+  };
+  await walk('src');
+
+  const offenders: string[] = [];
+  for (const file of files) {
+    if (file.endsWith('conversations.repository.ts')) continue;
+    const text = await readFile(file, 'utf8');
+    if (/\.listMessages\(/.test(text)) offenders.push(file);
+  }
+  check('no module reads conversation messages without the owner', offenders, []);
+
+  const route = await readFile('src/app/api/chat/route.ts', 'utf8');
+  check('the chat route refuses a conversation that is not the caller\'s', route.includes('await requireOwned(body.conversationId, user.id)'), true);
+}
+
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -8,7 +8,7 @@ import { buildContextPrompt } from '@/server/context/manager';
 import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion, streamGeneralAnswer } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
-import { recordTaskTurn, recordTurn } from '@/server/services/chat.service';
+import { recordTaskTurn, recordTurn, requireOwned } from '@/server/services/chat.service';
 import { streamResponse } from '@/server/http/stream';
 import { ensureTasksReady } from '@/server/services/startup';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
@@ -121,6 +121,15 @@ export const POST = withApi<Body>(
     await ensureTasksReady();
 
     /*
+     * The conversation must be the caller's before anything reads from it.
+     *
+     * Every later read is scoped as well, but this refuses a foreign id at the
+     * door — the same "not found" whether it is someone else's or does not
+     * exist, so an id cannot be probed.
+     */
+    if (body.conversationId) await requireOwned(body.conversationId, user.id);
+
+    /*
      * The file this turn works on: the one sent, or the one this conversation
      * has — which is what keeps it attached after a reload or on a later day.
      */
@@ -140,7 +149,7 @@ export const POST = withApi<Body>(
      * treat every follow-up as a fresh request.
      */
     const history = body.conversationId
-      ? (await conversationsRepo.listMessages(body.conversationId, 6))
+      ? (await conversationsRepo.listMessagesOwned(body.conversationId, user.id, 6))
           .filter((message) => typeof message.content === 'string')
           .map((message) => ({
             role: message.role === 'USER' ? ('user' as const) : ('assistant' as const),

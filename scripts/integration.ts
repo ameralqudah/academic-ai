@@ -5997,6 +5997,37 @@ async function main() {
     );
   }
 
+  /* ------------------------------------------------ P0.2 conversation IDOR */
+  {
+    section('P0.2 — a conversation is readable only by its owner');
+
+    const conversationsRepo = await import('@/server/repositories/conversations.repository');
+    const { requireOwned } = await import('@/server/services/chat.service');
+
+    const owner = await newUser('p02-owner');
+    const intruder = await newUser('p02-intruder');
+
+    const conversation = await chatRepo.create({ userId: owner, mode: 'AGENT', title: 'private' });
+    await conversationsRepo.addMessage({ conversationId: conversation.id, role: 'USER', content: 'secret research idea' });
+    await conversationsRepo.addMessage({ conversationId: conversation.id, role: 'ASSISTANT', content: 'secret answer' });
+
+    const own = await conversationsRepo.listMessagesOwned(conversation.id, owner, 6);
+    check('the owner reads their messages', own.map((message) => message.content), ['secret research idea', 'secret answer']);
+
+    const foreign = await conversationsRepo.listMessagesOwned(conversation.id, intruder, 6);
+    check('another user reads nothing', foreign.length, 0);
+
+    const limited = await conversationsRepo.listMessagesOwned(conversation.id, owner, 1);
+    check('the limit keeps the latest message', limited.map((message) => message.content), ['secret answer']);
+
+    await expectAppError('the chat route refuses a foreign conversation id', 'NOT_FOUND', () =>
+      requireOwned(conversation.id, intruder),
+    );
+    await expectAppError('and an unknown one the same way', 'NOT_FOUND', () =>
+      requireOwned('00000000-0000-0000-0000-000000000000', intruder),
+    );
+  }
+
   /* --------------------------------------------------------------- cleanup */
   await db.delete(users).where(like(users.email, `${RUN}-%`));
 

@@ -129,7 +129,7 @@ export async function startTask(input: {
    * and the planner asked whether a portrait or a landscape was wanted.
    */
   const recentConversation = input.conversationId
-    ? (await conversationsRepo.listMessages(input.conversationId, 8).catch(() => []))
+    ? (await conversationsRepo.listMessagesOwned(input.conversationId, input.userId, 8).catch(() => []))
         .filter((message) => typeof message.content === 'string' && message.content.trim())
         .map((message) => ({
           role: message.role === 'USER' ? 'user' : 'assistant',

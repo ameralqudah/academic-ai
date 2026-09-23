@@ -1,6 +1,6 @@
 # P1-C report: deterministic statistics engine + Research Graph integration
 
-**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1C_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Status:** implemented and adversarially reviewed; all review findings fixed; full regression green locally (see §15 for the one dev-only `npm audit` change since P1-B). **Not merged. P1-D has not been started.**
+**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1C_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Status:** implemented and adversarially reviewed; all review findings fixed; full regression green locally (see §15 for the one dev-only `npm audit` change since P1-B). **Merged into `main` via [#32](https://github.com/ameralqudah/academic-ai/pull/32) (merge commit `b1a294f`; PR head `d8882c5`, all CI checks green). P1-D has not been started.**
 
 **Scope note.** `PHASE1_PLAN.md` and `TARGET_ARCHITECTURE.md` named P1-C "Tool Registry + policy engine". The P1-C brief re-scoped it to the deterministic statistics engine and its graph integration. Of the tool work, only the analysis tool boundary (7 `stats` tools) is here. The general tool registry and policy engine moved out of P1-C and have not been built.
 

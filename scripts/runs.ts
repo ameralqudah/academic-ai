@@ -111,6 +111,44 @@ async function main() {
     check('a successful renewal resets the error count', recovered.keeper.lost, false);
     await taken.keeper.tick();
     check('once lost, the keeper never renews again', taken.calls(), 1);
+
+    /* A renewal slower than the heartbeat (a slow database link): ticks must not pile up renewals on the pool. */
+    const slowKeeper = (answers: boolean[], latencyMs: number) => {
+      let calls = 0;
+      let inFlight = 0;
+      let peak = 0;
+      const keeper = createLeaseKeeper(async () => {
+        const answer = answers[calls++] ?? true;
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, latencyMs));
+        inFlight -= 1;
+        return answer;
+      });
+      return { keeper, calls: () => calls, peak: () => peak };
+    };
+    const slow = slowKeeper([], 300);
+    const heartbeat = setInterval(() => void slow.keeper.tick(), 20);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    clearInterval(heartbeat);
+    await slow.keeper.tick();
+    check('renewals slower than the heartbeat: only one is ever in flight (ticks join it)', [slow.peak(), slow.calls() <= 5, slow.keeper.lost], [1, true, false]);
+    const joined = slowKeeper([true], 50);
+    const first = joined.keeper.tick();
+    const second = joined.keeper.tick();
+    check('a tick during a renewal returns that same renewal (no success or failure of its own)', [first === second, (await Promise.all([first, second])).length, joined.calls()], [true, 2, 1]);
+    const slowTaken = slowKeeper([false], 200);
+    const takenTicks = [slowTaken.keeper.tick(), slowTaken.keeper.tick(), slowTaken.keeper.tick()];
+    await Promise.all(takenTicks);
+    check('a slow renewal that finds another lease owner still loses the lease at once (and aborts the signal)', [slowTaken.keeper.lost, slowTaken.keeper.reason, slowTaken.keeper.signal.aborted, slowTaken.calls(), slowTaken.peak()], [true, 'taken', true, 1, 1]);
+    const slowErrors = createLeaseKeeper(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      throw new Error('db down');
+    });
+    await Promise.all([slowErrors.tick(), slowErrors.tick()]);
+    check('ticks joining one failed renewal count it once (not as two failures)', slowErrors.lost, false);
+    await slowErrors.tick();
+    check(`… and ${LEASE_RENEW_MAX_ERRORS} failed renewals in a row still lose the lease`, [slowErrors.lost, slowErrors.reason], [true, 'renew_failed']);
   }
 
   section('RLS probe: a definitive failure fails closed; an unreachable database is retried, then reported as such');

@@ -18,7 +18,7 @@ export interface LeaseKeeper {
   readonly lost: boolean;
   /** Why the lease was lost, once it is. */
   readonly reason: 'taken' | 'renew_failed' | null;
-  /** One heartbeat: renews, and marks the lease lost on the rules above. */
+  /** One heartbeat: renews, and marks the lease lost on the rules above. Never more than one renewal at a time: a tick during a renewal returns that renewal. */
   tick(): Promise<void>;
 }
 
@@ -30,6 +30,8 @@ export function createLeaseKeeper(renew: () => Promise<boolean>, options: { maxE
   const controller = new AbortController();
   let errors = 0;
   let reason: 'taken' | 'renew_failed' | null = null;
+  /* One renewal at a time: a tick while one is in flight joins it (neither a success nor a failure of its own). */
+  let inFlight: Promise<void> | null = null;
   const lose = (why: 'taken' | 'renew_failed') => {
     if (reason) return;
     reason = why;
@@ -44,15 +46,20 @@ export function createLeaseKeeper(renew: () => Promise<boolean>, options: { maxE
     get reason() {
       return reason;
     },
-    async tick() {
-      if (reason) return;
-      try {
-        if (await renew()) errors = 0;
-        else lose('taken');
-      } catch {
-        errors += 1;
-        if (errors >= maxErrors) lose('renew_failed');
-      }
+    tick() {
+      if (reason) return Promise.resolve();
+      inFlight ??= (async () => {
+        try {
+          if (await renew()) errors = 0;
+          else lose('taken');
+        } catch {
+          errors += 1;
+          if (errors >= maxErrors) lose('renew_failed');
+        } finally {
+          inFlight = null;
+        }
+      })();
+      return inFlight;
     },
   };
 }

@@ -11,7 +11,9 @@
 
 import './support/unit-env';
 
+import { AppError } from '@/server/http/errors';
 import { actionHash, inputHash, stepIdempotencyKey } from '@/server/runs/approvals';
+import { assertRlsEnforced, RLS_PROBE_ATTEMPTS, rlsProbeFailure, setRlsProbeForTests, type RlsProbe } from '@/server/runs/db-scope';
 import { createLeaseKeeper, LEASE_RENEW_MAX_ERRORS } from '@/server/runs/lease';
 import { activeElapsedMs, DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
 import { decide, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
@@ -110,6 +112,49 @@ async function main() {
     await taken.keeper.tick();
     check('once lost, the keeper never renews again', taken.calls(), 1);
   }
+
+  section('RLS probe: a definitive failure fails closed; an unreachable database is retried, then reported as such');
+  const pgError = (code: string, message = 'x') => Object.assign(new Error(message), { code });
+  const wrapped = (code: string) => Object.assign(new Error('Failed query: set local role academic_app'), { cause: pgError(code) });
+  check('a missing role (42704) and a role that may not be taken (42501) are definitive', [rlsProbeFailure(pgError('42704')), rlsProbeFailure(pgError('42501'))], ['definitive', 'definitive']);
+  check('an error without a recognised code is definitive (fail closed, as before)', [rlsProbeFailure(new Error('boom')), rlsProbeFailure(pgError('XX000')), rlsProbeFailure(pgError('42P01')), rlsProbeFailure(null)], ['definitive', 'definitive', 'definitive', 'definitive']);
+  check('connection, timeout and availability failures are transient', ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'CONNECTION_CLOSED', '08006', '08001', '53300', '57P03', '57014'].map((code) => rlsProbeFailure(pgError(code))), Array(10).fill('transient'));
+  check('the driver error is found under the query wrapper (cause)', [rlsProbeFailure(wrapped('08006')), rlsProbeFailure(wrapped('42704'))], ['transient', 'definitive']);
+
+  const enforced: RlsProbe = { role: 'academic_app', bypass: false, superuser: false, rls: true, row_security: 'on' };
+  const probeWith = async (script: (call: number) => RlsProbe | Error) => {
+    let calls = 0;
+    setRlsProbeForTests(() => async () => {
+      calls += 1;
+      const next = script(calls);
+      if (next instanceof Error) throw next;
+      return next;
+    });
+    let result: string;
+    try {
+      await assertRlsEnforced();
+      result = 'ok';
+    } catch (error) {
+      result = error instanceof AppError ? `${error.code}:${(error.details as { reason?: string }).reason}` : 'threw';
+    }
+    return { result, calls };
+  };
+  check('a transient failure that clears is retried and then proves RLS', await probeWith((call) => (call < 3 ? pgError('CONNECTION_CLOSED') : enforced)), { result: 'ok', calls: 3 });
+  check(`a transient failure that persists: ${RLS_PROBE_ATTEMPTS} attempts, then UNAVAILABLE:infra_unavailable (never rls_unavailable)`, await probeWith(() => pgError('CONNECT_TIMEOUT')), { result: 'UNAVAILABLE:infra_unavailable', calls: RLS_PROBE_ATTEMPTS });
+  check('… and it is not cached: the next check probes again', await probeWith(() => enforced), { result: 'ok', calls: 1 });
+  check('a missing role is definitive: no retry, UNAVAILABLE:rls_unavailable', await probeWith(() => wrapped('42704')), { result: 'UNAVAILABLE:rls_unavailable', calls: 1 });
+  check('a role that may not be taken is definitive: no retry', await probeWith(() => pgError('42501')), { result: 'UNAVAILABLE:rls_unavailable', calls: 1 });
+  check('an unrecognised error is definitive: no retry', await probeWith(() => new Error('boom')), { result: 'UNAVAILABLE:rls_unavailable', calls: 1 });
+  check('a probe that answers BYPASSRLS / superuser / RLS off / row_security off is definitive', [
+    (await probeWith(() => ({ ...enforced, bypass: true }))).result,
+    (await probeWith(() => ({ ...enforced, superuser: true }))).result,
+    (await probeWith(() => ({ ...enforced, rls: false }))).result,
+    (await probeWith(() => ({ ...enforced, rls: null }))).result,
+    (await probeWith(() => ({ ...enforced, row_security: 'off' }))).result,
+    (await probeWith(() => ({ ...enforced, role: 'neondb_owner' }))).result,
+  ], Array(6).fill('UNAVAILABLE:rls_unavailable'));
+  check('transient then definitive: the definitive answer wins (fail closed)', await probeWith((call) => (call === 1 ? pgError('ECONNRESET') : { ...enforced, bypass: true })), { result: 'UNAVAILABLE:rls_unavailable', calls: 2 });
+  setRlsProbeForTests(null);
 
   section('Hashes: approvals and idempotency bound to the exact action');
   const base = { projectId: 'p', runId: 'r', stepId: 's', userId: 'u', tool: 'replaceDatasetVersion', toolVersion: '1.0.0', inputHash: inputHash({ oldVersionId: 'a', newVersionId: 'b' }), reason: 'replaces_data', targets: { oldContentHash: 'h1' }, impactHash: 'i1' };

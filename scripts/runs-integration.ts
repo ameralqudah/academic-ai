@@ -32,7 +32,7 @@ import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
 import { saveUpload } from '@/server/services/dataset.service';
-import { assertRlsEnforced, forgetRlsCheck, withRunScope } from '@/server/runs/db-scope';
+import { assertRlsEnforced, forgetRlsCheck, RLS_PROBE_ATTEMPTS, setRlsProbeForTests, withRunScope } from '@/server/runs/db-scope';
 import * as executorModule from '@/server/runs/executor';
 import { advanceRun } from '@/server/runs/executor';
 import { resetLimits } from '@/server/runs/limits';
@@ -527,6 +527,56 @@ async function main() {
   await quiet(rlsRun);
   check('… and it is never re-dispatched (no loop)', [await picked(rlsRun), await advanceRun(rlsRun), await advanceRun(rlsRun)], [false, 'skipped', 'skipped']);
   await finish(({ id: rlsRun }).id);
+
+  /* M1: a definitive failure that arrives as an error (the role is gone) still fails closed, without retrying. */
+  let probeCalls = 0;
+  setRlsProbeForTests((real) => async () => {
+    probeCalls += 1;
+    return real();
+  });
+  await db.execute(sql`alter role academic_app rename to academic_app_ws1_gone`);
+  const goneOutcome = await outcome(() => assertRlsEnforced());
+  await db.execute(sql`alter role academic_app_ws1_gone rename to academic_app`);
+  check('M1: the run role missing (42704) is definitive: UNAVAILABLE:rls_unavailable after one probe', [goneOutcome, probeCalls], ['UNAVAILABLE:rls_unavailable', 1]);
+  setRlsProbeForTests(null);
+  check('… and with the role back, RLS is proven again', await outcome(() => assertRlsEnforced()), 'ok');
+
+  /* M1: the database cannot be reached (injected at the probe): retried, then reported as transient; the run is not touched. */
+  const outageRun = (await createRun(me, P, { intent: 'The database is briefly unreachable.' })).run.id;
+  const [outageBefore] = await db.select().from(researchRuns).where(eq(researchRuns.id, outageRun));
+  probeCalls = 0;
+  setRlsProbeForTests(() => async () => {
+    probeCalls += 1;
+    throw Object.assign(new Error('Failed query'), { cause: Object.assign(new Error('write CONNECTION_CLOSED'), { code: 'CONNECTION_CLOSED' }) });
+  });
+  const outageOutcome = await advanceRun(outageRun).catch((error: unknown) => `threw:${error instanceof AppError ? error.code : 'error'}`);
+  const outageCreate = await outcome(() => createRun({ userId: editor }, P, { intent: 'Started during the outage.' }));
+  const [outageAfter] = await db.select().from(researchRuns).where(eq(researchRuns.id, outageRun));
+  check(`M1: a transient probe failure is retried ${RLS_PROBE_ATTEMPTS} times, then the runner returns 'unavailable'`, [outageOutcome, probeCalls >= RLS_PROBE_ATTEMPTS], ['unavailable', true]);
+  check('… the run is NOT recorded as rls_unavailable: still QUEUED, no stop reason, no error, no lease, no claim counted', [outageAfter?.status, outageAfter?.stopReason ?? null, outageAfter?.error ?? null, outageAfter?.leaseOwner ?? null, outageAfter?.attempts, outageAfter?.finishedAt ?? null], ['QUEUED', null, null, null, outageBefore?.attempts, null]);
+  check('… no run.failed event was written', (await db.select().from(runEvents).where(and(eq(runEvents.runId, outageRun), eq(runEvents.type, 'run.failed')))).length, 0);
+  check('… starting a run during the outage is refused as transient (UNAVAILABLE:infra_unavailable)', outageCreate, 'UNAVAILABLE:infra_unavailable');
+  await quiet(outageRun);
+  check('… and the reaper will dispatch it again once quiet (it is not terminal)', await picked(outageRun), true);
+  setRlsProbeForTests(null);
+  check('… once the database is reachable, RLS is proven again and the run is operable (its owner cancels it)', [await outcome(() => assertRlsEnforced()), (await cancelRun(me, P, outageRun)).status], ['ok', 'CANCELLED']);
+
+  /* M1: an unreachable database while RLS is ALSO off still fails closed once the probe answers. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const flakyRlsRun = (await createRun(me, P, { intent: 'Transient, then RLS is off.' })).run.id;
+  await db.execute(sql`alter role academic_app bypassrls`);
+  probeCalls = 0;
+  setRlsProbeForTests((real) => async () => {
+    probeCalls += 1;
+    if (probeCalls === 1) throw Object.assign(new Error('connect'), { code: 'ECONNRESET' });
+    return real();
+  });
+  const flakyOutcome = await advanceRun(flakyRlsRun).catch(() => 'threw');
+  await db.execute(sql`alter role academic_app nobypassrls`);
+  setRlsProbeForTests(null);
+  await assertRlsEnforced();
+  const [flakyRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, flakyRlsRun));
+  check('M1: transient, then the probe answers BYPASSRLS: the run fails closed with rls_unavailable', [flakyOutcome, flakyRow?.status, flakyRow?.stopReason, probeCalls], ['ran', 'FAILED', 'rls_unavailable', 2]);
 
   /* Item 4b: picked up 20 times without moving: the 21st claim stops it as worker_lost. */
   planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);

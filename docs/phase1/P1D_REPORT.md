@@ -436,4 +436,3 @@ Two findings from the review of #34, fixed on their own. There is no migration a
 - `systemExpiredApprovals` still has no ordering. Approvals of a demoted owner's run are expired by the M2 settle once the run is picked up, so they do not stay in the sweep.
 - A run whose owner is demoted mid-step stops at the next write, because its lease can no longer be renewed. It is settled only once that lease lapses, within about 2 minutes plus one reaper pass.
 - The review's L1–L5 are unchanged.
-

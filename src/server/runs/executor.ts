@@ -58,9 +58,11 @@ class StepLeaseLost extends Error {}
 
 /**
  * Advances a run as far as it can go now: to its end, to an approval, or to
- * a limit. Returns 'busy' when another runner holds it.
+ * a limit. Returns 'busy' when another runner holds it, and 'unavailable'
+ * when the database could not be reached to prove RLS (the run is left as it
+ * was, for a later dispatch; nothing is recorded against it).
  */
-export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipped'> {
+export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipped' | 'unavailable'> {
   const owner = await store.systemRunOwner(runId);
   if (!owner || ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(owner.status)) return 'skipped';
   const userId = owner.userId;
@@ -69,6 +71,11 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
   try {
     claims = await store.claimRunLease(userId, runId, leaseOwner);
   } catch (error) {
+    /* The database could not be reached: not an RLS verdict. Leave the run as it is; the reaper dispatches it again. */
+    if (isInfraUnavailable(error)) {
+      logger.warn('runs.advance.infraUnavailable', { runId });
+      return 'unavailable';
+    }
     /* The database cannot enforce RLS for this run: stop it with that reason (fail closed), never retry forever. */
     if (isRlsUnavailable(error)) {
       await failRlsUnavailable(runId, error);
@@ -76,7 +83,23 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
     }
     throw error;
   }
-  if (claims === null) return 'busy';
+  if (claims === null) {
+    /*
+     * Refused: another runner holds the lease — or the owner can no longer
+     * edit the project, and RLS refuses them every write, forever. The latter
+     * (re-checked in SQL, lease free) is settled terminally so it is not
+     * re-dispatched without end; a busy run is left alone.
+     */
+    const settled = await store.systemSettleIneligibleOwnerRun(runId, userId).catch((error: unknown) => {
+      logger.error('runs.owner.settleFailed', { runId, error: String(error).slice(0, 200) });
+      return false;
+    });
+    if (settled) {
+      logger.warn('runs.owner.ineligible', { runId });
+      return 'ran';
+    }
+    return 'busy';
+  }
   /*
    * The heartbeat renews the lease. A renewal that finds the lease gone, or
    * LEASE_RENEW_MAX_ERRORS failures in a row, means the lease is LOST: the
@@ -92,7 +115,7 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
   return keeperScope.run(keeper, () => store.asLeaseHolder(runId, leaseOwner, () => advanceHeld(userId, runId, owner.projectId, leaseOwner, claims, keeper, heartbeat)));
 }
 
-async function advanceHeld(userId: string, runId: string, projectId: string, leaseOwner: string, claims: number, keeper: LeaseKeeper, heartbeat: ReturnType<typeof setInterval>): Promise<'ran'> {
+async function advanceHeld(userId: string, runId: string, projectId: string, leaseOwner: string, claims: number, keeper: LeaseKeeper, heartbeat: ReturnType<typeof setInterval>): Promise<'ran' | 'unavailable'> {
   try {
     if (claims > store.MAX_RUN_CLAIMS) {
       /* Claimed again and again without the run moving: nothing more a runner can do. */
@@ -104,6 +127,11 @@ async function advanceHeld(userId: string, runId: string, projectId: string, lea
     return 'ran';
   } catch (error) {
     if (keeper.lost) return 'ran'; /* another runner owns the run now: write nothing */
+    if (isInfraUnavailable(error)) {
+      /* Not the run's fault and not an RLS verdict: no stop is recorded; the lease lapses and the reaper dispatches it again. */
+      logger.warn('runs.advance.infraUnavailable', { runId });
+      return 'unavailable';
+    }
     if (isRlsUnavailable(error)) {
       await failRlsUnavailable(runId, error);
       return 'ran';
@@ -117,9 +145,13 @@ async function advanceHeld(userId: string, runId: string, projectId: string, lea
   }
 }
 
-function isRlsUnavailable(error: unknown): boolean {
-  return error instanceof AppError && error.code === 'UNAVAILABLE' && (error.details as { reason?: string } | undefined)?.reason === 'rls_unavailable';
+function unavailableReason(error: unknown): string | undefined {
+  return error instanceof AppError && error.code === 'UNAVAILABLE' ? (error.details as { reason?: string } | undefined)?.reason : undefined;
 }
+/** The database answered: RLS cannot be enforced (definitive, fail closed). */
+const isRlsUnavailable = (error: unknown) => unavailableReason(error) === 'rls_unavailable';
+/** The database could not be reached to prove RLS (transient; see assertRlsEnforced). */
+const isInfraUnavailable = (error: unknown) => unavailableReason(error) === 'infra_unavailable';
 
 /** Records `rls_unavailable` through the one narrowly scoped owner-connection write (the RLS path is what failed). */
 async function failRlsUnavailable(runId: string, error: unknown): Promise<void> {

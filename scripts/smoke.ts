@@ -5459,7 +5459,10 @@ console.log('\nwhat a model costs');
     if (file.startsWith('src/server/runs/tools/') && /^import (?!type)[^;]*from '@\/analysis\/engine/m.test(source)) engineImports.push(file);
     if (file.startsWith('src/server/runs/tools/') && /from '(@\/server\/runs|\.\.)\/(service|executor|store|assistant|planner)'|dispatchResearchRun/.test(source)) runStarters.push(file);
     if (/\bsystemDb\b/.test(source)) systemUsers.push(file);
-    for (const match of source.matchAll(/\bsystemDb\s*\.\s*(transaction|update|insert|delete|execute)\s*\(/g)) systemWrites.push(`${file}:${match[1]}`);
+    for (const match of source.matchAll(/\bsystemDb\s*\.\s*(transaction|update|insert|delete|execute)\s*\(/g)) {
+      const enclosing = [...source.slice(0, match.index).matchAll(/export async function (\w+)/g)].at(-1)?.[1] ?? '?';
+      systemWrites.push(`${file}:${enclosing}:${match[1]}`);
+    }
   }
   check('gateway tools are defined only by the run registry', definers, ['src/server/runs/registry.ts']);
   check('the run tables are read and written only by the run store (under RLS)', runTableUsers.sort(), ['src/server/runs/store.ts']);
@@ -5468,7 +5471,7 @@ console.log('\nwhat a model costs');
   check('no unseeded randomness in the run engine', runRandom, []);
   check('no tool can start, drive or read a run (nested depth 0)', runStarters, []);
   check('the owner connection (bypasses RLS) is used only by the run store', systemUsers.sort(), ['src/server/runs/db-scope.ts', 'src/server/runs/store.ts']);
-  check('… and writes exactly once: the fail-closed rls_unavailable stop', systemWrites, ['src/server/runs/store.ts:transaction']);
+  check('… and writes in exactly two places, both terminal: the fail-closed rls_unavailable stop and the ineligible-owner settle', systemWrites, ['src/server/runs/store.ts:systemFailRunRlsUnavailable:transaction', 'src/server/runs/store.ts:systemSettleIneligibleOwnerRun:transaction']);
 }
 
 console.log(failures === 0 ? '\n✓ all smoke tests passed\n' : `\n✗ ${failures} failing\n`);

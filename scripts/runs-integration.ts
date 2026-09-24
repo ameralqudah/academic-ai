@@ -32,7 +32,7 @@ import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
 import { saveUpload } from '@/server/services/dataset.service';
-import { assertRlsEnforced, forgetRlsCheck, withRunScope } from '@/server/runs/db-scope';
+import { assertRlsEnforced, forgetRlsCheck, RLS_PROBE_ATTEMPTS, setRlsProbeForTests, withRunScope } from '@/server/runs/db-scope';
 import * as executorModule from '@/server/runs/executor';
 import { advanceRun } from '@/server/runs/executor';
 import { resetLimits } from '@/server/runs/limits';
@@ -528,6 +528,56 @@ async function main() {
   check('… and it is never re-dispatched (no loop)', [await picked(rlsRun), await advanceRun(rlsRun), await advanceRun(rlsRun)], [false, 'skipped', 'skipped']);
   await finish(({ id: rlsRun }).id);
 
+  /* M1: a definitive failure that arrives as an error (the role is gone) still fails closed, without retrying. */
+  let probeCalls = 0;
+  setRlsProbeForTests((real) => async () => {
+    probeCalls += 1;
+    return real();
+  });
+  await db.execute(sql`alter role academic_app rename to academic_app_ws1_gone`);
+  const goneOutcome = await outcome(() => assertRlsEnforced());
+  await db.execute(sql`alter role academic_app_ws1_gone rename to academic_app`);
+  check('M1: the run role missing (42704) is definitive: UNAVAILABLE:rls_unavailable after one probe', [goneOutcome, probeCalls], ['UNAVAILABLE:rls_unavailable', 1]);
+  setRlsProbeForTests(null);
+  check('… and with the role back, RLS is proven again', await outcome(() => assertRlsEnforced()), 'ok');
+
+  /* M1: the database cannot be reached (injected at the probe): retried, then reported as transient; the run is not touched. */
+  const outageRun = (await createRun(me, P, { intent: 'The database is briefly unreachable.' })).run.id;
+  const [outageBefore] = await db.select().from(researchRuns).where(eq(researchRuns.id, outageRun));
+  probeCalls = 0;
+  setRlsProbeForTests(() => async () => {
+    probeCalls += 1;
+    throw Object.assign(new Error('Failed query'), { cause: Object.assign(new Error('write CONNECTION_CLOSED'), { code: 'CONNECTION_CLOSED' }) });
+  });
+  const outageOutcome = await advanceRun(outageRun).catch((error: unknown) => `threw:${error instanceof AppError ? error.code : 'error'}`);
+  const outageCreate = await outcome(() => createRun({ userId: editor }, P, { intent: 'Started during the outage.' }));
+  const [outageAfter] = await db.select().from(researchRuns).where(eq(researchRuns.id, outageRun));
+  check(`M1: a transient probe failure is retried ${RLS_PROBE_ATTEMPTS} times, then the runner returns 'unavailable'`, [outageOutcome, probeCalls >= RLS_PROBE_ATTEMPTS], ['unavailable', true]);
+  check('… the run is NOT recorded as rls_unavailable: still QUEUED, no stop reason, no error, no lease, no claim counted', [outageAfter?.status, outageAfter?.stopReason ?? null, outageAfter?.error ?? null, outageAfter?.leaseOwner ?? null, outageAfter?.attempts, outageAfter?.finishedAt ?? null], ['QUEUED', null, null, null, outageBefore?.attempts, null]);
+  check('… no run.failed event was written', (await db.select().from(runEvents).where(and(eq(runEvents.runId, outageRun), eq(runEvents.type, 'run.failed')))).length, 0);
+  check('… starting a run during the outage is refused as transient (UNAVAILABLE:infra_unavailable)', outageCreate, 'UNAVAILABLE:infra_unavailable');
+  await quiet(outageRun);
+  check('… and the reaper will dispatch it again once quiet (it is not terminal)', await picked(outageRun), true);
+  setRlsProbeForTests(null);
+  check('… once the database is reachable, RLS is proven again and the run is operable (its owner cancels it)', [await outcome(() => assertRlsEnforced()), (await cancelRun(me, P, outageRun)).status], ['ok', 'CANCELLED']);
+
+  /* M1: an unreachable database while RLS is ALSO off still fails closed once the probe answers. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const flakyRlsRun = (await createRun(me, P, { intent: 'Transient, then RLS is off.' })).run.id;
+  await db.execute(sql`alter role academic_app bypassrls`);
+  probeCalls = 0;
+  setRlsProbeForTests((real) => async () => {
+    probeCalls += 1;
+    if (probeCalls === 1) throw Object.assign(new Error('connect'), { code: 'ECONNRESET' });
+    return real();
+  });
+  const flakyOutcome = await advanceRun(flakyRlsRun).catch(() => 'threw');
+  await db.execute(sql`alter role academic_app nobypassrls`);
+  setRlsProbeForTests(null);
+  await assertRlsEnforced();
+  const [flakyRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, flakyRlsRun));
+  check('M1: transient, then the probe answers BYPASSRLS: the run fails closed with rls_unavailable', [flakyOutcome, flakyRow?.status, flakyRow?.stopReason, probeCalls], ['ran', 'FAILED', 'rls_unavailable', 2]);
+
   /* Item 4b: picked up 20 times without moving: the 21st claim stops it as worker_lost. */
   planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
   const loopRun = (await createRun(me, P, { intent: 'Never moves.' })).run.id;
@@ -664,6 +714,80 @@ async function main() {
   check('RLS is still enforced for the run role (no bypass)', await outcome(async () => { forgetRlsCheck(); await assertRlsEnforced(); return 'ok'; }), 'ok');
   await cancelRun(me, P, ownerRlsRun);
   await cancelRun({ userId: editor }, P, editorRlsRun);
+
+  /* ------------------------------------------------------------------ */
+  section('WS1 follow-up M2: a run whose owner loses EDITOR is settled once, not re-dispatched forever');
+  const member = await user('member');
+  await db.insert(projectMembers).values({ projectId: P, userId: member, role: 'EDITOR' });
+  const setMemberRole = (role: 'EDITOR' | 'COMMENTER' | 'VIEWER') => db.update(projectMembers).set({ role }).where(and(eq(projectMembers.projectId, P), eq(projectMembers.userId, member)));
+  const runRow = async (id: string) => (await db.select().from(researchRuns).where(eq(researchRuns.id, id)))[0]!;
+  const eventsOf = async (id: string, type: string) => db.select().from(runEvents).where(and(eq(runEvents.runId, id), eq(runEvents.type, type)));
+
+  /* 1. Demoted to VIEWER before the run was ever claimed. */
+  const demotedRun = (await createRun({ userId: member }, P, { intent: 'The owner is demoted before it starts.' })).run.id;
+  await setMemberRole('VIEWER');
+  check('M2: under RLS the demoted owner’s claim is refused (the old endless loop: \'busy\' forever)', await store.claimRunLease(member, demotedRun, 'probe-runner'), null);
+  check('… the demoted owner cannot cancel it either (no permission is broadened)', await outcome(() => cancelRun({ userId: member }, P, demotedRun)), 'FORBIDDEN');
+  check('… nor update it directly (RLS)', await asApp(member, (tx) => tx.update(researchRuns).set({ updatedAt: new Date() }).where(eq(researchRuns.id, demotedRun)).returning({ id: researchRuns.id })).then((rows) => rows.length), 0);
+  await quiet(demotedRun);
+  check('… the reaper picks it up', await picked(demotedRun), true);
+  const demotedOutcome = await advanceRun(demotedRun);
+  const demotedRow = await runRow(demotedRun);
+  check('the next dispatch settles it: FAILED with policy_denied (cause owner_ineligible), lease cleared', [demotedOutcome, demotedRow.status, demotedRow.stopReason, (demotedRow.error as { cause?: string } | null)?.cause, demotedRow.leaseOwner, demotedRow.finishedAt !== null], ['ran', 'FAILED', 'policy_denied', 'owner_ineligible', null, true]);
+  const demotedEvents = await eventsOf(demotedRun, 'run.failed');
+  check('… recorded as one run.failed event, attributed to the run’s owner, via system, with the rank it found', [demotedEvents.length, demotedEvents[0]?.userId === member, (demotedEvents[0]?.data as { via?: string } | undefined)?.via, (demotedEvents[0]?.data as { ownerRank?: number } | undefined)?.ownerRank], [1, true, 'system', 1]);
+  check('… nothing executed (no plan, no step)', [demotedRow.plan, (await db.select().from(runSteps).where(eq(runSteps.runId, demotedRun))).length], [null, 0]);
+  check('… no loop: not picked again, later dispatches skip it, a second settle is a no-op', [await picked(demotedRun), await advanceRun(demotedRun), await advanceRun(demotedRun), await store.systemSettleIneligibleOwnerRun(demotedRun, member)], [false, 'skipped', 'skipped', false]);
+  check('… still exactly one run.failed event', (await eventsOf(demotedRun, 'run.failed')).length, 1);
+
+  /* 2. Demoted while the run is active: parked on an approval, a runner holding a live lease. */
+  await setMemberRole('EDITOR');
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const activeRun = (await createRun({ userId: member }, P, { intent: 'The owner is demoted while it waits.' })).run.id;
+  await drain(activeRun);
+  const activeApprovals = (await getRun(me, P, activeRun)).approvals;
+  check('an active run of the member is parked on a PENDING approval', [(await runRow(activeRun)).status, activeApprovals.map((a) => a.status)], ['WAITING_APPROVAL', ['PENDING']]);
+  await db.update(researchRuns).set({ leaseOwner: 'live-runner', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, activeRun));
+  await setMemberRole('COMMENTER');
+  check('M2: owner demoted while a runner holds a live lease: the dispatch is \'busy\' and nothing is settled under that runner', [await advanceRun(activeRun), (await runRow(activeRun)).status, (await runRow(activeRun)).leaseOwner], ['busy', 'WAITING_APPROVAL', 'live-runner']);
+  const ownerCancel = await cancelRun(me, P, activeRun);
+  check('… a project OWNER’s cancel is recorded, but cannot settle it as the demoted owner (the old stuck state)', [ownerCancel.status, ownerCancel.cancelRequestedAt !== null], ['WAITING_APPROVAL', true]);
+  await quiet(activeRun);
+  check('… once the lease has lapsed, the reaper picks it up', await picked(activeRun), true);
+  const activeOutcome = await advanceRun(activeRun);
+  const activeRow = await runRow(activeRun);
+  check('… and the dispatch settles it CANCELLED (the cancel was requested), lease cleared', [activeOutcome, activeRow.status, activeRow.stopReason, (activeRow.error as { cause?: string } | null)?.cause, activeRow.leaseOwner], ['ran', 'CANCELLED', 'cancelled', 'owner_ineligible', null]);
+  const activeAfter = (await getRun(me, P, activeRun)).approvals;
+  check('… its open approval is expired (none can be decided or used), with an event via system', [activeAfter.map((a) => a.status), (await eventsOf(activeRun, 'approval.expired')).map((event) => [(event.data as { reason?: string }).reason, (event.data as { via?: string }).via])], [['EXPIRED'], [['owner_ineligible', 'system']]]);
+  check('… a project OWNER can no longer approve it', await outcome(() => decideApproval(me, P, activeRun, activeAfter[0]!.id, { decision: 'approve', actionHash: activeAfter[0]!.actionHash })), 'CONFLICT:approval_not_pending');
+  check('… no loop: not picked again, the approval sweep does not see it, later dispatches skip it', [await picked(activeRun), (await store.systemExpiredApprovals(10_000)).some((a) => a.runId === activeRun), await advanceRun(activeRun)], [false, false, 'skipped']);
+  check('… exactly one run.cancelled event', (await eventsOf(activeRun, 'run.cancelled')).length, 1);
+
+  /* 3. Removed from the project altogether. */
+  await setMemberRole('EDITOR');
+  const removedRun = (await createRun({ userId: member }, P, { intent: 'The owner is removed.' })).run.id;
+  await db.delete(projectMembers).where(and(eq(projectMembers.projectId, P), eq(projectMembers.userId, member)));
+  const removedOutcome = await advanceRun(removedRun);
+  const removedRow = await runRow(removedRun);
+  check('M2: an owner removed from the project: settled FAILED policy_denied on the next dispatch (rank 0)', [removedOutcome, removedRow.status, removedRow.stopReason, ((await eventsOf(removedRun, 'run.failed'))[0]?.data as { ownerRank?: number } | undefined)?.ownerRank], ['ran', 'FAILED', 'policy_denied', 0]);
+
+  /* 4. Everyone else's runs stay protected: the settle applies only to the run's owner, and only below EDITOR. */
+  const keptOwnerRun = (await createRun(me, P, { intent: 'Owner run, must not be settled.' })).run.id;
+  const keptEditorRun = (await createRun({ userId: editor }, P, { intent: 'Editor run, must not be settled.' })).run.id;
+  check('M2: the settle refuses a run whose owner is still an EDITOR or OWNER', [await store.systemSettleIneligibleOwnerRun(keptEditorRun, editor), await store.systemSettleIneligibleOwnerRun(keptOwnerRun, owner)], [false, false]);
+  check('… and a run named with someone else as its owner (even an ineligible one)', [await store.systemSettleIneligibleOwnerRun(keptOwnerRun, member), await store.systemSettleIneligibleOwnerRun(keptEditorRun, viewer), await store.systemSettleIneligibleOwnerRun(keptEditorRun, stranger)], [false, false, false]);
+  check('… both runs are untouched', [(await runRow(keptOwnerRun)).status, (await runRow(keptEditorRun)).status, (await runRow(keptOwnerRun)).stopReason, (await runRow(keptEditorRun)).stopReason], ['QUEUED', 'QUEUED', null, null]);
+  check('… an EDITOR still cannot cancel another member’s run', await outcome(() => cancelRun({ userId: editor }, P, keptOwnerRun)), 'FORBIDDEN');
+
+  /* 5. The reaper's selection is deterministic (oldest first) and bounded. */
+  await db.update(researchRuns).set({ updatedAt: sql`now() - interval '10 minutes'`, leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, keptEditorRun));
+  await db.update(researchRuns).set({ updatedAt: sql`now() - interval '5 minutes'`, leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, keptOwnerRun));
+  const strandedAll = (await store.systemStrandedRuns(10_000)).map((run) => run.id);
+  const strandedAgain = (await store.systemStrandedRuns(10_000)).map((run) => run.id);
+  check('M2: stranded runs come oldest first (updated_at, then id), the same on every read', [strandedAll.indexOf(keptEditorRun) >= 0, strandedAll.indexOf(keptEditorRun) < strandedAll.indexOf(keptOwnerRun), JSON.stringify(strandedAll) === JSON.stringify(strandedAgain)], [true, true, true]);
+  check('… in bounded batches: a batch of 1 is the oldest; the default is REAPER_RUN_BATCH', [(await store.systemStrandedRuns(1)).map((run) => run.id), (await store.systemStrandedRuns()).length <= store.REAPER_RUN_BATCH, store.REAPER_RUN_BATCH], [strandedAll.slice(0, 1), true, 50]);
+  await cancelRun(me, P, keptOwnerRun);
+  await cancelRun({ userId: editor }, P, keptEditorRun);
 
   section('Flags');
   process.env.FF_RUNS = 'false';

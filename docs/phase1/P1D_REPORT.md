@@ -44,6 +44,9 @@ All of it is behind `FF_GRAPH` + `FF_RUNS`. It also needs a queue-backed job run
 | `9c6cecb` | WS1 group 3: `replaceDatasetVersion` conflict and provenance; lease loss and write fencing (§12) |
 | `52e8cf2` | WS1 group 4: run cancel/update ownership; migration `0016_p1d_run_owner.sql` (§12) |
 | (group 5) | WS1 group 5: documentation only (this report's §12, the item 7 note, the `state.ts` header) |
+| `af97959` | Merge of #34 (WS1) into `main` |
+| `ed7d852` | WS1 follow-up M1: a transient RLS probe failure is retried and reported as `infra_unavailable`, never recorded as `rls_unavailable` (§13) |
+| `c8c5296` | WS1 follow-up M2: a run whose owner loses EDITOR is settled once; ordered, bounded reaper batch (§13) |
 
 ## 2. Chat / task-path fixes (approved scope only)
 
@@ -105,6 +108,7 @@ Tests: `npm run test:tasks:db` (39 checks, in CI).
   - `row_security` is on.
 
   If any check fails, the run is refused (`503 UNAVAILABLE`, `reason: rls_unavailable`). **There is no application-only fallback.**
+  A probe that could not reach the database at all is retried, then refused as `infra_unavailable` without being recorded against the run (§13).
 - **Migration.** If the database refuses to create or grant the role, migration 0015 raises a WARNING rather than failing, so the rest of the schema still applies. The runtime then refuses every run, as above.
 - **Tests.** The RLS checks in `test:runs:db` connect as the restricted role and show that:
   - a stranger sees and changes nothing;
@@ -352,7 +356,7 @@ The post-P1-D readiness audit found run-engine correctness bugs. The approved WS
   - no waiting step at all resumes it, and the step logic settles it.
 - **Reaper recovery.** The reaper also re-dispatches runs that have been quiet for 2 minutes with no live lease and need attention: an unfinished cancellation, or a wait no PENDING, unexpired request can end. The TTL is unchanged.
 - **`rls_unavailable`.** An RLS failure at the lease claim or during a run ends it FAILED with `rls_unavailable`, with one event and nothing executed.
-  - The write goes through `systemFailRunRlsUnavailable`, the only write on the owner connection. A smoke gate allows no other.
+  - The write goes through `systemFailRunRlsUnavailable`, which was then the only write on the owner connection. A smoke gate allows no other. (Follow-up M2 added exactly one more, §13.)
 - **Claim limit.** `attempts` counts the lease claims since the run's last state change. The 21st claim without progress stops the run as `worker_lost`, so nothing is re-dispatched forever.
 
 **Group 3 (`9c6cecb`), items 5, 5b and 6:**
@@ -392,3 +396,43 @@ The post-P1-D readiness audit found run-engine correctness bugs. The approved WS
 | typecheck, lint, smoke (including 2 new owner-connection gates) | green |
 
 For each group, the new database checks were also run against the previous implementation. They fail there as expected: 8, 15, 12 and 4 checks for groups 1–4. **The full regression (build, browser tests with flags off and on) is still to be run before the PR is opened.**
+
+## 13. WS1 follow-up: review findings M1 and M2
+
+Two findings from the review of #34, fixed on their own. There is no migration and no UI change, and FF_RUNS and FF_GRAPH stay off.
+
+**M1 (`ed7d852`): transient RLS probe failures.**
+- **The problem.** `assertRlsEnforced` treated every probe exception as "RLS cannot be enforced". A connection reset or timeout on a process's first probe therefore failed the run permanently with `rls_unavailable`.
+- **Classification.** Probe exceptions are now classified by driver code or SQLSTATE.
+  - Transient: connection exceptions (08xxx), insufficient resources (53xxx, e.g. too many connections), shutdown or cannot-connect-now (57P01–57P03), a cancelled statement (57014), lock or serialisation conflicts (55P03, 40001, 40P01), and socket or driver connection errors.
+  - Definitive: everything else, including a missing role (42704), a role that may not be taken (42501) and any error without a recognised code. These fail closed exactly as before. So does a probe that answers with BYPASSRLS, superuser, RLS off or `row_security` off.
+- **Transient handling.**
+  - A transient failure gets 3 attempts, with 250 ms and 1 s backoff.
+  - If it persists, the probe raises `503 UNAVAILABLE` with `reason: infra_unavailable`. Nothing is cached.
+  - The executor writes nothing: the run keeps its state and has no lease. `advanceRun` returns `'unavailable'`, and the reaper dispatches the run again once it is quiet.
+  - A transient failure followed by a definitive answer still fails closed.
+
+**M2 (`c8c5296`): a run whose owner loses EDITOR.**
+- **The problem.** When the owner was demoted below EDITOR or removed, RLS refused every write:
+  - the claim returned `busy`;
+  - stop and cancel could not settle the run;
+  - the claim limit never fired, because the claim itself was refused;
+  - the reaper re-dispatched the run every minute.
+
+  `systemStrandedRuns` also had no ordering.
+- **The fix.** `systemSettleIneligibleOwnerRun` is the second, and only other, owner-connection write.
+  - **Terminal only.** It never executes or resumes anything.
+  - **Narrow.** It applies only to the run's recorded owner, only while the run is unfinished and no runner holds a live lease, and only when the owner's rank is below EDITOR. The rank is computed in the same transaction by the policies' own `app_project_rank`.
+  - **Outcome.** A requested cancellation ends the run `CANCELLED`. Otherwise it ends `FAILED` with `policy_denied` and cause `owner_ineligible`, which is what the planner records for the same condition.
+  - **Approvals.** Open approvals are expired, so the approval sweep cannot loop on them.
+  - **Audit and idempotency.** Every change writes an event with `via: 'system'`. The write is idempotent.
+- **Trigger point.** The executor calls it only when a claim is refused. A busy run, or one whose owner is still eligible, is left alone.
+- **No broader permissions.** The demoted owner still cannot cancel or write the run, and an editor still cannot touch another member's run.
+- **Reaper.** `systemStrandedRuns` is ordered by `updated_at`, then `id`, in batches of `REAPER_RUN_BATCH = 50`.
+- **Smoke gate.** It now names the enclosing function of each owner-connection write. Exactly these two are allowed: `systemFailRunRlsUnavailable` and `systemSettleIneligibleOwnerRun`.
+
+**Remaining limitations.**
+- If the database stays unreachable, a run stays unfinished and is re-dispatched once per reaper pass until it recovers. This is intended: nothing is recorded that isn't known.
+- `systemExpiredApprovals` still has no ordering. Approvals of a demoted owner's run are expired by the M2 settle once the run is picked up, so they do not stay in the sweep.
+- A run whose owner is demoted mid-step stops at the next write, because its lease can no longer be renewed. It is settled only once that lease lapses, within about 2 minutes plus one reaper pass.
+- The review's L1–L5 are unchanged.

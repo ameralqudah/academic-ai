@@ -7,7 +7,7 @@
  * the researcher must see what was flagged.
  */
 
-import { normaliseDigits } from '@/lib/statistics-text';
+import { allowedSpellings, checkNumbers } from '@/server/integrity/numbers';
 
 export type GuardrailFlag =
   | 'UNVERIFIED_CITATION'
@@ -41,10 +41,6 @@ const CITATION_PATTERN =
 const EXPERIMENT_CLAIMS =
   /\b(I (?:ran|conducted|performed|collected|analy[sz]ed)|we (?:ran|conducted|performed|collected|analy[sz]ed))\b|\b(قمت بإجراء|أجرينا|قمنا بجمع|حللت البيانات)\b/gi;
 
-/** Precise-looking statistics are the classic hallucination in a results section. */
-const STATISTIC_PATTERN =
-  /\b(?:p\s*[<=>]\s*0?\.\d+|r\s*=\s*-?0?\.\d+|(?:F|t|χ2|chi-square)\s*\(?\d|\d{1,3}(?:\.\d+)?\s?%\s*(?:of|من))/gi;
-
 function sample(match: string): string {
   const trimmed = match.trim();
   return trimmed.length > 120 ? `${trimmed.slice(0, 117)}…` : trimmed;
@@ -75,38 +71,26 @@ export interface InspectOptions {
    * exactly where numbers belong).
    */
   verifiedNumbers?: ReadonlySet<string>;
+  /** Text the user supplied (their instruction, project metadata): numbers in it are theirs, not findings (WS2). */
+  context?: readonly string[];
 }
 
-/** Numeric spellings a stored value may appear as: 0.4567 → "0.457", ".457", "0.46", ".46", "45.67%"… */
-export function numberSpellings(values: Iterable<number>): Set<string> {
-  const out = new Set<string>();
-  for (const value of values) {
-    if (!Number.isFinite(value)) continue;
-    for (const digits of [0, 1, 2, 3, 4]) {
-      for (const candidate of [value, Math.abs(value)]) {
-        const text = candidate.toFixed(digits);
-        out.add(text);
-        out.add(text.replace(/^(-?)0\./, '$1.'));
-      }
-    }
-    if (Math.abs(value) <= 1) for (const digits of [0, 1, 2]) out.add((Math.abs(value) * 100).toFixed(digits));
-  }
-  return out;
-}
+/**
+ * Numeric spellings a stored value may appear as: 0.4567 → "0.457", ".457", "0.46", ".46", "45.67%"…
+ * The canonical implementation is the WS2 guard's (`@/server/integrity/numbers`).
+ */
+export const numberSpellings = allowedSpellings;
 
-/** Decimal numbers and statistic assignments in a text, with the number each carries. */
-const NUMBER_IN_STATISTIC = /(?:(?<![\p{L}\p{N}])(?:p|r|t|F|b|β|B|z|d|M|SD|SE|R2|R²|η²|α|χ2|χ²|OR)\s*(?:\(\s*[\d.,\s]+\))?\s*[=<>≤≥]\s*)?([-−]?\d*[.,]\d+|[-−]?\d+(?:[.,]\d+)?(?=\s?%))/gu;
-
-function untraced(text: string, verified: ReadonlySet<string>, limit = 5): GuardrailFinding[] {
-  const findings: GuardrailFinding[] = [];
-  /* Arabic-Indic digits and the Arabic decimal mark are numbers too (P1-C review). */
-  for (const match of normaliseDigits(text).matchAll(NUMBER_IN_STATISTIC)) {
-    const number = (match[1] ?? '').replace('−', '-').replace(',', '.');
-    if (!number || verified.has(number) || verified.has(number.replace(/^-/, ''))) continue;
-    findings.push({ flag: 'UNTRACED_STATISTIC', sample: sample(match[0]) });
-    if (findings.length >= limit) break;
-  }
-  return findings;
+/*
+ * Statistic-like numbers are found by the canonical numeric-integrity guard
+ * (WS2): the P1-C detector, with labels such as "Table 2.1" and numbered
+ * headings treated as ordinary. This module only turns its findings into
+ * flags; it never rewrites the text.
+ */
+function statisticFindings(text: string, flag: 'FABRICATED_STATISTIC' | 'UNTRACED_STATISTIC', allowed: ReadonlySet<string>, context: readonly string[] | undefined, limit = 5): GuardrailFinding[] {
+  return checkNumbers(text, { mode: 'model', allowed, context })
+    .findings.slice(0, limit)
+    .map((found) => ({ flag, sample: sample(found.text) }));
 }
 
 export function inspectOutput(text: string, options: InspectOptions = {}): GuardrailResult {
@@ -115,10 +99,8 @@ export function inspectOutput(text: string, options: InspectOptions = {}): Guard
     ...collect(text, CITATION_PATTERN, 'UNVERIFIED_CITATION'),
     ...collect(text, URL_PATTERN, 'EXTERNAL_URL', 3),
     ...collect(text, EXPERIMENT_CLAIMS, 'CLAIMED_EXPERIMENT', 3),
-    ...(options.expectsNoStatistics
-      ? collect(text, STATISTIC_PATTERN, 'FABRICATED_STATISTIC', 5)
-      : []),
-    ...(options.verifiedNumbers ? untraced(text, options.verifiedNumbers) : []),
+    ...(options.expectsNoStatistics ? statisticFindings(text, 'FABRICATED_STATISTIC', new Set(), options.context) : []),
+    ...(options.verifiedNumbers ? statisticFindings(text, 'UNTRACED_STATISTIC', options.verifiedNumbers, options.context) : []),
   ];
 
   const flags = [...new Set(findings.map((finding) => finding.flag))];

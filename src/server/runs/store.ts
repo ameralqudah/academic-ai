@@ -478,8 +478,15 @@ export async function systemRunOwner(runId: string): Promise<{ userId: string; p
  *   wait on an approval that no PENDING, unexpired request can end any more
  *   (approved but never dispatched; rejected, expired or cancelled but never
  *   settled). A run waiting on a person, within the TTL, is never picked up.
+ * Oldest first (then by id), in bounded batches, so what is picked up is
+ * deterministic and a long tail cannot starve older runs. Every dispatch of a
+ * picked run moves it (the claim refreshes `updated_at`), settles it, or finds
+ * it leased; a run whose owner can no longer edit is settled
+ * (`systemSettleIneligibleOwnerRun`), so none stays at the head forever.
  */
-export async function systemStrandedRuns(limit = 50): Promise<{ id: string; userId: string }[]> {
+export const REAPER_RUN_BATCH = 50;
+
+export async function systemStrandedRuns(limit = REAPER_RUN_BATCH): Promise<{ id: string; userId: string }[]> {
   const quiet = lt(researchRuns.updatedAt, sql`now() - interval '2 minutes'`);
   const leaseFree = or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`));
   const noOpenRequest = sql`not exists (select 1 from ${runApprovals} where ${runApprovals.runId} = ${researchRuns.id} and ${runApprovals.status} = 'PENDING' and ${runApprovals.expiresAt} > now())`;
@@ -496,15 +503,17 @@ export async function systemStrandedRuns(limit = 50): Promise<{ id: string; user
         ),
       ),
     )
-    .limit(limit);
+    .orderBy(asc(researchRuns.updatedAt), asc(researchRuns.id))
+    .limit(Math.max(1, limit));
 }
 
 /**
- * The ONLY write through the owner connection (P1-D WS1, approved): ends a
+ * One of the two writes through the owner connection (P1-D WS1, approved): ends a
  * run as FAILED with `rls_unavailable` when the database can no longer enforce
  * row-level security for it. Fail-closed: nothing is executed; the run can
- * only stop. The row's triggers still enforce a legal transition. Any other
- * write goes through `withRunScope` (a smoke gate checks this).
+ * only stop. The row's triggers still enforce a legal transition. The other is
+ * `systemSettleIneligibleOwnerRun`; every other write goes through
+ * `withRunScope` (a smoke gate checks this).
  */
 export async function systemFailRunRlsUnavailable(runId: string, message: string): Promise<boolean> {
   return systemDb.transaction(async (tx) => {
@@ -515,6 +524,58 @@ export async function systemFailRunRlsUnavailable(runId: string, message: string
       .returning({ projectId: researchRuns.projectId, userId: researchRuns.userId });
     if (!rows[0]) return false;
     await appendEvent(tx, { runId, projectId: rows[0].projectId, userId: rows[0].userId, type: 'run.failed', data: { to: 'FAILED', stopReason: 'rls_unavailable', via: 'system' } });
+    return true;
+  });
+}
+
+/**
+ * The second owner-connection write (WS1 follow-up M2): settles a run whose
+ * owner can no longer edit its project (demoted below EDITOR, or removed).
+ * Under RLS nobody can move such a run any more — its owner may not write it,
+ * and no one else acts as its owner — so without this it would stay
+ * unfinished and be re-dispatched by the reaper forever.
+ *
+ * Narrow by construction: terminal only (nothing is executed or resumed); only
+ * for `ownerId`, the run's recorded owner; only while the run is unfinished
+ * and no runner holds a live lease; and only when the owner's rank, computed
+ * in this transaction by the same `app_project_rank` the policies use, is
+ * below EDITOR (3). A cancellation already requested ends it CANCELLED;
+ * otherwise FAILED with `policy_denied` (what the planner records for the same
+ * condition). Its open approvals are expired, so none can be decided, used, or
+ * swept again. Every change writes an event marked `via: 'system'`.
+ * Idempotent: a finished run is never matched again.
+ */
+export async function systemSettleIneligibleOwnerRun(runId: string, ownerId: string): Promise<boolean> {
+  return systemDb.transaction(async (tx) => {
+    /* The rank is the owner's: app_project_rank reads the acting user from this transaction-local setting. */
+    await tx.execute(sql`select set_config('app.user_id', ${ownerId}, true)`);
+    const unfinished = inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL']);
+    const leaseFree = or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`));
+    const [run] = await tx
+      .select({ projectId: researchRuns.projectId, status: researchRuns.status, cancelRequestedAt: researchRuns.cancelRequestedAt, rank: sql<number>`app_project_rank(${researchRuns.projectId})` })
+      .from(researchRuns)
+      .where(and(eq(researchRuns.id, runId), eq(researchRuns.userId, ownerId), unfinished, leaseFree))
+      .for('update');
+    if (!run || Number(run.rank) >= 3) return false;
+    const cancelled = run.cancelRequestedAt !== null;
+    const to = cancelled ? 'CANCELLED' : 'FAILED';
+    const stopReason: StopReason = cancelled ? 'cancelled' : 'policy_denied';
+    const message = 'The run’s owner can no longer edit this project.';
+    const rows = await tx
+      .update(researchRuns)
+      .set({ status: to, stopReason, error: { reason: stopReason, cause: 'owner_ineligible', message }, finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null, attempts: 0, updatedAt: new Date() })
+      .where(and(eq(researchRuns.id, runId), eq(researchRuns.userId, ownerId), unfinished, leaseFree))
+      .returning({ id: researchRuns.id });
+    if (!rows[0]) return false;
+    const expired = await tx
+      .update(runApprovals)
+      .set({ status: 'EXPIRED' as ApprovalStatus })
+      .where(and(eq(runApprovals.runId, runId), inArray(runApprovals.status, ['PENDING', 'APPROVED'])))
+      .returning({ id: runApprovals.id, stepId: runApprovals.stepId });
+    for (const approval of expired) {
+      await appendEvent(tx, { runId, projectId: run.projectId, userId: ownerId, stepId: approval.stepId, type: 'approval.expired', data: { approvalId: approval.id, reason: 'owner_ineligible', via: 'system' } });
+    }
+    await appendEvent(tx, { runId, projectId: run.projectId, userId: ownerId, type: `run.${to.toLowerCase()}`, data: { from: run.status, to, stopReason, cause: 'owner_ineligible', ownerRank: Number(run.rank), via: 'system' } });
     return true;
   });
 }

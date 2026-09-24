@@ -83,7 +83,23 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
     }
     throw error;
   }
-  if (claims === null) return 'busy';
+  if (claims === null) {
+    /*
+     * Refused: another runner holds the lease — or the owner can no longer
+     * edit the project, and RLS refuses them every write, forever. The latter
+     * (re-checked in SQL, lease free) is settled terminally so it is not
+     * re-dispatched without end; a busy run is left alone.
+     */
+    const settled = await store.systemSettleIneligibleOwnerRun(runId, userId).catch((error: unknown) => {
+      logger.error('runs.owner.settleFailed', { runId, error: String(error).slice(0, 200) });
+      return false;
+    });
+    if (settled) {
+      logger.warn('runs.owner.ineligible', { runId });
+      return 'ran';
+    }
+    return 'busy';
+  }
   /*
    * The heartbeat renews the lease. A renewal that finds the lease gone, or
    * LEASE_RENEW_MAX_ERRORS failures in a row, means the lease is LOST: the

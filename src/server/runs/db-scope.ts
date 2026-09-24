@@ -192,6 +192,9 @@ export async function withRunScope<T>(userId: string, work: (tx: RunTx) => Promi
  * The system path: the owner connection, which bypasses RLS. Used only by
  * the job runner to learn which user a queued run belongs to (it has no
  * session), and by the reaper to find runs whose worker died. Everything the
- * run then does happens in `withRunScope` as that user.
+ * run then does happens in `withRunScope` as that user. It writes in exactly
+ * two places, both terminal and both in the store (a smoke gate checks this):
+ * the fail-closed `rls_unavailable` stop, and settling a run whose owner can
+ * no longer edit its project.
  */
 export const systemDb = db;

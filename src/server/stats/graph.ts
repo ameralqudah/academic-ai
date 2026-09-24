@@ -18,7 +18,7 @@ import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import { logger } from '@/lib/logger';
 import { db } from '@/server/db';
-import { datasets, datasetVersions, statEstimates, statFigures, statRuns, statSpecs, statTables, type StatEstimate } from '@/server/db/schema';
+import { datasets, datasetVersions, graphEdges, statEstimates, statFigures, statRuns, statSpecs, statTables, type StatEstimate } from '@/server/db/schema';
 import { graphEnabled } from '@/server/graph/access';
 import * as graph from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
@@ -214,7 +214,15 @@ export async function previewReplacement(actor: StatsActor, runId: string, proje
  * manuscript claim built on those runs — becomes not current until re-run.
  * Follows the graph's Impact Report protocol (preview, then acknowledge).
  */
-export async function replaceVersion(actor: StatsActor, projectId: string, oldVersionId: string, newVersionId: string, impactAcknowledged?: string) {
+export async function replaceVersion(
+  actor: StatsActor,
+  projectId: string,
+  oldVersionId: string,
+  newVersionId: string,
+  impactAcknowledged?: string,
+  /** P1-D: the research run and step replacing the data, recorded on the `supersedes` edge (origin `agent`). */
+  provenance?: { runId: string; stepId: string },
+) {
   const [older, newer] = await db.select().from(datasetVersions).where(inArray(datasetVersions.id, [oldVersionId, newVersionId]));
   const oldRow = [older, newer].find((row) => row?.id === oldVersionId);
   const newRow = [older, newer].find((row) => row?.id === newVersionId);
@@ -225,7 +233,25 @@ export async function replaceVersion(actor: StatsActor, projectId: string, oldVe
   const engine: EngineActor = { userId: actor.userId, origin: 'engine' };
   const oldNode = await ensureVersionNode(oldVersionId, engine, projectId);
   const newNode = await ensureVersionNode(newVersionId, engine, projectId);
-  return graph.supersede(projectId, { userId: actor.userId }, oldNode, newNode, impactAcknowledged);
+  const by: graph.Actor = provenance ? { userId: actor.userId, runId: provenance.runId, stepId: provenance.stepId, origin: 'agent' } : { userId: actor.userId };
+  return graph.supersede(projectId, by, oldNode, newNode, impactAcknowledged);
+}
+
+/**
+ * Which version replaced `oldVersionId` in the graph, and which run step
+ * recorded it (null if it has not been replaced). Read-only.
+ */
+export async function replacementOf(projectId: string, oldVersionId: string): Promise<{ newVersionId: string | null; createdByRunId: string | null; createdByStepId: string | null } | null> {
+  const [older] = await db.select({ graphNodeId: datasetVersions.graphNodeId }).from(datasetVersions).where(and(eq(datasetVersions.id, oldVersionId), eq(datasetVersions.projectId, projectId))).limit(1);
+  if (!older?.graphNodeId) return null;
+  const [edge] = await db
+    .select({ srcId: graphEdges.srcId, createdByRunId: graphEdges.createdByRunId, createdByStepId: graphEdges.createdByStepId })
+    .from(graphEdges)
+    .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'supersedes'), eq(graphEdges.dstId, older.graphNodeId)))
+    .limit(1);
+  if (!edge) return null;
+  const [newer] = await db.select({ id: datasetVersions.id }).from(datasetVersions).where(and(eq(datasetVersions.graphNodeId, edge.srcId), eq(datasetVersions.projectId, projectId))).limit(1);
+  return { newVersionId: newer?.id ?? null, createdByRunId: edge.createdByRunId, createdByStepId: edge.createdByStepId };
 }
 
 /**

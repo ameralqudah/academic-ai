@@ -27,17 +27,19 @@ import { forgetPlan, productionDeps, setGatewayForTests } from '@/server/ai/gate
 import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { createGateway } from '@/server/ai/gateway/gateway';
 import { db } from '@/server/db';
-import { aiUsageEvents, graphNodes, projectMembers, researchRuns, runApprovals, runEvents, runSteps, statRuns, statSpecs } from '@/server/db/schema';
+import { aiUsageEvents, datasetVersions as datasetVersionsTable, graphEdges, graphNodes, projectMembers, researchRuns, runApprovals, runEvents, runSteps, statRuns, statSpecs, usageTracking } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
 import { saveUpload } from '@/server/services/dataset.service';
 import { assertRlsEnforced, forgetRlsCheck, withRunScope } from '@/server/runs/db-scope';
+import * as executorModule from '@/server/runs/executor';
 import { advanceRun } from '@/server/runs/executor';
 import { resetLimits } from '@/server/runs/limits';
 import { toolByName } from '@/server/runs/registry';
 import { cancelRun, createRun, decideApproval, getRun, listToolsFor, reapRuns } from '@/server/runs/service';
 import * as store from '@/server/runs/store';
+import { previewVersionReplacement, replacementOf, replaceVersion } from '@/server/stats/graph';
 import { createSpec, startRun } from '@/server/stats/runs';
 import { listVersions, transformVersion } from '@/server/stats/versions';
 
@@ -353,6 +355,316 @@ async function main() {
   resetLimits();
 
   /* ------------------------------------------------------------------ */
+  /* ------------------------------------------------------------------ */
+  section('WS1: waiting on an approval is not active time; authorise and claim are one transaction');
+  const minutes = (n: number) => n * 60_000;
+  /* Item 1: an approval decided after the free tier's 10 active minutes still runs, because the wait is not counted. */
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const slow = (await createRun(me, P, { intent: 'Claim, approved after a long wait.' })).run.id;
+  await drain(slow);
+  const slowParked = await store.readRun(owner, slow);
+  check('parking on an approval starts the approval clock', [slowParked?.status, typeof (slowParked?.spent as Record<string, number>).waitingSince], ['WAITING_APPROVAL', 'number']);
+  await db
+    .update(researchRuns)
+    .set({ startedAt: new Date(Date.now() - minutes(11)), spent: sql`${researchRuns.spent} || jsonb_build_object('waitingSince', (extract(epoch from now()) * 1000)::bigint - ${minutes(11)})` })
+    .where(eq(researchRuns.id, slow));
+  const slowApproval = (await getRun(me, P, slow)).approvals[0]!;
+  await decideApproval(me, P, slow, slowApproval.id, { decision: 'approve', actionHash: slowApproval.actionHash });
+  const slowDone = await drain(slow);
+  const slowSpent = slowDone?.spent as Record<string, number>;
+  check('an approval decided after 11 minutes (free limit: 10 active) still runs the step', [slowDone?.status, slowDone?.stopReason], ['SUCCEEDED', 'completed']);
+  check('… the wait is recorded and the clock is cleared on resume', [(slowSpent.waitedMs ?? 0) >= minutes(11), slowSpent.waitingSince === undefined], [true, true]);
+
+  /* Item 1, negative: active time over the limit still stops the run. */
+  planReply([{ tool: 'createGraphNode', label: 'Note', input: { type: 'note', data: { text: 'late' } }, dependsOn: [] }]);
+  const late = (await createRun(me, P, { intent: 'Too slow while active.' })).run.id;
+  await store.transitionRun(owner, late, ['QUEUED'], 'PLANNING', { startedAt: new Date(Date.now() - minutes(11)) });
+  const latePlan = await runForUser(owner, () => planRun({ userId: owner, projectId: P, intent: 'Too slow while active.', context: {}, role: 'OWNER', tier: 'free', limits: limitsFor('free') }));
+  if (!latePlan.ok) throw new Error('plan');
+  await store.recordPlan(owner, late, { summary: 'x' }, latePlan.plan.steps, latePlan.meta);
+  const lateDone = await drain(late);
+  check('11 minutes of active time (free limit: 10) still stops the run with limit_time', [lateDone?.status, lateDone?.stopReason], ['FAILED', 'limit_time']);
+
+  /* Item 3: the state an older runner could leave (approval consumed, step AUTHORIZED, never claimed) recovers. */
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const halfClaimed = (await createRun(me, P, { intent: 'Claim; the runner dies after consuming the approval.' })).run.id;
+  await drain(halfClaimed);
+  const [hcStep] = await store.readSteps(owner, halfClaimed);
+  const hcApproval = (await store.approvalsForStep(owner, hcStep!.id))[0]!;
+  await store.decideApproval(owner, hcApproval, 'APPROVED');
+  await store.transitionRun(owner, halfClaimed, ['WAITING_APPROVAL'], 'RUNNING', { wait: 'resume' });
+  await withRunScope(owner, async (tx) => {
+    await store.consumeApproval(owner, { ...hcApproval, status: 'APPROVED' }, hcApproval.actionHash, tx);
+    await store.transitionStep(owner, hcStep!, ['WAITING_APPROVAL'], 'AUTHORIZED', { policy: { outcome: 'ALLOW' } }, { tx });
+  });
+  await drain(halfClaimed);
+  const hcView = await getRun(me, P, halfClaimed);
+  check('an authorised-but-unclaimed step whose approval was consumed asks again (not parked forever)', [hcView.run.status, hcView.steps[0]?.status, hcView.approvals.map((a) => a.status).sort()], ['WAITING_APPROVAL', 'WAITING_APPROVAL', ['CONSUMED', 'PENDING']]);
+  check('… and says why it went back to the queue', hcView.events.some((event) => event.type === 'step.requeued'), true);
+  const hcFresh = hcView.approvals.find((a) => a.status === 'PENDING')!;
+  await decideApproval(me, P, halfClaimed, hcFresh.id, { decision: 'approve', actionHash: hcFresh.actionHash });
+  const hcDone = await drain(halfClaimed);
+  check('… approving again completes it, with the claim created once', [hcDone?.status, (await db.select().from(graphNodes).where(eq(graphNodes.createdByStepId, hcStep!.id))).length], ['SUCCEEDED', 1]);
+
+  /* Item 3: an approval request that cannot park its step changes nothing (it used to park the run alone). */
+  const [doneStep] = await store.readSteps(owner, main);
+  const before = (await store.approvalsForStep(owner, doneStep!.id)).length;
+  const refusedPark = await store.requestApproval(owner, doneStep!, { runId: main, stepId: doneStep!.id, projectId: P, actionHash: 'a'.repeat(64), reason: 'test', action: {}, expiresAt: new Date(Date.now() + minutes(5)) });
+  check('an approval request for a step that cannot wait is rolled back entirely', [refusedPark, (await store.approvalsForStep(owner, doneStep!.id)).length - before, (await store.readRun(owner, main))?.status], [null, 0, 'SUCCEEDED']);
+
+  /* Item 3: on the normal path, the approval's consumption and the claim commit together. */
+  const approvedClaimSteps = (await getRun(me, P, slow)).events.filter((event) => ['approval.consumed', 'step.authorized', 'step.running'].includes(event.type)).map((event) => event.type);
+  check('consume, authorise and claim are recorded together, in order', approvedClaimSteps, ['approval.consumed', 'step.authorized', 'step.running']);
+
+  /* ------------------------------------------------------------------ */
+  section('WS1: no run waits forever; RLS failure is recorded; claims are bounded');
+  const parkOnClaim = async (intent: string) => {
+    planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+    const id = (await createRun(me, P, { intent })).run.id;
+    await drain(id);
+    const [waitingStep] = await store.readSteps(owner, id);
+    const [openApproval] = await store.approvalsForStep(owner, waitingStep!.id);
+    return { id, waitingStep: waitingStep!, openApproval: openApproval! };
+  };
+  /* The reaper considers a run only once it has been quiet (2 minutes) with no live lease. */
+  const quiet = (id: string) => db.update(researchRuns).set({ updatedAt: sql`now() - interval '3 minutes'`, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(researchRuns.id, id), sql`${researchRuns.status} not in ('SUCCEEDED', 'FAILED', 'CANCELLED')`)); /* a finished run is immutable (trigger) */
+  const picked = async (id: string) => (await store.systemStrandedRuns(10_000)).some((run) => run.id === id);
+
+  /* Item 2a: the reaper expired the approval, then died before stopping the run. */
+  const e2 = await parkOnClaim('Expired, never settled.');
+  check('claims are counted only while a run does not move (5 advances: 1 parked it, 4 found nothing to do)', (await store.readRun(owner, e2.id))?.attempts, 4);
+  await store.expireApproval(owner, e2.openApproval, 'timed_out');
+  await quiet(e2.id);
+  check('an expired approval left unsettled: the reaper picks the run up', await picked(e2.id), true);
+  const e2Done = await drain(e2.id);
+  check('… and it ends with approval_expired (step skipped)', [e2Done?.status, e2Done?.stopReason, (await store.readSteps(owner, e2.id))[0]?.status], ['FAILED', 'approval_expired', 'SKIPPED']);
+  await finish(e2.id);
+
+  /* Item 2b: a rejection committed, then the process died before stopping the run. */
+  const r2 = await parkOnClaim('Rejected, never settled.');
+  await store.decideApproval(owner, r2.openApproval, 'REJECTED');
+  await quiet(r2.id);
+  check('a rejection left unsettled: the reaper picks the run up', await picked(r2.id), true);
+  const r2Done = await drain(r2.id);
+  check('… and it ends with approval_rejected', [r2Done?.status, r2Done?.stopReason], ['FAILED', 'approval_rejected']);
+  await finish(r2.id);
+
+  /* Item 2c: a cancellation recorded on a waiting run, but its settling failed part-way. */
+  const c2 = await parkOnClaim('Cancelled, never settled.');
+  await store.requestCancel(owner, c2.id, P);
+  await quiet(c2.id);
+  check('a cancellation left unsettled: the reaper picks the run up', await picked(c2.id), true);
+  const c2Done = await drain(c2.id);
+  check('… and it ends CANCELLED, its step cancelled and its approval expired', [c2Done?.status, (await store.readSteps(owner, c2.id))[0]?.status, (await store.approvalsForStep(owner, c2.waitingStep.id))[0]?.status], ['CANCELLED', 'CANCELLED', 'EXPIRED']);
+  await finish(c2.id);
+
+  /* Item 2d: approved, but the dispatch after the decision was lost. */
+  const a2 = await parkOnClaim('Approved, never dispatched.');
+  await store.decideApproval(owner, a2.openApproval, 'APPROVED');
+  await quiet(a2.id);
+  check('an approval that was never dispatched: the reaper picks the run up', await picked(a2.id), true);
+  const a2Done = await drain(a2.id);
+  check('… and the approved step runs to completion', [a2Done?.status, a2Done?.stopReason], ['SUCCEEDED', 'completed']);
+  await finish(a2.id);
+
+  /* Item 2e: the TTL is unchanged: a run waiting on a person, within the TTL, is left alone. */
+  const w2 = await parkOnClaim('Waiting on a person.');
+  await quiet(w2.id);
+  check('a run waiting on an open request within its TTL is not picked up', await picked(w2.id), false);
+  await drain(w2.id);
+  check('… and advancing it keeps it waiting', [(await store.readRun(owner, w2.id))?.status, (await store.approvalsForStep(owner, w2.waitingStep.id))[0]?.status], ['WAITING_APPROVAL', 'PENDING']);
+  await finish(w2.id);
+  /* Past its TTL (without the reaper's own expiry sweep), advancing it settles it as expired. */
+  process.env.RUN_LIMITS = JSON.stringify({ free: { approvalTtlMs: 1 } });
+  resetEnvCache();
+  resetLimits();
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const t2Id = (await createRun(me, P, { intent: 'Waited past the TTL.' })).run.id;
+  await advanceRun(t2Id); /* one advance: parked, not yet looked at again */
+  const [t2Step] = await store.readSteps(owner, t2Id);
+  const t2 = { id: t2Id, waitingStep: t2Step! };
+  check('parked on a request with a 1 ms TTL', (await store.readRun(owner, t2Id))?.status, 'WAITING_APPROVAL');
+  delete process.env.RUN_LIMITS;
+  resetEnvCache();
+  resetLimits();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await quiet(t2.id);
+  check('once its request is past the TTL, the run is picked up', await picked(t2.id), true);
+  const t2Done = await drain(t2.id);
+  check('… and ends with approval_expired, its request expired', [t2Done?.status, t2Done?.stopReason, (await store.approvalsForStep(owner, t2.waitingStep.id))[0]?.status], ['FAILED', 'approval_expired', 'EXPIRED']);
+  await finish(t2.id);
+
+  /* Item 2f: parked with no waiting step (an older runner stopped part-way): resumed and re-decided. */
+  const n2 = await parkOnClaim('Parked without its step.');
+  await store.expireApproval(owner, n2.openApproval, 'test');
+  await store.transitionStep(owner, n2.waitingStep, ['WAITING_APPROVAL'], 'QUEUED', {});
+  await quiet(n2.id);
+  check('a run parked without a waiting step: the reaper picks it up', await picked(n2.id), true);
+  await drain(n2.id);
+  const n2View = await getRun(me, P, n2.id);
+  check('… it resumes and asks again properly (step and run both waiting, a fresh request)', [n2View.run.status, n2View.steps[0]?.status, n2View.approvals.filter((a) => a.status === 'PENDING').length], ['WAITING_APPROVAL', 'WAITING_APPROVAL', 1]);
+  await finish(n2.id);
+  check('the free user’s single active-run slot is free again after all of these', (await createRun(me, P, { intent: 'Slot check.' }).then(async ({ run }) => { await finish(run.id); return 'created'; }).catch((error: unknown) => (error instanceof AppError ? error.code : 'error'))), 'created');
+
+  /* Item 4a: RLS can no longer be enforced for a queued run: it is stopped with that reason, once. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const rlsRun = (await createRun(me, P, { intent: 'RLS breaks after creation.' })).run.id;
+  await db.execute(sql`alter role academic_app bypassrls`);
+  forgetRlsCheck();
+  let rlsOutcome: string;
+  try {
+    rlsOutcome = await advanceRun(rlsRun);
+  } catch (error) {
+    rlsOutcome = `threw:${error instanceof AppError ? error.code : 'error'}`;
+  }
+  await db.execute(sql`alter role academic_app nobypassrls`);
+  forgetRlsCheck();
+  await assertRlsEnforced();
+  const [rlsRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, rlsRun));
+  check('a run whose RLS cannot be enforced is not left QUEUED: FAILED with rls_unavailable', [rlsOutcome, rlsRow?.status, rlsRow?.stopReason], ['ran', 'FAILED', 'rls_unavailable']);
+  check('… recorded as one run.failed event', (await db.select().from(runEvents).where(and(eq(runEvents.runId, rlsRun), eq(runEvents.type, 'run.failed')))).length, 1);
+  check('… nothing executed (no step ran)', (await db.select().from(runSteps).where(eq(runSteps.runId, rlsRun))).length, 0);
+  await quiet(rlsRun);
+  check('… and it is never re-dispatched (no loop)', [await picked(rlsRun), await advanceRun(rlsRun), await advanceRun(rlsRun)], [false, 'skipped', 'skipped']);
+  await finish(({ id: rlsRun }).id);
+
+  /* Item 4b: picked up 20 times without moving: the 21st claim stops it as worker_lost. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const loopRun = (await createRun(me, P, { intent: 'Never moves.' })).run.id;
+  await db.update(researchRuns).set({ attempts: 20 }).where(eq(researchRuns.id, loopRun));
+  const loopOutcome = await advanceRun(loopRun);
+  const [loopRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, loopRun));
+  check('the 21st claim without progress stops the run as worker_lost', [loopOutcome, loopRow?.status, loopRow?.stopReason], ['ran', 'FAILED', 'worker_lost']);
+  await quiet(loopRun);
+  check('… and it is never re-dispatched', await picked(loopRun), false);
+  await finish(({ id: loopRun }).id);
+  check('a run that progresses is not stopped by the claim limit (claims reset on each state change)', a2Done?.attempts, 0);
+
+  /* ------------------------------------------------------------------ */
+  section('WS1: a replacement reports only its own effect, with its run and step; a lost lease stops a stale runner');
+  /* The free test user has used this month's 20 model requests on earlier scenarios' plans: start this section with a fresh quota (test data only). */
+  await db.delete(usageTracking).where(eq(usageTracking.userId, owner));
+  const cleanOf = async (column: string) => (await transformVersion(me, v3.id, { operation: 'clean', actions: [{ kind: 'drop-rows-missing', columns: [column] }] }, P)).version;
+  const replaceTool = toolByName('replaceDatasetVersion')!;
+  const replaceCtx = async (oldId: string, newId: string, runId: string, stepId: string) => ({
+    userId: owner,
+    projectId: P,
+    tier: 'free' as const,
+    execution: 'run' as const,
+    runId,
+    stepId,
+    idempotencyKey: testKey(`replace-${stepId}`),
+    signal: new AbortController().signal,
+    approvedImpactHash: (await previewVersionReplacement(me, P, oldId, newId)).hash,
+  });
+
+  /* Item 5: another actor replaced the version first: the tool must not report success. */
+  const [vOld, vTheirs, vMine] = [await cleanOf('y'), await cleanOf('m'), await cleanOf('x')];
+  await replaceVersion(me, P, vOld.id, vTheirs.id, (await previewVersionReplacement(me, P, vOld.id, vTheirs.id)).hash);
+  const raceCtx = await replaceCtx(vOld.id, vMine.id, main, 'step-race');
+  check('replacing a version someone else already replaced is a conflict, not a success', await outcome(() => replaceTool.execute({ oldVersionId: vOld.id, newVersionId: vMine.id }, raceCtx)), 'CONFLICT:already_replaced');
+  check('… even for the same new version, when the replacement is not this step’s', await outcome(async () => replaceTool.execute({ oldVersionId: vOld.id, newVersionId: vTheirs.id }, { ...raceCtx, stepId: 'step-other' })), 'CONFLICT:already_replaced');
+  check('… and the other actor’s replacement is left as it was', (await replacementOf(P, vOld.id))?.newVersionId, vTheirs.id);
+
+  /* Item 5b + own effect: a replacement made by a run step records that run and step (origin agent). */
+  const [vFrom, vTo] = [await cleanOf('bin'), await cleanOf('group')];
+  planReply([{ tool: 'replaceDatasetVersion', label: 'Replace', input: { oldVersionId: vFrom.id, newVersionId: vTo.id }, dependsOn: [] }]);
+  const replaceRun = (await createRun(me, P, { intent: 'Replace the data.' })).run.id;
+  await drain(replaceRun);
+  const replaceApproval = (await getRun(me, P, replaceRun)).approvals[0]!;
+  await decideApproval(me, P, replaceRun, replaceApproval.id, { decision: 'approve', actionHash: replaceApproval.actionHash });
+  const replaced = await drain(replaceRun);
+  const [replaceStep] = await store.readSteps(owner, replaceRun);
+  const recorded = await replacementOf(P, vFrom.id);
+  check('an approved replacement run succeeds', [replaced?.status, replaceStep?.status, (replaceStep?.output as { output?: { replaced?: boolean } })?.output?.replaced], ['SUCCEEDED', 'SUCCEEDED', true]);
+  check('… its supersedes edge records the executing run and step', [recorded?.newVersionId === vTo.id, recorded?.createdByRunId === replaceRun, recorded?.createdByStepId === replaceStep?.id], [true, true, true]);
+  const [fromNode] = await db.select({ graphNodeId: datasetVersionsTable.graphNodeId }).from(datasetVersionsTable).where(eq(datasetVersionsTable.id, vFrom.id));
+  const [edge] = await db.select().from(graphEdges).where(and(eq(graphEdges.dstId, fromNode!.graphNodeId!), eq(graphEdges.rel, 'supersedes')));
+  check('… with origin agent (not user)', edge?.origin, 'agent');
+  /* Already superseded: the graph refuses before it looks at the acknowledgement, so no impact hash is needed. */
+  const replayCtx = (stepId: string) => ({ userId: owner, projectId: P, tier: 'free' as const, execution: 'run' as const, runId: replaceRun, stepId, idempotencyKey: testKey(`replay-${stepId}`), signal: new AbortController().signal, approvedImpactHash: null });
+  const ownReplay = await replaceTool.execute({ oldVersionId: vFrom.id, newVersionId: vTo.id }, replayCtx(replaceStep!.id));
+  check('re-executing the same step finds its own replacement (success, nothing new)', [(ownReplay.output as { replaced: boolean; affected: number }).replaced, (ownReplay.output as { affected: number }).affected], [true, 0]);
+  check('… but another step replaying it gets a conflict', await outcome(async () => replaceTool.execute({ oldVersionId: vFrom.id, newVersionId: vTo.id }, replayCtx('step-impostor'))), 'CONFLICT:already_replaced');
+
+  /* Item 6a: writes are fenced on the lease: a runner whose lease was taken cannot change the run. */
+  const holder = (store as unknown as { asLeaseHolder?: <T>(runId: string, owner: string, work: () => Promise<T>) => Promise<T> }).asLeaseHolder ?? (<T>(_r: string, _o: string, work: () => Promise<T>) => work());
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const fenced = (await createRun(me, P, { intent: 'Lease fencing.' })).run.id;
+  await store.claimRunLease(owner, fenced, 'worker-A');
+  await db.update(researchRuns).set({ leaseOwner: 'worker-B', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, fenced));
+  const staleMove = await holder(fenced, 'worker-A', () => store.transitionRun(owner, fenced, ['QUEUED'], 'PLANNING', { startedAt: new Date() }));
+  await holder(fenced, 'worker-A', () => store.patchRun(owner, fenced, { spent: { steps: 99 } }));
+  const afterStale = await store.readRun(owner, fenced);
+  check('a stale runner (lease taken) cannot move the run', [staleMove, afterStale?.status], [false, 'QUEUED']);
+  check('… nor change its counters', (afterStale?.spent as Record<string, number>).steps ?? null, null);
+  check('… while the runner that holds the lease can', await holder(fenced, 'worker-B', () => store.transitionRun(owner, fenced, ['QUEUED'], 'PLANNING', { startedAt: new Date() })), true);
+  await db.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, fenced));
+  await finish(fenced);
+  await drain(fenced); /* a PLANNING run's cancellation is settled by its next runner */
+  check('… and the fenced run is then cancelled normally', (await store.readRun(owner, fenced))?.status, 'CANCELLED');
+
+  /* Item 6b: the lease is taken while a step runs: the first runner stops, writes nothing, and does not displace the second. */
+  const setHeartbeat = (executorModule as unknown as { setRunHeartbeatForTests?: (ms: number | null) => void }).setRunHeartbeatForTests ?? (() => undefined);
+  setHeartbeat(150);
+  planReply([{ tool: 'extractEvidence', label: 'Evidence', input: { question: 'What does the text say about x?', text: 'The study found that x predicts y in the survey data, with a modest effect.' }, dependsOn: [] }]);
+  fake.push({ reply: { text: JSON.stringify({ evidence: [{ statement: 'x predicts y', quote: 'x predicts y' }] }) }, delayMs: 4_000 });
+  const stolen = (await createRun(me, P, { intent: 'Lease stolen mid-step.' })).run.id;
+  const firstRunner = advanceRun(stolen);
+  let running = false;
+  for (let i = 0; i < 60 && !running; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    running = (await store.readSteps(owner, stolen))[0]?.status === 'RUNNING';
+  }
+  await db.update(researchRuns).set({ leaseOwner: 'worker-B', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, stolen));
+  const startedWaiting = Date.now();
+  const firstOutcome = await firstRunner;
+  const stoppedAfter = Date.now() - startedWaiting;
+  const [afterSteal] = await store.readSteps(owner, stolen);
+  const [stolenRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, stolen));
+  check('the step was running when the lease was taken', running, true);
+  check('the first runner stops soon after losing the lease (it does not wait for the tool)', [firstOutcome, stoppedAfter < 3_000], ['ran', true]);
+  check('… it settles nothing: the step is still RUNNING, the run still RUNNING', [afterSteal?.status, stolenRow?.status], ['RUNNING', 'RUNNING']);
+  check('… and it does not displace the runner that took over (the lease is still theirs)', stolenRow?.leaseOwner, 'worker-B');
+  setHeartbeat(null);
+  /* The second runner goes away too; the next one recovers the step (retried with the same key) and completes. */
+  await db.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, stolen));
+  fake.push({ reply: { text: JSON.stringify({ evidence: [{ statement: 'x predicts y', quote: 'x predicts y' }] }) } });
+  const recoveredRun = await drain(stolen);
+  await new Promise((resolve) => setTimeout(resolve, 4_500)); /* let the first runner's abandoned tool call finish: it must not write */
+  check('a later runner completes it', recoveredRun?.status, 'SUCCEEDED');
+  check('… with exactly one step.succeeded (the stale runner never settled it)', (await db.select().from(runEvents).where(and(eq(runEvents.runId, stolen), eq(runEvents.type, 'step.succeeded')))).length, 1);
+
+  /* ------------------------------------------------------------------ */
+  section('WS1: only the run owner, or a project OWNER, can cancel or update a run');
+  /* Item 9, service. QUEUED runs are cancelled at once (no model call is made). */
+  const ownersRun = (await createRun(me, P, { intent: 'The owner’s run.' })).run.id;
+  check('an EDITOR cannot cancel another member’s run', await outcome(() => cancelRun({ userId: editor }, P, ownersRun)), 'FORBIDDEN');
+  check('… and the run is untouched (no cancel request recorded)', [(await store.readRun(owner, ownersRun))?.status, (await store.readRun(owner, ownersRun))?.cancelRequestedAt ?? null], ['QUEUED', null]);
+  check('a stranger (another project) cannot cancel it either', await outcome(() => cancelRun({ userId: stranger }, P, ownersRun)), 'NOT_FOUND');
+  check('the run owner cancels their own run', (await cancelRun(me, P, ownersRun)).status, 'CANCELLED');
+  const editorsRun = (await createRun({ userId: editor }, P, { intent: 'The editor’s own run.' })).run.id;
+  check('an EDITOR cancels their own run', (await cancelRun({ userId: editor }, P, editorsRun)).status, 'CANCELLED');
+  const editorsSecond = (await createRun({ userId: editor }, P, { intent: 'The editor’s second run.' })).run.id;
+  check('a project OWNER cancels another member’s run', (await cancelRun(me, P, editorsSecond)).status, 'CANCELLED');
+
+  /* Item 9, database: the RLS update policy says the same, whatever the application asks. */
+  const ownerRlsRun = (await createRun(me, P, { intent: 'RLS: owner’s run.' })).run.id;
+  const editorRlsRun = (await createRun({ userId: editor }, P, { intent: 'RLS: editor’s run.' })).run.id;
+  const touch = (as: string | null, runId: string) => asApp(as, (tx) => tx.update(researchRuns).set({ updatedAt: new Date() }).where(eq(researchRuns.id, runId)).returning({ id: researchRuns.id })).then((rows) => rows.length);
+  check('RLS: an EDITOR cannot update another member’s run', await touch(editor, ownerRlsRun), 0);
+  check('RLS: an EDITOR can update their own run', await touch(editor, editorRlsRun), 1);
+  check('RLS: a project OWNER can update another member’s run', await touch(owner, editorRlsRun), 1);
+  check('RLS: the run owner can update their own run', await touch(owner, ownerRlsRun), 1);
+  check('RLS: a viewer, a stranger and no user update nothing', [await touch(viewer, ownerRlsRun), await touch(stranger, ownerRlsRun), await touch(null, ownerRlsRun)], [0, 0, 0]);
+  check('RLS: deleting a run is still refused', await refused(() => asApp(owner, (tx) => tx.delete(researchRuns).where(eq(researchRuns.id, ownerRlsRun)))), true);
+  check('RLS: truncating the run tables is still refused', await refused(() => db.execute(sql`truncate research_runs cascade`)), true);
+  const [updatePolicy] = (await db.execute(sql`select qual, with_check from pg_policies where tablename = 'research_runs' and policyname = 'research_runs_update'`)) as unknown as { qual: string; with_check: string }[];
+  check('the update policy is bound to the run’s owner (or a project OWNER), in USING and WITH CHECK', [/user_id\s*=\s*app_current_user_id\(\)/.test(updatePolicy?.qual ?? ''), /user_id\s*=\s*app_current_user_id\(\)/.test(updatePolicy?.with_check ?? ''), /\b4\b/.test(updatePolicy?.qual ?? '')], [true, true, true]);
+  check('RLS is still enforced for the run role (no bypass)', await outcome(async () => { forgetRlsCheck(); await assertRlsEnforced(); return 'ok'; }), 'ok');
+  await cancelRun(me, P, ownerRlsRun);
+  await cancelRun({ userId: editor }, P, editorRlsRun);
+
   section('Flags');
   process.env.FF_RUNS = 'false';
   resetEnvCache();

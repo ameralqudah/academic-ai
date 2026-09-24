@@ -7,7 +7,9 @@
  * it applied, and writes a run event in the same transaction.
  */
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { researchRuns, runApprovals, runEvents, runSteps, type ResearchRun, type RunApproval, type RunEvent, type RunStep } from '@/server/db/schema';
 
@@ -41,6 +43,35 @@ export async function appendEvent(tx: RunTx, event: { runId: string; projectId: 
     type: event.type.slice(0, 40),
     data: boundedData(event.data ?? {}),
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Lease fencing                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * While a runner holds a run's lease, every run and step write it makes is
+ * fenced on that lease: it applies only while `research_runs.lease_owner` is
+ * still this runner. A stale runner (its lease lapsed and another runner took
+ * the run) therefore cannot change the run or its steps. Writes outside a
+ * runner (the service: create, cancel, decide; the reaper) are not fenced.
+ */
+const leaseHolder = new AsyncLocalStorage<{ runId: string; owner: string }>();
+
+export function asLeaseHolder<T>(runId: string, owner: string, work: () => Promise<T>): Promise<T> {
+  return leaseHolder.run({ runId, owner }, work);
+}
+
+function runLeaseFence(runId: string) {
+  const held = leaseHolder.getStore();
+  return held && held.runId === runId ? eq(researchRuns.leaseOwner, held.owner) : undefined;
+}
+
+/** For a step write: its run must still be leased by this runner. Without `runId`, applies to whatever run the runner holds. */
+function stepLeaseFence(runId?: string) {
+  const held = leaseHolder.getStore();
+  if (!held || (runId && held.runId !== runId)) return undefined;
+  return sql`exists (select 1 from ${researchRuns} where ${researchRuns.id} = ${runSteps.runId} and ${researchRuns.leaseOwner} = ${held.owner})`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -123,6 +154,23 @@ export interface RunPatch {
   error?: Record<string, unknown> | null;
   replans?: number;
   startedAt?: Date;
+  /**
+   * The approval clock, kept in `spent` by the database's clock: `park` starts
+   * a wait (`waitingSince`), `resume` adds it to `waitedMs` and clears it.
+   */
+  wait?: 'park' | 'resume';
+}
+
+/** `spent` is merged, never replaced, so a stale snapshot cannot drop a counter written since. */
+function spentSet(patch: Pick<RunPatch, 'spent' | 'wait'>) {
+  const nowMs = sql`(extract(epoch from now()) * 1000)::bigint`;
+  let expression = sql`${researchRuns.spent}`;
+  if (patch.spent) expression = sql`(${expression} || ${JSON.stringify(patch.spent)}::jsonb)`;
+  if (patch.wait === 'park') expression = sql`(${expression} || jsonb_build_object('waitingSince', ${nowMs}))`;
+  if (patch.wait === 'resume') {
+    expression = sql`((${expression} - 'waitingSince') || jsonb_build_object('waitedMs', coalesce((${researchRuns.spent}->>'waitedMs')::bigint, 0) + greatest(0, ${nowMs} - coalesce((${researchRuns.spent}->>'waitingSince')::bigint, ${nowMs}))))`;
+  }
+  return patch.spent || patch.wait ? { spent: expression } : {};
 }
 
 /**
@@ -138,6 +186,7 @@ export async function transitionRun(
   event?: { type: string; data?: Record<string, unknown> },
   tx?: RunTx,
 ): Promise<boolean> {
+  const { spent, wait, ...rest } = patch;
   const work = async (t: RunTx) => {
     const rows = await t
       .update(researchRuns)
@@ -145,9 +194,12 @@ export async function transitionRun(
         status: to,
         updatedAt: new Date(),
         ...(TERMINAL_RUN.has(to) ? { finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null } : {}),
-        ...patch,
+        ...rest,
+        ...spentSet({ spent, wait }),
+        /* The run moved: claims are counted again from here (see claimRunLease). */
+        attempts: 0,
       })
-      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from)))
+      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from), runLeaseFence(runId)))
       .returning({ id: researchRuns.id, projectId: researchRuns.projectId });
     if (rows.length === 0) return false;
     await appendEvent(t, { runId, projectId: rows[0]!.projectId, userId, type: event?.type ?? `run.${to.toLowerCase()}`, data: { from, to, ...(patch.stopReason ? { stopReason: patch.stopReason } : {}), ...(event?.data ?? {}) } });
@@ -159,7 +211,8 @@ export async function transitionRun(
 /** Updates progress fields without changing status (spent, planner metadata). */
 export async function patchRun(userId: string, runId: string, patch: Pick<RunPatch, 'spent' | 'planner'>): Promise<void> {
   await withRunScope(userId, async (tx) => {
-    await tx.update(researchRuns).set({ ...patch, updatedAt: new Date() }).where(eq(researchRuns.id, runId));
+    const { spent, ...rest } = patch;
+    await tx.update(researchRuns).set({ ...rest, ...spentSet({ spent }), updatedAt: new Date() }).where(and(eq(researchRuns.id, runId), runLeaseFence(runId)));
   });
 }
 
@@ -181,16 +234,26 @@ export async function requestCancel(userId: string, runId: string, projectId: st
 
 export const RUN_LEASE_SECONDS = 120;
 
-export async function claimRunLease(userId: string, runId: string, owner: string): Promise<boolean> {
+/**
+ * Claims a run's lease. Returns the number of claims since the run last
+ * changed state (`attempts` is reset by every transition), or null when
+ * another runner holds it. A run claimed again and again without moving is
+ * stopped by the executor (MAX_RUN_CLAIMS), so a run the engine cannot
+ * advance is never re-dispatched forever.
+ */
+export async function claimRunLease(userId: string, runId: string, owner: string): Promise<number | null> {
   return withRunScope(userId, async (tx) => {
     const rows = await tx
       .update(researchRuns)
       .set({ leaseOwner: owner, leaseExpiresAt: sql`now() + make_interval(secs => ${RUN_LEASE_SECONDS})`, attempts: sql`${researchRuns.attempts} + 1`, updatedAt: new Date() })
       .where(and(eq(researchRuns.id, runId), or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`), eq(researchRuns.leaseOwner, owner))))
-      .returning({ id: researchRuns.id });
-    return rows.length > 0;
+      .returning({ attempts: researchRuns.attempts });
+    return rows[0]?.attempts ?? null;
   });
 }
+
+/** Claims without a state change after which a run is stopped as `worker_lost`. */
+export const MAX_RUN_CLAIMS = 20;
 
 export async function renewRunLease(userId: string, runId: string, owner: string): Promise<boolean> {
   return withRunScope(userId, async (tx) => {
@@ -271,7 +334,7 @@ export async function transitionStep(
     const rows = await tx
       .update(runSteps)
       .set({ status: to, updatedAt: new Date(), ...patch })
-      .where(and(eq(runSteps.id, step.id), inArray(runSteps.status, from), ...(options.claimToken ? [eq(runSteps.claimToken, options.claimToken)] : [])))
+      .where(and(eq(runSteps.id, step.id), inArray(runSteps.status, from), ...(options.claimToken ? [eq(runSteps.claimToken, options.claimToken)] : []), stepLeaseFence(step.runId)))
       .returning({ id: runSteps.id });
     if (rows.length === 0) return false;
     const [run] = await tx.select({ projectId: researchRuns.projectId }).from(researchRuns).where(eq(researchRuns.id, step.runId)).limit(1);
@@ -284,7 +347,7 @@ export async function transitionStep(
 /** Marks a failed step as final (no attempts left): a permanent error, or the run was cancelled. */
 export async function exhaustAttempts(userId: string, stepId: string): Promise<void> {
   await withRunScope(userId, async (tx) => {
-    await tx.update(runSteps).set({ attempts: sql`${runSteps.maxAttempts}`, updatedAt: new Date() }).where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'FAILED')));
+    await tx.update(runSteps).set({ attempts: sql`${runSteps.maxAttempts}`, updatedAt: new Date() }).where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'FAILED'), stepLeaseFence()));
   });
 }
 
@@ -307,7 +370,7 @@ export interface NewApproval {
  * transaction. An open request with the same hash is reused; one with a
  * different hash (the action changed) is expired first.
  */
-export async function requestApproval(userId: string, step: RunStep, approval: NewApproval): Promise<RunApproval> {
+export async function requestApproval(userId: string, step: RunStep, approval: NewApproval): Promise<RunApproval | null> {
   return withRunScope(userId, async (tx) => {
     const open = await tx.select().from(runApprovals).where(and(eq(runApprovals.stepId, step.id), inArray(runApprovals.status, ['PENDING', 'APPROVED'])));
     let current = open.find((row) => row.actionHash === approval.actionHash && row.expiresAt > new Date());
@@ -322,11 +385,18 @@ export async function requestApproval(userId: string, step: RunStep, approval: N
       current = row!;
       await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: step.id, type: 'approval.requested', data: { approvalId: current.id, reason: approval.reason, actionHash: approval.actionHash } });
     }
-    await transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL'], 'WAITING_APPROVAL', { approvalId: current.id }, { tx, event: { type: 'step.waiting_approval', data: { approvalId: current.id } } });
-    await transitionRun(userId, approval.runId, ['RUNNING'], 'WAITING_APPROVAL', {}, { type: 'run.waiting_approval', data: { approvalId: current.id, stepId: step.id } }, tx);
+    /* Both or neither: a run parked without its step would wait on an approval no step can use. */
+    if (!(await transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL'], 'WAITING_APPROVAL', { approvalId: current.id }, { tx, event: { type: 'step.waiting_approval', data: { approvalId: current.id } } }))) throw new NotParked();
+    if (!(await transitionRun(userId, approval.runId, ['RUNNING'], 'WAITING_APPROVAL', { wait: 'park' }, { type: 'run.waiting_approval', data: { approvalId: current.id, stepId: step.id } }, tx))) throw new NotParked();
     return current;
+  }).catch((error: unknown) => {
+    if (error instanceof NotParked) return null;
+    throw error;
   });
 }
+
+/** Rolls back an approval request whose step or run is no longer where it was expected. */
+class NotParked extends Error {}
 
 export async function readApproval(userId: string, approvalId: string): Promise<RunApproval | null> {
   return withRunScope(userId, async (tx) => {
@@ -400,18 +470,53 @@ export async function systemRunOwner(runId: string): Promise<{ userId: string; p
   return row ?? null;
 }
 
-/** Runs the reaper should pick up: unfinished, not waiting on a person, lease lapsed or never taken for a while. */
+/**
+ * Runs the reaper should pick up (a read of the owner connection; the run is
+ * then advanced in `withRunScope` as its owner). Unfinished, no live lease, and:
+ * - a runner disappeared (lease lapsed, or never taken for a while); or
+ * - quiet for 2 minutes and needing attention: a cancellation to finish, or a
+ *   wait on an approval that no PENDING, unexpired request can end any more
+ *   (approved but never dispatched; rejected, expired or cancelled but never
+ *   settled). A run waiting on a person, within the TTL, is never picked up.
+ */
 export async function systemStrandedRuns(limit = 50): Promise<{ id: string; userId: string }[]> {
+  const quiet = lt(researchRuns.updatedAt, sql`now() - interval '2 minutes'`);
+  const leaseFree = or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`));
+  const noOpenRequest = sql`not exists (select 1 from ${runApprovals} where ${runApprovals.runId} = ${researchRuns.id} and ${runApprovals.status} = 'PENDING' and ${runApprovals.expiresAt} > now())`;
   return systemDb
     .select({ id: researchRuns.id, userId: researchRuns.userId })
     .from(researchRuns)
     .where(
       and(
-        inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING']),
-        or(lt(researchRuns.leaseExpiresAt, sql`now()`), and(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.updatedAt, sql`now() - interval '2 minutes'`))),
+        inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL']),
+        leaseFree,
+        or(
+          and(inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING']), or(lt(researchRuns.leaseExpiresAt, sql`now()`), and(isNull(researchRuns.leaseExpiresAt), quiet))),
+          and(quiet, or(isNotNull(researchRuns.cancelRequestedAt), and(eq(researchRuns.status, 'WAITING_APPROVAL'), noOpenRequest))),
+        ),
       ),
     )
     .limit(limit);
+}
+
+/**
+ * The ONLY write through the owner connection (P1-D WS1, approved): ends a
+ * run as FAILED with `rls_unavailable` when the database can no longer enforce
+ * row-level security for it. Fail-closed: nothing is executed; the run can
+ * only stop. The row's triggers still enforce a legal transition. Any other
+ * write goes through `withRunScope` (a smoke gate checks this).
+ */
+export async function systemFailRunRlsUnavailable(runId: string, message: string): Promise<boolean> {
+  return systemDb.transaction(async (tx) => {
+    const rows = await tx
+      .update(researchRuns)
+      .set({ status: 'FAILED', stopReason: 'rls_unavailable', error: { reason: 'rls_unavailable', message: message.slice(0, 300) }, finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null, updatedAt: new Date() })
+      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL'])))
+      .returning({ projectId: researchRuns.projectId, userId: researchRuns.userId });
+    if (!rows[0]) return false;
+    await appendEvent(tx, { runId, projectId: rows[0].projectId, userId: rows[0].userId, type: 'run.failed', data: { to: 'FAILED', stopReason: 'rls_unavailable', via: 'system' } });
+    return true;
+  });
 }
 
 /** Open approvals past their expiry, with the run owner to act as. */

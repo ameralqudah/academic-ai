@@ -12,7 +12,8 @@
 import './support/unit-env';
 
 import { actionHash, inputHash, stepIdempotencyKey } from '@/server/runs/approvals';
-import { DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
+import { createLeaseKeeper, LEASE_RENEW_MAX_ERRORS } from '@/server/runs/lease';
+import { activeElapsedMs, DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
 import { decide, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
 import { resolveReferences, toolsFor, validatePlan } from '@/server/runs/planner';
 import { gatewayToolsFor, listTools, TOOL_NAMES, toolByName } from '@/server/runs/registry';
@@ -66,6 +67,12 @@ async function main() {
   check('… nested runs stay impossible', refuses('{"free":{"maxDepth":1}}'), 'refused');
   check('… a step stays one tool call', refuses('{"free":{"maxToolCallsPerStep":2}}'), 'refused');
   check('the limits are frozen', Object.isFrozen(DEFAULT_RUN_LIMITS.free), true);
+  const t0 = 1_800_000_000_000;
+  const min = 60_000;
+  check('active time is time since the start when nothing waited', activeElapsedMs(new Date(t0), {}, t0 + 5 * min), 5 * min);
+  check('… minus time spent waiting on approvals (waitedMs)', activeElapsedMs(new Date(t0), { waitedMs: 20 * min }, t0 + 25 * min), 5 * min);
+  check('… minus the wait still in progress (waitingSince)', activeElapsedMs(new Date(t0), { waitingSince: t0 + 2 * min }, t0 + 30 * min), 2 * min);
+  check('… and never negative, nor counted before a start', [activeElapsedMs(new Date(t0), { waitedMs: 99 * min }, t0 + min), activeElapsedMs(null, {}, t0)], [0, 0]);
 
   section('State machines (the same tables as the database triggers)');
   check('a run plans, runs, waits for approval and finishes', [canRun('QUEUED', 'PLANNING'), canRun('PLANNING', 'RUNNING'), canRun('RUNNING', 'WAITING_APPROVAL'), canRun('WAITING_APPROVAL', 'QUEUED'), canRun('RUNNING', 'SUCCEEDED')], [true, true, true, true, true]);
@@ -75,6 +82,34 @@ async function main() {
   check('a failed step may be retried', canStep('FAILED', 'QUEUED'), true);
   check('an approval is single use', [canApproval('APPROVED', 'CONSUMED'), canApproval('CONSUMED', 'APPROVED'), canApproval('REJECTED', 'APPROVED'), canApproval('EXPIRED', 'APPROVED')], [true, false, false, false]);
   check('an illegal move throws', (() => { try { assertRun('CANCELLED', 'SUCCEEDED'); return 'moved'; } catch (error) { return error instanceof IllegalTransitionError ? 'refused' : 'other'; } })(), 'refused');
+
+  section('Lease keeper: a lost lease stops the runner');
+  {
+    const scripted = (answers: Array<boolean | 'error'>) => {
+      let calls = 0;
+      const keeper = createLeaseKeeper(async () => {
+        const answer = answers[calls++] ?? true;
+        if (answer === 'error') throw new Error('db down');
+        return answer;
+      });
+      return { keeper, calls: () => calls };
+    };
+    const taken = scripted([false]);
+    await taken.keeper.tick();
+    check('a renewal that finds the lease taken loses it at once (and aborts the signal)', [taken.keeper.lost, taken.keeper.reason, taken.keeper.signal.aborted], [true, 'taken', true]);
+    const oneError = scripted(['error']);
+    await oneError.keeper.tick();
+    check('one failed renewal is tolerated', oneError.keeper.lost, false);
+    const twoErrors = scripted(['error', 'error']);
+    await twoErrors.keeper.tick();
+    await twoErrors.keeper.tick();
+    check(`${LEASE_RENEW_MAX_ERRORS} failed renewals in a row lose the lease`, [twoErrors.keeper.lost, twoErrors.keeper.reason, twoErrors.keeper.signal.aborted], [true, 'renew_failed', true]);
+    const recovered = scripted(['error', true, 'error', true]);
+    for (let i = 0; i < 4; i += 1) await recovered.keeper.tick();
+    check('a successful renewal resets the error count', recovered.keeper.lost, false);
+    await taken.keeper.tick();
+    check('once lost, the keeper never renews again', taken.calls(), 1);
+  }
 
   section('Hashes: approvals and idempotency bound to the exact action');
   const base = { projectId: 'p', runId: 'r', stepId: 's', userId: 'u', tool: 'replaceDatasetVersion', toolVersion: '1.0.0', inputHash: inputHash({ oldVersionId: 'a', newVersionId: 'b' }), reason: 'replaces_data', targets: { oldContentHash: 'h1' }, impactHash: 'i1' };
@@ -119,6 +154,8 @@ async function main() {
   check('a resource of another project is denied (forged id)', await outcome(request(), deps({ resource: async () => false })), ['DENY', 'auth.resources']);
   check('a tier without the entitlement is denied', await outcome(request(), deps({ tier: async () => 'enterprise' as never, limits: () => DEFAULT_RUN_LIMITS.paid })), ['DENY', 'entitlement']);
   check('past the run’s time limit is denied', await outcome(request({ run: { ...run, startedAt: new Date(now.getTime() - 31 * 60_000) } })), ['DENY', 'limits.run']);
+  check('time parked on an approval does not count against the run’s time limit', await outcome(request({ run: { ...run, startedAt: new Date(now.getTime() - 31 * 60_000), waitedMs: 25 * 60_000 } })), ['ALLOW', null]);
+  check('… but active time beyond the limit is still denied after a wait', await outcome(request({ run: { ...run, startedAt: new Date(now.getTime() - 60 * 60_000), waitedMs: 25 * 60_000 } })), ['DENY', 'limits.run']);
   check('past the run’s token budget (metered) is denied', await outcome(request(), deps({ runUsage: async () => ({ tokens: 400_000, costMicroUsd: 0 }) })), ['DENY', 'limits.run']);
   check('past the run’s cost budget (metered) is denied', await outcome(request(), deps({ runUsage: async () => ({ tokens: 0, costMicroUsd: 2_000_001 }) })), ['DENY', 'limits.run']);
   check('a model tool whose estimate would pass the budget is denied before it runs', await outcome(request({ toolName: 'extractEvidence', input: { question: 'q?', text: 'x'.repeat(60) } }), deps({ runUsage: async () => ({ tokens: 399_000, costMicroUsd: 0 }) })), ['DENY', 'limits.run']);

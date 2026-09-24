@@ -101,7 +101,13 @@ export async function listRuns(actor: RunActor, projectId: string): Promise<Rese
 /** Requests cancellation (monotonic). A run not yet executing a step is cancelled at once. */
 export async function cancelRun(actor: RunActor, projectId: string, runId: string): Promise<ResearchRun> {
   assertEnabled();
-  await role(projectId, actor.userId, 'EDITOR');
+  const current = await role(projectId, actor.userId, 'EDITOR');
+  /* Only the run's owner (still an editor) or a project owner may cancel it (RLS: research_runs_update, migration 0016). */
+  const existing = await store.readRun(actor.userId, runId, projectId);
+  if (!existing) throw new AppError('NOT_FOUND', 'The run was not found.', 'لم يُعثر على العملية.');
+  if (existing.userId !== actor.userId && current !== 'OWNER') {
+    throw new AppError('FORBIDDEN', 'Only the person who started the run, or a project owner, can cancel it.', 'يلغي العمليةَ صاحبُها أو مالك المشروع فقط.');
+  }
   const run = await store.requestCancel(actor.userId, runId, projectId);
   if (!run) throw new AppError('NOT_FOUND', 'The run was not found.', 'لم يُعثر على العملية.');
   if (run.cancelRequestedAt && (run.status === 'QUEUED' || run.status === 'WAITING_APPROVAL')) {

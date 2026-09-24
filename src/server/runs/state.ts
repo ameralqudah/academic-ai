@@ -1,10 +1,15 @@
 /**
  * The run, step and approval state machines (P1-D).
  *
- * The same tables are enforced by the database (migration 0014 triggers);
- * the service checks them first so an illegal move fails with a clear error
- * instead of a database exception, and every write is additionally
- * conditional on the state it expects (`UPDATE … WHERE status = from`).
+ * These tables are the reference definition. They are ENFORCED by the
+ * database (the migration 0014 triggers), and every store write is
+ * conditional on the state it expects (`UPDATE … WHERE status = from`), so an
+ * illegal or stale move simply does not apply. The `assert*` / `can*`
+ * helpers below are not called on the write path (they are exercised by the
+ * unit tests, `scripts/runs.ts`); the store relies on the
+ * triggers, and on a few same-state updates (e.g. QUEUED→QUEUED to record the
+ * validated input) that the triggers allow because only a status change is
+ * checked.
  */
 
 export const RUN_STATUSES = ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const;

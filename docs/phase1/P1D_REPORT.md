@@ -1,6 +1,6 @@
 # P1-D report: research run engine, tool registry, policy engine, approvals, RLS on run paths
 
-**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1D_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Base:** `main` at `003d95b` · **Status:** implemented under the approval conditions below. The full regression is green locally (§9). **Merged into `main` via [#33](https://github.com/ameralqudah/academic-ai/pull/33) (merge commit `5f18aaa`; PR head `a6fa42d`, all CI checks green). `FF_RUNS` remains off (default `false`). P1-E has not been started. **Verification closed (2026-09-24) for security and deployment:** Neon RLS and fail-closed behaviour verified; production migrations 0014/0015 applied and the read-only RLS probe passed; `FF_RUNS` and `FF_GRAPH` are absent in production (off). **Remaining gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch, covering `postgres-js` through the Neon pooled host on PostgreSQL 18 (§11.1; `P1D_NEON_VERIFICATION.md` §6).**
+**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1D_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Base:** `main` at `003d95b` · **Status:** implemented under the approval conditions below. The full regression is green locally (§9). **Merged into `main` via [#33](https://github.com/ameralqudah/academic-ai/pull/33) (merge commit `5f18aaa`; PR head `a6fa42d`, all CI checks green). `FF_RUNS` remains off (default `false`). P1-E has not been started. **Verification closed (2026-09-24) for security and deployment:** Neon RLS and fail-closed behaviour verified; production migrations 0014/0015 applied and the read-only RLS probe passed; `FF_RUNS` and `FF_GRAPH` are absent in production (off). **Remaining gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch, covering `postgres-js` through the Neon pooled host on PostgreSQL 18 (§11.1; `P1D_NEON_VERIFICATION.md` §6).** **WS1 run-engine hardening (after the merge) is implemented on the same branch in groups 1–4 (§12), not yet merged; `FF_RUNS` stays off and the Neon app-level gate is still open.**
 
 **Approval conditions this was built under** (from the approval of the plan):
 
@@ -39,6 +39,11 @@ All of it is behind `FF_GRAPH` + `FF_RUNS`. It also needs a queue-backed job run
 | `b63f7f5` | Rejection settling fix, CI storage env for `test:runs:db`, nested-depth smoke gate, this report, Phase 1 report |
 | `03b00b0`, `a6fa42d` | Documentation only: Neon RLS verification record (`P1D_NEON_VERIFICATION.md`) |
 | `5f18aaa` | Merge of #33 into `main` |
+| `8879cb3` | WS1 group 1 (after the merge): active-time accounting; approval consume, authorise and claim in one transaction (§12) |
+| `44517b3` | WS1 group 2: deterministic settlement of approval waits, reaper recovery, `rls_unavailable`, claim limit (§12) |
+| `9c6cecb` | WS1 group 3: `replaceDatasetVersion` conflict and provenance; lease loss and write fencing (§12) |
+| `52e8cf2` | WS1 group 4: run cancel/update ownership; migration `0016_p1d_run_owner.sql` (§12) |
+| (group 5) | WS1 group 5: documentation only (this report's §12, the item 7 note, the `state.ts` header) |
 
 ## 2. Chat / task-path fixes (approved scope only)
 
@@ -91,7 +96,7 @@ Tests: `npm run test:tasks:db` (39 checks, in CI).
 - **Policies.** 11 policies use `SECURITY DEFINER` helpers: `app_current_user_id`, `app_project_rank` (project membership or creator), `app_run_project` and `app_run_owner`.
   - Readers are project members.
   - Creating a run needs EDITOR rank and the run must be in the caller's own name.
-  - Updates come from the run owner, or from a project OWNER for decisions.
+  - Updates come from the run owner (still an EDITOR) or a project OWNER. In 0015 the run update policy allowed any EDITOR; migration `0016` (WS1 group 4, §12) narrows it to this.
   - There is no DELETE policy.
 - **Fail closed.** Before a run starts, `assertRlsEnforced()` checks, in the transaction, that:
   - the current role is `academic_app`;
@@ -179,7 +184,7 @@ The values are those in the plan's table (free / paid / admin):
 
 - **Steps per run:** 10 / 20 / 30.
 - **Tool calls:** 1 per step; 3 / 5 / 8 per assistant round.
-- **Wall time per run:** 10 / 30 / 60 min, with a per-step cap.
+- **Active time per run:** 10 / 30 / 60 min, with a per-step cap. Since WS1 group 1 (§12) this counts active execution only; time parked on an approval is bounded by the approval TTL instead.
 - **Metered tokens per run:** 60k / 400k / 1M.
 - **Cost:** per run $0.20 / $2 / $10; per day $1 / $20 / $100.
 - **Active runs per user:** 1 / 3 / 5.
@@ -318,8 +323,72 @@ Run on local PostgreSQL 16, on a freshly created and migrated database, mirrorin
 2. **RLS covers only the run tables.** Graph and statistics writes made by tools are authorised in the application, by the P1-A/P1-C services (as approved). The whole app is not RLS-protected.
 3. **Completing a step spans services and is not atomic.** A tool's effect (a P1-C run, a node) and the step's `SUCCEEDED` row are written in separate transactions. A crash between the two is handled by idempotency: the retry returns the existing effect. It does not produce a second one.
 4. **Some decisions are settled as the run owner.** When a project OWNER who is not the run owner rejects an approval, the server settles the run's rows under the run owner's RLS scope. The OWNER's own rights were checked first.
-5. **A timeout does not kill a handler.** The executor stops waiting and fails or cancels the step, but an in-flight P1-C computation finishes in the background. Its result is keyed by the step, so it cannot be recorded twice.
+5. **A timeout, a cancellation or a lost lease does not kill a handler.** The executor stops waiting and fails or cancels the step (or, on a lost lease, settles nothing), but an in-flight P1-C computation or model call finishes in the background. Keyed effects cannot be recorded twice. Model calls inside tools are not given the step's abort signal, so a retry can be billed a second time (outside WS1 scope).
 6. **The per-user rate limiter can fall back to memory.** If Redis is unavailable, the limiter uses per-instance memory (existing behaviour), which is weaker across instances. The per-run and per-day limits in the database are unaffected.
 7. **Runs need a queue.** With `JOB_RUNNER=direct` (the default on Vercel without configuration), runs are refused with `queue_required`.
 8. **Browser tests use no AI provider.** In the browser tests, a run ends `FAILED` with `planner_failed`. Planning, approval, execution and graph provenance are covered end to end by `test:runs:db`, which uses a scripted model through the real gateway.
-9. **npm audit.** 0 production advisories. The 5 development-only advisories (esbuild via drizzle-kit; js-yaml via eslint) were already on `main` and are left for a separate PR, as instructed.
+9. **Policy evaluation has a documented side effect (WS1 item 7, design note).** Evaluating the policy for `replaceDatasetVersion` asks the tool for its approval, which builds the Impact Report through `previewVersionReplacement` → `ensureVersionNode`. That creates the dataset versions' graph mirror nodes if they do not exist yet. It is idempotent, changes no result and is documented in the function (`src/server/stats/graph.ts`). WS1 deliberately did not change it (making the preview read-only would change the P1-A graph API); it is recorded here as a known limitation, not fixed.
+10. **npm audit.** 0 production advisories. The 5 development-only advisories (esbuild via drizzle-kit; js-yaml via eslint) were already on `main` and are left for a separate PR, as instructed.
+
+## 12. WS1: run-engine hardening after the merge
+
+The post-P1-D readiness audit found run-engine correctness bugs. The approved WS1 plan fixes them on `claude/stoic-wozniak-5l0xmv` in separate commits, each with regression tests. **Not merged yet. `FF_RUNS` and `FF_GRAPH` stay off. The Neon app-level gate (§11.1) is unchanged and still open.** WS2 and WS3 (claim strictness, legacy numbers, `projectId` checks, metering) are not part of this.
+
+**Group 1 (`8879cb3`), items 1 and 3:**
+- **Active time.** `maxDurationMs` now bounds active execution only.
+  - Parking on an approval records `spent.waitingSince` from the database's clock; resuming adds the wait to `spent.waitedMs`.
+  - The executor and the policy both use `activeElapsedMs`, so an approval decided within its TTL no longer fails the run with `limit_time`.
+  - `spent` is merged in SQL rather than overwritten from a snapshot.
+- **Atomic authorise and claim.** Consuming an approval, authorising the step and claiming it as RUNNING happen in one transaction.
+  - `requestApproval` parks the step and the run together or not at all.
+  - A leftover AUTHORIZED step is re-queued and decided again.
+
+**Group 2 (`44517b3`), items 2 and 4:**
+- **Settling an approval wait.** A run waiting on an approval settles deterministically (`settleWaiting`):
+  - an open request within its TTL keeps it waiting;
+  - APPROVED resumes it;
+  - REJECTED stops it with `approval_rejected`;
+  - anything else stops it with `approval_expired`;
+  - no waiting step at all resumes it, and the step logic settles it.
+- **Reaper recovery.** The reaper also re-dispatches runs that have been quiet for 2 minutes with no live lease and need attention: an unfinished cancellation, or a wait no PENDING, unexpired request can end. The TTL is unchanged.
+- **`rls_unavailable`.** An RLS failure at the lease claim or during a run ends it FAILED with `rls_unavailable`, with one event and nothing executed.
+  - The write goes through `systemFailRunRlsUnavailable`, the only write on the owner connection. A smoke gate allows no other.
+- **Claim limit.** `attempts` counts the lease claims since the run's last state change. The 21st claim without progress stops the run as `worker_lost`, so nothing is re-dispatched forever.
+
+**Group 3 (`9c6cecb`), items 5, 5b and 6:**
+- **Replacement success.** `replaceDatasetVersion` reports success only for its own effect: the `supersedes` edge must come from the requested new version and have been recorded by this run step. Otherwise it returns `CONFLICT` (`already_replaced`) and changes nothing.
+- **Replacement provenance.** A run's replacement edge records `created_by_run_id`, `created_by_step_id` and origin `agent`. The user-facing replace route is unchanged.
+- **Lease loss.** `src/server/runs/lease.ts` treats a renewal that finds the lease taken, or 2 renewal failures in a row, as a lost lease.
+  - The step's signal is aborted, and the runner stops and settles nothing.
+- **Write fencing.** The store fences every run and step write of a runner on the lease it holds (`asLeaseHolder`). A stale runner can't move the run, settle its steps or clear the new holder's lease.
+
+**Group 4 (`52e8cf2`), item 9:**
+- **Service.** `cancelRun` allows only the run's owner (still an EDITOR) or a project OWNER. An EDITOR can no longer cancel another member's run.
+- **Migration `0016_p1d_run_owner.sql`.** It replaces the one policy `research_runs_update` with `(user_id = current user AND rank >= 3) OR rank >= 4`, in USING and WITH CHECK. Nothing else changes:
+  - there's still no DELETE policy or grant;
+  - the delete and truncate guards stay;
+  - RLS stays on all four run tables;
+  - there are 11 policies and no data change.
+- **Where 0016 was applied:**
+  - locally, incrementally and on a fresh database;
+  - on a temporary Neon branch of `academic-ai-eu` (PostgreSQL 18.6, since deleted), where the same authorisation rules held through the restricted role.
+
+  **It is not applied to production yet**; it will be applied by the normal migration step after the branch is merged, with `FF_RUNS` still off.
+
+**Not changed (by decision):**
+- **Item 7:** the policy preview's graph-mirror side effect is recorded as a known limitation (§11.9).
+- **Item 8:** the `state.ts` header was corrected to say the database triggers enforce the transitions (no behaviour change).
+
+**Tests after group 4** (local PostgreSQL 16):
+
+| Suite | Result |
+|---|---|
+| `test:runs` | 82 passed (+11 across groups 1 and 3) |
+| `test:runs:db` | 140 passed (+66 across groups 1–4) |
+| `test:jobs` | 22 |
+| `test:stats:db` | 105 |
+| `test:tasks:db` | 39 |
+| `test:graph` | 170 |
+| typecheck, lint, smoke (including 2 new owner-connection gates) | green |
+
+For each group, the new database checks were also run against the previous implementation. They fail there as expected: 8, 15, 12 and 4 checks for groups 1–4. **The full regression (build, browser tests with flags off and on) is still to be run before the PR is opened.**

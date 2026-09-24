@@ -10,7 +10,7 @@ Each step gets a section when it is merged.
 | P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`) | [#30](https://github.com/ameralqudah/academic-ai/pull/30) |
 | P1-B Model Gateway | ✅ merged (`P1B_PLAN.md`, `P1B_REPORT.md`) | [#31](https://github.com/ameralqudah/academic-ai/pull/31) |
 | P1-C Deterministic statistics engine + graph integration (re-scoped) | ✅ merged (`P1C_PLAN.md`, `P1C_REPORT.md`); CI green on the merged head | [#32](https://github.com/ameralqudah/academic-ai/pull/32) |
-| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | ✅ merged (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); CI green on the merged head. `FF_RUNS` off; the application-level Neon verification is still a pre-production blocker | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
+| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | ✅ merged (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); CI green on the merged head; **verification closed for security and deployment** (2026-09-24). `FF_RUNS` off; gate before enabling it: app-level `test:runs:db` on a Neon branch (postgres-js via the pooled host, PostgreSQL 18) | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
 
 ---
 
@@ -207,4 +207,7 @@ Full report: `docs/phase1/P1D_REPORT.md`. Plan and audit: `docs/phase1/P1D_PLAN.
   - `test:tasks:db` (39);
   - e2e with the flags on and off;
   - smoke gates.
-- **Neon.** The RLS layer (role, policies, fail-closed probe through `neondb_owner`) was verified with SQL on a Neon branch, which was then deleted (`P1D_NEON_VERIFICATION.md`). The application-level test on Neon was **not** executed, because the network here is blocked. That test and the production pooler and role check still block enabling `FF_RUNS`.
+- **Verification closed (security and deployment).**
+  - Neon RLS and fail-closed behaviour were verified on a Neon branch (since deleted).
+  - In production, migrations 0014/0015 are applied, the read-only RLS probe passed, the app connects as `neondb_owner` through the pooled host, and `FF_RUNS` and `FF_GRAPH` are off (`P1D_NEON_VERIFICATION.md`).
+  - **Gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch, covering `postgres-js` through the Neon pooled host on PostgreSQL 18. It has not been executed.

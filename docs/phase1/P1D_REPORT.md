@@ -1,6 +1,6 @@
 # P1-D report: research run engine, tool registry, policy engine, approvals, RLS on run paths
 
-**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1D_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Base:** `main` at `003d95b` · **Status:** implemented under the approval conditions below. The full regression is green locally (§9). **Merged into `main` via [#33](https://github.com/ameralqudah/academic-ai/pull/33) (merge commit `5f18aaa`; PR head `a6fa42d`, all CI checks green). `FF_RUNS` remains off (default `false`). P1-E has not been started. The application-level Neon verification is still a pre-production blocker (§11.1).**
+**Date:** 2026-09-23 · **Plan and audit:** `docs/phase1/P1D_PLAN.md` · **Branch:** `claude/stoic-wozniak-5l0xmv` · **Base:** `main` at `003d95b` · **Status:** implemented under the approval conditions below. The full regression is green locally (§9). **Merged into `main` via [#33](https://github.com/ameralqudah/academic-ai/pull/33) (merge commit `5f18aaa`; PR head `a6fa42d`, all CI checks green). `FF_RUNS` remains off (default `false`). P1-E has not been started. **Verification closed (2026-09-24) for security and deployment:** Neon RLS and fail-closed behaviour verified; production migrations 0014/0015 applied and the read-only RLS probe passed; `FF_RUNS` and `FF_GRAPH` are absent in production (off). **Remaining gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch, covering `postgres-js` through the Neon pooled host on PostgreSQL 18 (§11.1; `P1D_NEON_VERIFICATION.md` §6).**
 
 **Approval conditions this was built under** (from the approval of the plan):
 
@@ -301,22 +301,20 @@ Run on local PostgreSQL 16, on a freshly created and migrated database, mirrorin
 
 ## 11. Known limitations
 
-1. **Neon: the database layer is verified; the pre-production items still block.** Migrations 0014 and 0015 were applied on a Neon branch (PostgreSQL 18.6, role `neondb_owner`); see `P1D_NEON_VERIFICATION.md`. The checks showed that:
-   - `academic_app` can be created and granted there;
-   - it has no superuser, BYPASSRLS or login;
-   - the fail-closed probe passes;
-   - projects are isolated, and no rows are visible without a user;
-   - cross-project, impersonating and viewer inserts are rejected;
-   - the probe detects every way enforcement can be lost (RLS disabled, the role bypassing, missing or not granted).
-
-   The application's connection role on Neon is `neondb_owner`: it is the only login role and it owns the tables. The probe was run through that role. The verification branch has since been deleted.
-
-   **Still blocking before `FF_RUNS` is enabled anywhere real** (§5 of that document):
-   - running the application's own run path (`test:runs:db`) against a Neon branch, directly and through the pooler. This was **not executed**: this environment's network policy denies the Neon endpoints;
-   - confirming the production `DATABASE_URL` role and host;
-   - ~~running the probe against production after migrating with the flag off~~. This was done after the merge and **passed**; see §5 of that document. The production role was also verified as `neondb_owner`.
-
-   The fail-closed behaviour is unchanged: without enforceable RLS, every run is refused (`rls_unavailable`).
+1. **Neon: verification closed for security and deployment; one gate remains on `FF_RUNS`.** See `P1D_NEON_VERIFICATION.md`.
+   - **Verified on a Neon branch** (PostgreSQL 18.6, role `neondb_owner`):
+     - `academic_app` can be created and granted there;
+     - it has no superuser, BYPASSRLS or login;
+     - projects are isolated, and no rows are visible without a user;
+     - cross-project, impersonating and viewer writes are rejected;
+     - the probe refuses runs when RLS is disabled, the role bypasses, is missing, or is not granted.
+   - **Verified in production:**
+     - migrations 0014/0015 are applied;
+     - the read-only `assertRlsEnforced` probe passes;
+     - the app connects as `neondb_owner` via the **pooled** host;
+     - `FF_RUNS` and `FF_GRAPH` are absent (off).
+   - **Gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a temporary Neon branch, direct and pooled. It covers `postgres-js` through the Neon pooled host on PostgreSQL 18, which is not yet exercised end to end; the suite passes on PostgreSQL 16 locally and in CI. It has **not** been executed.
+   - **Why this is a gate, not a blocker:** it is functional, not a security gap. Without enforceable RLS, every run is refused (`rls_unavailable`).
 2. **RLS covers only the run tables.** Graph and statistics writes made by tools are authorised in the application, by the P1-A/P1-C services (as approved). The whole app is not RLS-protected.
 3. **Completing a step spans services and is not atomic.** A tool's effect (a P1-C run, a node) and the step's `SUCCEEDED` row are written in separate transactions. A crash between the two is handled by idempotency: the retry returns the existing effect. It does not produce a second one.
 4. **Some decisions are settled as the run owner.** When a project OWNER who is not the run owner rejects an approval, the server settles the run's rows under the run owner's RLS scope. The OWNER's own rights were checked first.

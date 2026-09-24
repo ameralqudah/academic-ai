@@ -635,6 +635,36 @@ async function main() {
   check('a later runner completes it', recoveredRun?.status, 'SUCCEEDED');
   check('… with exactly one step.succeeded (the stale runner never settled it)', (await db.select().from(runEvents).where(and(eq(runEvents.runId, stolen), eq(runEvents.type, 'step.succeeded')))).length, 1);
 
+  /* ------------------------------------------------------------------ */
+  section('WS1: only the run owner, or a project OWNER, can cancel or update a run');
+  /* Item 9, service. QUEUED runs are cancelled at once (no model call is made). */
+  const ownersRun = (await createRun(me, P, { intent: 'The owner’s run.' })).run.id;
+  check('an EDITOR cannot cancel another member’s run', await outcome(() => cancelRun({ userId: editor }, P, ownersRun)), 'FORBIDDEN');
+  check('… and the run is untouched (no cancel request recorded)', [(await store.readRun(owner, ownersRun))?.status, (await store.readRun(owner, ownersRun))?.cancelRequestedAt ?? null], ['QUEUED', null]);
+  check('a stranger (another project) cannot cancel it either', await outcome(() => cancelRun({ userId: stranger }, P, ownersRun)), 'NOT_FOUND');
+  check('the run owner cancels their own run', (await cancelRun(me, P, ownersRun)).status, 'CANCELLED');
+  const editorsRun = (await createRun({ userId: editor }, P, { intent: 'The editor’s own run.' })).run.id;
+  check('an EDITOR cancels their own run', (await cancelRun({ userId: editor }, P, editorsRun)).status, 'CANCELLED');
+  const editorsSecond = (await createRun({ userId: editor }, P, { intent: 'The editor’s second run.' })).run.id;
+  check('a project OWNER cancels another member’s run', (await cancelRun(me, P, editorsSecond)).status, 'CANCELLED');
+
+  /* Item 9, database: the RLS update policy says the same, whatever the application asks. */
+  const ownerRlsRun = (await createRun(me, P, { intent: 'RLS: owner’s run.' })).run.id;
+  const editorRlsRun = (await createRun({ userId: editor }, P, { intent: 'RLS: editor’s run.' })).run.id;
+  const touch = (as: string | null, runId: string) => asApp(as, (tx) => tx.update(researchRuns).set({ updatedAt: new Date() }).where(eq(researchRuns.id, runId)).returning({ id: researchRuns.id })).then((rows) => rows.length);
+  check('RLS: an EDITOR cannot update another member’s run', await touch(editor, ownerRlsRun), 0);
+  check('RLS: an EDITOR can update their own run', await touch(editor, editorRlsRun), 1);
+  check('RLS: a project OWNER can update another member’s run', await touch(owner, editorRlsRun), 1);
+  check('RLS: the run owner can update their own run', await touch(owner, ownerRlsRun), 1);
+  check('RLS: a viewer, a stranger and no user update nothing', [await touch(viewer, ownerRlsRun), await touch(stranger, ownerRlsRun), await touch(null, ownerRlsRun)], [0, 0, 0]);
+  check('RLS: deleting a run is still refused', await refused(() => asApp(owner, (tx) => tx.delete(researchRuns).where(eq(researchRuns.id, ownerRlsRun)))), true);
+  check('RLS: truncating the run tables is still refused', await refused(() => db.execute(sql`truncate research_runs cascade`)), true);
+  const [updatePolicy] = (await db.execute(sql`select qual, with_check from pg_policies where tablename = 'research_runs' and policyname = 'research_runs_update'`)) as unknown as { qual: string; with_check: string }[];
+  check('the update policy is bound to the run’s owner (or a project OWNER), in USING and WITH CHECK', [/user_id\s*=\s*app_current_user_id\(\)/.test(updatePolicy?.qual ?? ''), /user_id\s*=\s*app_current_user_id\(\)/.test(updatePolicy?.with_check ?? ''), /\b4\b/.test(updatePolicy?.qual ?? '')], [true, true, true]);
+  check('RLS is still enforced for the run role (no bypass)', await outcome(async () => { forgetRlsCheck(); await assertRlsEnforced(); return 'ok'; }), 'ok');
+  await cancelRun(me, P, ownerRlsRun);
+  await cancelRun({ userId: editor }, P, editorRlsRun);
+
   section('Flags');
   process.env.FF_RUNS = 'false';
   resetEnvCache();

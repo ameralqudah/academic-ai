@@ -12,7 +12,7 @@
 import './support/unit-env';
 
 import { actionHash, inputHash, stepIdempotencyKey } from '@/server/runs/approvals';
-import { DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
+import { activeElapsedMs, DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
 import { decide, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
 import { resolveReferences, toolsFor, validatePlan } from '@/server/runs/planner';
 import { gatewayToolsFor, listTools, TOOL_NAMES, toolByName } from '@/server/runs/registry';
@@ -66,6 +66,12 @@ async function main() {
   check('… nested runs stay impossible', refuses('{"free":{"maxDepth":1}}'), 'refused');
   check('… a step stays one tool call', refuses('{"free":{"maxToolCallsPerStep":2}}'), 'refused');
   check('the limits are frozen', Object.isFrozen(DEFAULT_RUN_LIMITS.free), true);
+  const t0 = 1_800_000_000_000;
+  const min = 60_000;
+  check('active time is time since the start when nothing waited', activeElapsedMs(new Date(t0), {}, t0 + 5 * min), 5 * min);
+  check('… minus time spent waiting on approvals (waitedMs)', activeElapsedMs(new Date(t0), { waitedMs: 20 * min }, t0 + 25 * min), 5 * min);
+  check('… minus the wait still in progress (waitingSince)', activeElapsedMs(new Date(t0), { waitingSince: t0 + 2 * min }, t0 + 30 * min), 2 * min);
+  check('… and never negative, nor counted before a start', [activeElapsedMs(new Date(t0), { waitedMs: 99 * min }, t0 + min), activeElapsedMs(null, {}, t0)], [0, 0]);
 
   section('State machines (the same tables as the database triggers)');
   check('a run plans, runs, waits for approval and finishes', [canRun('QUEUED', 'PLANNING'), canRun('PLANNING', 'RUNNING'), canRun('RUNNING', 'WAITING_APPROVAL'), canRun('WAITING_APPROVAL', 'QUEUED'), canRun('RUNNING', 'SUCCEEDED')], [true, true, true, true, true]);
@@ -119,6 +125,8 @@ async function main() {
   check('a resource of another project is denied (forged id)', await outcome(request(), deps({ resource: async () => false })), ['DENY', 'auth.resources']);
   check('a tier without the entitlement is denied', await outcome(request(), deps({ tier: async () => 'enterprise' as never, limits: () => DEFAULT_RUN_LIMITS.paid })), ['DENY', 'entitlement']);
   check('past the run’s time limit is denied', await outcome(request({ run: { ...run, startedAt: new Date(now.getTime() - 31 * 60_000) } })), ['DENY', 'limits.run']);
+  check('time parked on an approval does not count against the run’s time limit', await outcome(request({ run: { ...run, startedAt: new Date(now.getTime() - 31 * 60_000), waitedMs: 25 * 60_000 } })), ['ALLOW', null]);
+  check('… but active time beyond the limit is still denied after a wait', await outcome(request({ run: { ...run, startedAt: new Date(now.getTime() - 60 * 60_000), waitedMs: 25 * 60_000 } })), ['DENY', 'limits.run']);
   check('past the run’s token budget (metered) is denied', await outcome(request(), deps({ runUsage: async () => ({ tokens: 400_000, costMicroUsd: 0 }) })), ['DENY', 'limits.run']);
   check('past the run’s cost budget (metered) is denied', await outcome(request(), deps({ runUsage: async () => ({ tokens: 0, costMicroUsd: 2_000_001 }) })), ['DENY', 'limits.run']);
   check('a model tool whose estimate would pass the budget is denied before it runs', await outcome(request({ toolName: 'extractEvidence', input: { question: 'q?', text: 'x'.repeat(60) } }), deps({ runUsage: async () => ({ tokens: 399_000, costMicroUsd: 0 }) })), ['DENY', 'limits.run']);

@@ -194,6 +194,21 @@ export function bytesOf(value: unknown): number {
 }
 
 /**
+ * A run's active time: since it started, minus the time it spent parked on an
+ * approval (`spent.waitedMs`, and the current wait if `spent.waitingSince` is
+ * set). `maxDurationMs` bounds active execution; waiting on a person is
+ * bounded by the approval's own `approvalTtlMs`.
+ */
+export function activeElapsedMs(startedAt: Date | null, spent: unknown, now: number): number {
+  if (!startedAt) return 0;
+  const record = (spent ?? {}) as Record<string, unknown>;
+  const waited = Number(record.waitedMs ?? 0) || 0;
+  const since = Number(record.waitingSince ?? 0) || 0;
+  const current = since > 0 ? Math.max(0, now - since) : 0;
+  return Math.max(0, now - startedAt.getTime() - waited - current);
+}
+
+/**
  * Pre-execution estimates of one model call, for the cost check before a step
  * runs (the check after uses metered usage). Deliberately high, so an estimate
  * stops a run early rather than late.

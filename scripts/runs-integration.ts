@@ -353,6 +353,67 @@ async function main() {
   resetLimits();
 
   /* ------------------------------------------------------------------ */
+  /* ------------------------------------------------------------------ */
+  section('WS1: waiting on an approval is not active time; authorise and claim are one transaction');
+  const minutes = (n: number) => n * 60_000;
+  /* Item 1: an approval decided after the free tier's 10 active minutes still runs, because the wait is not counted. */
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const slow = (await createRun(me, P, { intent: 'Claim, approved after a long wait.' })).run.id;
+  await drain(slow);
+  const slowParked = await store.readRun(owner, slow);
+  check('parking on an approval starts the approval clock', [slowParked?.status, typeof (slowParked?.spent as Record<string, number>).waitingSince], ['WAITING_APPROVAL', 'number']);
+  await db
+    .update(researchRuns)
+    .set({ startedAt: new Date(Date.now() - minutes(11)), spent: sql`${researchRuns.spent} || jsonb_build_object('waitingSince', (extract(epoch from now()) * 1000)::bigint - ${minutes(11)})` })
+    .where(eq(researchRuns.id, slow));
+  const slowApproval = (await getRun(me, P, slow)).approvals[0]!;
+  await decideApproval(me, P, slow, slowApproval.id, { decision: 'approve', actionHash: slowApproval.actionHash });
+  const slowDone = await drain(slow);
+  const slowSpent = slowDone?.spent as Record<string, number>;
+  check('an approval decided after 11 minutes (free limit: 10 active) still runs the step', [slowDone?.status, slowDone?.stopReason], ['SUCCEEDED', 'completed']);
+  check('… the wait is recorded and the clock is cleared on resume', [(slowSpent.waitedMs ?? 0) >= minutes(11), slowSpent.waitingSince === undefined], [true, true]);
+
+  /* Item 1, negative: active time over the limit still stops the run. */
+  planReply([{ tool: 'createGraphNode', label: 'Note', input: { type: 'note', data: { text: 'late' } }, dependsOn: [] }]);
+  const late = (await createRun(me, P, { intent: 'Too slow while active.' })).run.id;
+  await store.transitionRun(owner, late, ['QUEUED'], 'PLANNING', { startedAt: new Date(Date.now() - minutes(11)) });
+  const latePlan = await runForUser(owner, () => planRun({ userId: owner, projectId: P, intent: 'Too slow while active.', context: {}, role: 'OWNER', tier: 'free', limits: limitsFor('free') }));
+  if (!latePlan.ok) throw new Error('plan');
+  await store.recordPlan(owner, late, { summary: 'x' }, latePlan.plan.steps, latePlan.meta);
+  const lateDone = await drain(late);
+  check('11 minutes of active time (free limit: 10) still stops the run with limit_time', [lateDone?.status, lateDone?.stopReason], ['FAILED', 'limit_time']);
+
+  /* Item 3: the state an older runner could leave (approval consumed, step AUTHORIZED, never claimed) recovers. */
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const halfClaimed = (await createRun(me, P, { intent: 'Claim; the runner dies after consuming the approval.' })).run.id;
+  await drain(halfClaimed);
+  const [hcStep] = await store.readSteps(owner, halfClaimed);
+  const hcApproval = (await store.approvalsForStep(owner, hcStep!.id))[0]!;
+  await store.decideApproval(owner, hcApproval, 'APPROVED');
+  await store.transitionRun(owner, halfClaimed, ['WAITING_APPROVAL'], 'RUNNING', { wait: 'resume' });
+  await withRunScope(owner, async (tx) => {
+    await store.consumeApproval(owner, { ...hcApproval, status: 'APPROVED' }, hcApproval.actionHash, tx);
+    await store.transitionStep(owner, hcStep!, ['WAITING_APPROVAL'], 'AUTHORIZED', { policy: { outcome: 'ALLOW' } }, { tx });
+  });
+  await drain(halfClaimed);
+  const hcView = await getRun(me, P, halfClaimed);
+  check('an authorised-but-unclaimed step whose approval was consumed asks again (not parked forever)', [hcView.run.status, hcView.steps[0]?.status, hcView.approvals.map((a) => a.status).sort()], ['WAITING_APPROVAL', 'WAITING_APPROVAL', ['CONSUMED', 'PENDING']]);
+  check('… and says why it went back to the queue', hcView.events.some((event) => event.type === 'step.requeued'), true);
+  const hcFresh = hcView.approvals.find((a) => a.status === 'PENDING')!;
+  await decideApproval(me, P, halfClaimed, hcFresh.id, { decision: 'approve', actionHash: hcFresh.actionHash });
+  const hcDone = await drain(halfClaimed);
+  check('… approving again completes it, with the claim created once', [hcDone?.status, (await db.select().from(graphNodes).where(eq(graphNodes.createdByStepId, hcStep!.id))).length], ['SUCCEEDED', 1]);
+
+  /* Item 3: an approval request that cannot park its step changes nothing (it used to park the run alone). */
+  const [doneStep] = await store.readSteps(owner, main);
+  const before = (await store.approvalsForStep(owner, doneStep!.id)).length;
+  const refusedPark = await store.requestApproval(owner, doneStep!, { runId: main, stepId: doneStep!.id, projectId: P, actionHash: 'a'.repeat(64), reason: 'test', action: {}, expiresAt: new Date(Date.now() + minutes(5)) });
+  check('an approval request for a step that cannot wait is rolled back entirely', [refusedPark, (await store.approvalsForStep(owner, doneStep!.id)).length - before, (await store.readRun(owner, main))?.status], [null, 0, 'SUCCEEDED']);
+
+  /* Item 3: on the normal path, the approval's consumption and the claim commit together. */
+  const approvedClaimSteps = (await getRun(me, P, slow)).events.filter((event) => ['approval.consumed', 'step.authorized', 'step.running'].includes(event.type)).map((event) => event.type);
+  check('consume, authorise and claim are recorded together, in order', approvedClaimSteps, ['approval.consumed', 'step.authorized', 'step.running']);
+
   section('Flags');
   process.env.FF_RUNS = 'false';
   resetEnvCache();

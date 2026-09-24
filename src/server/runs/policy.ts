@@ -21,7 +21,7 @@ import { requireRun, requireSpec } from '@/server/stats/runs';
 import { requireVersion } from '@/server/stats/versions';
 
 import { actionHash } from './approvals';
-import { limitsFor, MODEL_CALL_ESTIMATE, type RunLimits, type Tier } from './limits';
+import { activeElapsedMs, limitsFor, MODEL_CALL_ESTIMATE, type RunLimits, type Tier } from './limits';
 import { toolByName } from './registry';
 import type { ApprovalNeed, ProjectRole, ResourceRef, ToolContext, ToolContextKind, ToolDef } from './types';
 
@@ -51,6 +51,8 @@ export interface RunState {
   cancelRequested: boolean;
   startedAt: Date | null;
   retries: number;
+  /** Time spent parked on approvals (`spent.waitedMs`); not counted against `maxDurationMs`. */
+  waitedMs?: number;
 }
 
 export interface ExistingApproval {
@@ -190,7 +192,7 @@ export async function decide(request: PolicyRequest, deps: PolicyDeps = producti
   if (request.execution === 'run') {
     const run = request.run;
     if (!run) return deny('limits.run', 'no run', { role, tier });
-    if (run.startedAt && deps.now().getTime() - run.startedAt.getTime() > limits.maxDurationMs) return deny('limits.run', 'limit_time', { role, tier });
+    if (activeElapsedMs(run.startedAt, { waitedMs: run.waitedMs ?? 0 }, deps.now().getTime()) > limits.maxDurationMs) return deny('limits.run', 'limit_time', { role, tier });
     if (run.retries > limits.maxRetriesPerRun) return deny('limits.run', 'limit_retries', { role, tier });
     const usage = await deps.runUsage(run.id);
     if (usage.tokens >= limits.maxRunTokens || usage.tokens + estimate.tokens > limits.maxRunTokens) return deny('limits.run', 'limit_tokens', { role, tier });

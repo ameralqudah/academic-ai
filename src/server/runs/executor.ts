@@ -24,7 +24,7 @@ import { AppError } from '@/server/http/errors';
 
 import { inputHash, stepIdempotencyKey } from './approvals';
 import { withRunScope } from './db-scope';
-import { bytesOf, limitsFor, type RunLimits, type Tier } from './limits';
+import { activeElapsedMs, bytesOf, limitsFor, type RunLimits, type Tier } from './limits';
 import { planRun, resolveReferences } from './planner';
 import { decide, productionPolicyDeps, storedDecision, type PolicyDecision } from './policy';
 import { toolByName } from './registry';
@@ -39,6 +39,8 @@ const CANCEL_POLL_MS = 2_000;
 const PERMANENT = new Set(['VALIDATION', 'FORBIDDEN', 'NOT_FOUND', 'UNAUTHORIZED', 'IMPACT_ACK_REQUIRED', 'PLAN_LIMIT', 'UNAVAILABLE']);
 
 class StepCancelled extends Error {}
+/** Rolls back an authorise-and-claim whose step changed underneath it. */
+class NotClaimed extends Error {}
 class StepTimedOut extends Error {}
 
 /**
@@ -94,7 +96,7 @@ async function drive(userId: string, runId: string): Promise<void> {
         return;
       }
       if (!approvals.some((approval) => approval.status === 'APPROVED')) return;
-      if (!(await store.transitionRun(userId, runId, ['WAITING_APPROVAL'], 'RUNNING', {}, { type: 'run.resumed' }))) return;
+      if (!(await store.transitionRun(userId, runId, ['WAITING_APPROVAL'], 'RUNNING', { wait: 'resume' }, { type: 'run.resumed' }))) return;
       continue;
     }
     if (run.status !== 'RUNNING') return;
@@ -143,8 +145,8 @@ async function nextStep(userId: string, run: ResearchRun, limits: Readonly<RunLi
   }
   if (steps.some((step) => step.status === 'RUNNING')) steps = await store.readSteps(userId, run.id);
 
-  /* The run's wall-clock limit, before anything starts. */
-  if (run.startedAt && Date.now() - run.startedAt.getTime() > limits.maxDurationMs) {
+  /* The run's time limit, before anything starts: active time only (waiting on an approval is bounded by its own TTL). */
+  if (activeElapsedMs(run.startedAt, run.spent, Date.now()) > limits.maxDurationMs) {
     await stopRun(userId, run.id, 'limit_time');
     return 'stop';
   }
@@ -200,6 +202,17 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
     return 'stop';
   }
 
+  /*
+   * An AUTHORIZED step at this point was authorised but never claimed (a
+   * runner died in between, before authorise and claim became one
+   * transaction). Its approval, if any, was consumed, so back to the queue:
+   * the policy decides again, and asks again if the action needs it.
+   */
+  if (step.status === 'AUTHORIZED') {
+    await store.transitionStep(userId, step, ['AUTHORIZED'], 'QUEUED', {}, { event: { type: 'step.requeued', data: { reason: 'authorised_not_claimed' } } });
+    return 'continue';
+  }
+
   /* 1. Resolve references to earlier outputs, then validate against the tool's schema (written once). */
   let validated = step.validatedInput;
   if (!validated) {
@@ -231,7 +244,7 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
     toolName: tool.name,
     input: validated,
     execution: 'run',
-    run: { id: run.id, status: run.status, cancelRequested: Boolean(run.cancelRequestedAt), startedAt: run.startedAt, retries: Number((run.spent as Record<string, number>).retries ?? 0) },
+    run: { id: run.id, status: run.status, cancelRequested: Boolean(run.cancelRequestedAt), startedAt: run.startedAt, retries: Number((run.spent as Record<string, number>).retries ?? 0), waitedMs: Number((run.spent as Record<string, number>).waitedMs ?? 0) },
     stepId: step.id,
     inputHash: step.inputHash ?? undefined,
     approvals: approvals.map((approval) => ({ id: approval.id, status: approval.status, actionHash: approval.actionHash, expiresAt: approval.expiresAt })),
@@ -247,6 +260,7 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
 
   if (decision.outcome === 'REQUIRE_APPROVAL') {
     const need = decision.approval!.need;
+    /* Parks the step and the run together, or neither (then the loop reads the state again). */
     await store.requestApproval(userId, step, {
       runId: run.id,
       stepId: step.id,
@@ -269,20 +283,27 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
     return 'stop';
   }
 
-  /* 3. Authorised: consume the approval (single use) and record the decision, in one transaction. */
-  const authorized = await withRunScope(userId, async (tx) => {
+  /*
+   * 3–4. Authorise and claim in ONE transaction: consume the approval (single
+   * use), record the decision, and claim the step as RUNNING (counting the
+   * attempt, so a crash mid-step is counted). Either all of it commits or none:
+   * a consumed approval can never be left behind with a step that is not running.
+   */
+  const token = randomUUID();
+  const attempts = step.attempts + 1;
+  const claimed = await withRunScope(userId, async (tx) => {
     if (decision.approval?.approvalId) {
       const approval = approvals.find((candidate) => candidate.id === decision.approval!.approvalId)!;
       if (!(await store.consumeApproval(userId, approval, decision.approval.actionHash, tx))) return false;
     }
-    return store.transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL', 'AUTHORIZED'], 'AUTHORIZED', { policy: storedDecision(decision) }, { tx, event: { type: 'step.authorized', data: { rules: decision.rules.length } } });
+    if (!(await store.transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL'], 'AUTHORIZED', { policy: storedDecision(decision) }, { tx, event: { type: 'step.authorized', data: { rules: decision.rules.length } } }))) throw new NotClaimed();
+    if (!(await store.transitionStep(userId, step, ['AUTHORIZED'], 'RUNNING', { claimToken: token, attempts, startedAt: new Date(), finishedAt: null }, { tx, event: { type: 'step.running', data: { attempt: attempts } } }))) throw new NotClaimed();
+    return true;
+  }).catch((error: unknown) => {
+    if (error instanceof NotClaimed) return false;
+    throw error;
   });
-  if (!authorized) return 'continue';
-
-  /* 4. Claim: counts the attempt now, so a crash mid-step is counted. */
-  const token = randomUUID();
-  const attempts = step.attempts + 1;
-  if (!(await store.transitionStep(userId, step, ['AUTHORIZED'], 'RUNNING', { claimToken: token, attempts, startedAt: new Date(), finishedAt: null }, { event: { type: 'step.running', data: { attempt: attempts } } }))) return 'continue';
+  if (!claimed) return 'continue';
 
   /* 5. Execute: outside any transaction, with a timeout and cancellation. */
   const started = Date.now();
@@ -397,13 +418,13 @@ async function failAttempt(
     /* Not retried (permanent error or run retry budget): make it final so the run stops. */
     await store.exhaustAttempts(userId, step.id);
   }
-  if (canRetry) await store.patchRun(userId, run.id, { spent: { ...(run.spent as Record<string, number>), retries: retries + 1 } });
+  if (canRetry) await store.patchRun(userId, run.id, { spent: { retries: retries + 1 } });
 }
 
 async function spentOf(run: ResearchRun, steps: RunStep[]): Promise<Record<string, number>> {
   const usage = await productionPolicyDeps.runUsage(run.id);
+  /* Only what is recomputed here: `spent` is merged, so other counters (retries, waitedMs) are kept. */
   return {
-    ...(run.spent as Record<string, number>),
     steps: steps.filter((step) => step.status === 'SUCCEEDED').length,
     tokens: usage.tokens,
     costMicroUsd: usage.costMicroUsd,

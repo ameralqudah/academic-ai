@@ -123,6 +123,23 @@ export interface RunPatch {
   error?: Record<string, unknown> | null;
   replans?: number;
   startedAt?: Date;
+  /**
+   * The approval clock, kept in `spent` by the database's clock: `park` starts
+   * a wait (`waitingSince`), `resume` adds it to `waitedMs` and clears it.
+   */
+  wait?: 'park' | 'resume';
+}
+
+/** `spent` is merged, never replaced, so a stale snapshot cannot drop a counter written since. */
+function spentSet(patch: Pick<RunPatch, 'spent' | 'wait'>) {
+  const nowMs = sql`(extract(epoch from now()) * 1000)::bigint`;
+  let expression = sql`${researchRuns.spent}`;
+  if (patch.spent) expression = sql`(${expression} || ${JSON.stringify(patch.spent)}::jsonb)`;
+  if (patch.wait === 'park') expression = sql`(${expression} || jsonb_build_object('waitingSince', ${nowMs}))`;
+  if (patch.wait === 'resume') {
+    expression = sql`((${expression} - 'waitingSince') || jsonb_build_object('waitedMs', coalesce((${researchRuns.spent}->>'waitedMs')::bigint, 0) + greatest(0, ${nowMs} - coalesce((${researchRuns.spent}->>'waitingSince')::bigint, ${nowMs}))))`;
+  }
+  return patch.spent || patch.wait ? { spent: expression } : {};
 }
 
 /**
@@ -138,6 +155,7 @@ export async function transitionRun(
   event?: { type: string; data?: Record<string, unknown> },
   tx?: RunTx,
 ): Promise<boolean> {
+  const { spent, wait, ...rest } = patch;
   const work = async (t: RunTx) => {
     const rows = await t
       .update(researchRuns)
@@ -145,7 +163,8 @@ export async function transitionRun(
         status: to,
         updatedAt: new Date(),
         ...(TERMINAL_RUN.has(to) ? { finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null } : {}),
-        ...patch,
+        ...rest,
+        ...spentSet({ spent, wait }),
       })
       .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from)))
       .returning({ id: researchRuns.id, projectId: researchRuns.projectId });
@@ -159,7 +178,8 @@ export async function transitionRun(
 /** Updates progress fields without changing status (spent, planner metadata). */
 export async function patchRun(userId: string, runId: string, patch: Pick<RunPatch, 'spent' | 'planner'>): Promise<void> {
   await withRunScope(userId, async (tx) => {
-    await tx.update(researchRuns).set({ ...patch, updatedAt: new Date() }).where(eq(researchRuns.id, runId));
+    const { spent, ...rest } = patch;
+    await tx.update(researchRuns).set({ ...rest, ...spentSet({ spent }), updatedAt: new Date() }).where(eq(researchRuns.id, runId));
   });
 }
 
@@ -307,7 +327,7 @@ export interface NewApproval {
  * transaction. An open request with the same hash is reused; one with a
  * different hash (the action changed) is expired first.
  */
-export async function requestApproval(userId: string, step: RunStep, approval: NewApproval): Promise<RunApproval> {
+export async function requestApproval(userId: string, step: RunStep, approval: NewApproval): Promise<RunApproval | null> {
   return withRunScope(userId, async (tx) => {
     const open = await tx.select().from(runApprovals).where(and(eq(runApprovals.stepId, step.id), inArray(runApprovals.status, ['PENDING', 'APPROVED'])));
     let current = open.find((row) => row.actionHash === approval.actionHash && row.expiresAt > new Date());
@@ -322,11 +342,18 @@ export async function requestApproval(userId: string, step: RunStep, approval: N
       current = row!;
       await appendEvent(tx, { runId: approval.runId, projectId: approval.projectId, userId, stepId: step.id, type: 'approval.requested', data: { approvalId: current.id, reason: approval.reason, actionHash: approval.actionHash } });
     }
-    await transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL'], 'WAITING_APPROVAL', { approvalId: current.id }, { tx, event: { type: 'step.waiting_approval', data: { approvalId: current.id } } });
-    await transitionRun(userId, approval.runId, ['RUNNING'], 'WAITING_APPROVAL', {}, { type: 'run.waiting_approval', data: { approvalId: current.id, stepId: step.id } }, tx);
+    /* Both or neither: a run parked without its step would wait on an approval no step can use. */
+    if (!(await transitionStep(userId, step, ['QUEUED', 'WAITING_APPROVAL'], 'WAITING_APPROVAL', { approvalId: current.id }, { tx, event: { type: 'step.waiting_approval', data: { approvalId: current.id } } }))) throw new NotParked();
+    if (!(await transitionRun(userId, approval.runId, ['RUNNING'], 'WAITING_APPROVAL', { wait: 'park' }, { type: 'run.waiting_approval', data: { approvalId: current.id, stepId: step.id } }, tx))) throw new NotParked();
     return current;
+  }).catch((error: unknown) => {
+    if (error instanceof NotParked) return null;
+    throw error;
   });
 }
+
+/** Rolls back an approval request whose step or run is no longer where it was expected. */
+class NotParked extends Error {}
 
 export async function readApproval(userId: string, approvalId: string): Promise<RunApproval | null> {
   return withRunScope(userId, async (tx) => {

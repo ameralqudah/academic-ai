@@ -27,17 +27,19 @@ import { forgetPlan, productionDeps, setGatewayForTests } from '@/server/ai/gate
 import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { createGateway } from '@/server/ai/gateway/gateway';
 import { db } from '@/server/db';
-import { aiUsageEvents, graphNodes, projectMembers, researchRuns, runApprovals, runEvents, runSteps, statRuns, statSpecs } from '@/server/db/schema';
+import { aiUsageEvents, datasetVersions as datasetVersionsTable, graphEdges, graphNodes, projectMembers, researchRuns, runApprovals, runEvents, runSteps, statRuns, statSpecs, usageTracking } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
 import { saveUpload } from '@/server/services/dataset.service';
 import { assertRlsEnforced, forgetRlsCheck, withRunScope } from '@/server/runs/db-scope';
+import * as executorModule from '@/server/runs/executor';
 import { advanceRun } from '@/server/runs/executor';
 import { resetLimits } from '@/server/runs/limits';
 import { toolByName } from '@/server/runs/registry';
 import { cancelRun, createRun, decideApproval, getRun, listToolsFor, reapRuns } from '@/server/runs/service';
 import * as store from '@/server/runs/store';
+import { previewVersionReplacement, replacementOf, replaceVersion } from '@/server/stats/graph';
 import { createSpec, startRun } from '@/server/stats/runs';
 import { listVersions, transformVersion } from '@/server/stats/versions';
 
@@ -537,6 +539,101 @@ async function main() {
   check('… and it is never re-dispatched', await picked(loopRun), false);
   await finish(({ id: loopRun }).id);
   check('a run that progresses is not stopped by the claim limit (claims reset on each state change)', a2Done?.attempts, 0);
+
+  /* ------------------------------------------------------------------ */
+  section('WS1: a replacement reports only its own effect, with its run and step; a lost lease stops a stale runner');
+  /* The free test user has used this month's 20 model requests on earlier scenarios' plans: start this section with a fresh quota (test data only). */
+  await db.delete(usageTracking).where(eq(usageTracking.userId, owner));
+  const cleanOf = async (column: string) => (await transformVersion(me, v3.id, { operation: 'clean', actions: [{ kind: 'drop-rows-missing', columns: [column] }] }, P)).version;
+  const replaceTool = toolByName('replaceDatasetVersion')!;
+  const replaceCtx = async (oldId: string, newId: string, runId: string, stepId: string) => ({
+    userId: owner,
+    projectId: P,
+    tier: 'free' as const,
+    execution: 'run' as const,
+    runId,
+    stepId,
+    idempotencyKey: testKey(`replace-${stepId}`),
+    signal: new AbortController().signal,
+    approvedImpactHash: (await previewVersionReplacement(me, P, oldId, newId)).hash,
+  });
+
+  /* Item 5: another actor replaced the version first: the tool must not report success. */
+  const [vOld, vTheirs, vMine] = [await cleanOf('y'), await cleanOf('m'), await cleanOf('x')];
+  await replaceVersion(me, P, vOld.id, vTheirs.id, (await previewVersionReplacement(me, P, vOld.id, vTheirs.id)).hash);
+  const raceCtx = await replaceCtx(vOld.id, vMine.id, main, 'step-race');
+  check('replacing a version someone else already replaced is a conflict, not a success', await outcome(() => replaceTool.execute({ oldVersionId: vOld.id, newVersionId: vMine.id }, raceCtx)), 'CONFLICT:already_replaced');
+  check('… even for the same new version, when the replacement is not this step’s', await outcome(async () => replaceTool.execute({ oldVersionId: vOld.id, newVersionId: vTheirs.id }, { ...raceCtx, stepId: 'step-other' })), 'CONFLICT:already_replaced');
+  check('… and the other actor’s replacement is left as it was', (await replacementOf(P, vOld.id))?.newVersionId, vTheirs.id);
+
+  /* Item 5b + own effect: a replacement made by a run step records that run and step (origin agent). */
+  const [vFrom, vTo] = [await cleanOf('bin'), await cleanOf('group')];
+  planReply([{ tool: 'replaceDatasetVersion', label: 'Replace', input: { oldVersionId: vFrom.id, newVersionId: vTo.id }, dependsOn: [] }]);
+  const replaceRun = (await createRun(me, P, { intent: 'Replace the data.' })).run.id;
+  await drain(replaceRun);
+  const replaceApproval = (await getRun(me, P, replaceRun)).approvals[0]!;
+  await decideApproval(me, P, replaceRun, replaceApproval.id, { decision: 'approve', actionHash: replaceApproval.actionHash });
+  const replaced = await drain(replaceRun);
+  const [replaceStep] = await store.readSteps(owner, replaceRun);
+  const recorded = await replacementOf(P, vFrom.id);
+  check('an approved replacement run succeeds', [replaced?.status, replaceStep?.status, (replaceStep?.output as { output?: { replaced?: boolean } })?.output?.replaced], ['SUCCEEDED', 'SUCCEEDED', true]);
+  check('… its supersedes edge records the executing run and step', [recorded?.newVersionId === vTo.id, recorded?.createdByRunId === replaceRun, recorded?.createdByStepId === replaceStep?.id], [true, true, true]);
+  const [fromNode] = await db.select({ graphNodeId: datasetVersionsTable.graphNodeId }).from(datasetVersionsTable).where(eq(datasetVersionsTable.id, vFrom.id));
+  const [edge] = await db.select().from(graphEdges).where(and(eq(graphEdges.dstId, fromNode!.graphNodeId!), eq(graphEdges.rel, 'supersedes')));
+  check('… with origin agent (not user)', edge?.origin, 'agent');
+  /* Already superseded: the graph refuses before it looks at the acknowledgement, so no impact hash is needed. */
+  const replayCtx = (stepId: string) => ({ userId: owner, projectId: P, tier: 'free' as const, execution: 'run' as const, runId: replaceRun, stepId, idempotencyKey: testKey(`replay-${stepId}`), signal: new AbortController().signal, approvedImpactHash: null });
+  const ownReplay = await replaceTool.execute({ oldVersionId: vFrom.id, newVersionId: vTo.id }, replayCtx(replaceStep!.id));
+  check('re-executing the same step finds its own replacement (success, nothing new)', [(ownReplay.output as { replaced: boolean; affected: number }).replaced, (ownReplay.output as { affected: number }).affected], [true, 0]);
+  check('… but another step replaying it gets a conflict', await outcome(async () => replaceTool.execute({ oldVersionId: vFrom.id, newVersionId: vTo.id }, replayCtx('step-impostor'))), 'CONFLICT:already_replaced');
+
+  /* Item 6a: writes are fenced on the lease: a runner whose lease was taken cannot change the run. */
+  const holder = (store as unknown as { asLeaseHolder?: <T>(runId: string, owner: string, work: () => Promise<T>) => Promise<T> }).asLeaseHolder ?? (<T>(_r: string, _o: string, work: () => Promise<T>) => work());
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const fenced = (await createRun(me, P, { intent: 'Lease fencing.' })).run.id;
+  await store.claimRunLease(owner, fenced, 'worker-A');
+  await db.update(researchRuns).set({ leaseOwner: 'worker-B', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, fenced));
+  const staleMove = await holder(fenced, 'worker-A', () => store.transitionRun(owner, fenced, ['QUEUED'], 'PLANNING', { startedAt: new Date() }));
+  await holder(fenced, 'worker-A', () => store.patchRun(owner, fenced, { spent: { steps: 99 } }));
+  const afterStale = await store.readRun(owner, fenced);
+  check('a stale runner (lease taken) cannot move the run', [staleMove, afterStale?.status], [false, 'QUEUED']);
+  check('… nor change its counters', (afterStale?.spent as Record<string, number>).steps ?? null, null);
+  check('… while the runner that holds the lease can', await holder(fenced, 'worker-B', () => store.transitionRun(owner, fenced, ['QUEUED'], 'PLANNING', { startedAt: new Date() })), true);
+  await db.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, fenced));
+  await finish(fenced);
+  await drain(fenced); /* a PLANNING run's cancellation is settled by its next runner */
+  check('… and the fenced run is then cancelled normally', (await store.readRun(owner, fenced))?.status, 'CANCELLED');
+
+  /* Item 6b: the lease is taken while a step runs: the first runner stops, writes nothing, and does not displace the second. */
+  const setHeartbeat = (executorModule as unknown as { setRunHeartbeatForTests?: (ms: number | null) => void }).setRunHeartbeatForTests ?? (() => undefined);
+  setHeartbeat(150);
+  planReply([{ tool: 'extractEvidence', label: 'Evidence', input: { question: 'What does the text say about x?', text: 'The study found that x predicts y in the survey data, with a modest effect.' }, dependsOn: [] }]);
+  fake.push({ reply: { text: JSON.stringify({ evidence: [{ statement: 'x predicts y', quote: 'x predicts y' }] }) }, delayMs: 4_000 });
+  const stolen = (await createRun(me, P, { intent: 'Lease stolen mid-step.' })).run.id;
+  const firstRunner = advanceRun(stolen);
+  let running = false;
+  for (let i = 0; i < 60 && !running; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    running = (await store.readSteps(owner, stolen))[0]?.status === 'RUNNING';
+  }
+  await db.update(researchRuns).set({ leaseOwner: 'worker-B', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, stolen));
+  const startedWaiting = Date.now();
+  const firstOutcome = await firstRunner;
+  const stoppedAfter = Date.now() - startedWaiting;
+  const [afterSteal] = await store.readSteps(owner, stolen);
+  const [stolenRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, stolen));
+  check('the step was running when the lease was taken', running, true);
+  check('the first runner stops soon after losing the lease (it does not wait for the tool)', [firstOutcome, stoppedAfter < 3_000], ['ran', true]);
+  check('… it settles nothing: the step is still RUNNING, the run still RUNNING', [afterSteal?.status, stolenRow?.status], ['RUNNING', 'RUNNING']);
+  check('… and it does not displace the runner that took over (the lease is still theirs)', stolenRow?.leaseOwner, 'worker-B');
+  setHeartbeat(null);
+  /* The second runner goes away too; the next one recovers the step (retried with the same key) and completes. */
+  await db.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, stolen));
+  fake.push({ reply: { text: JSON.stringify({ evidence: [{ statement: 'x predicts y', quote: 'x predicts y' }] }) } });
+  const recoveredRun = await drain(stolen);
+  await new Promise((resolve) => setTimeout(resolve, 4_500)); /* let the first runner's abandoned tool call finish: it must not write */
+  check('a later runner completes it', recoveredRun?.status, 'SUCCEEDED');
+  check('… with exactly one step.succeeded (the stale runner never settled it)', (await db.select().from(runEvents).where(and(eq(runEvents.runId, stolen), eq(runEvents.type, 'step.succeeded')))).length, 1);
 
   section('Flags');
   process.env.FF_RUNS = 'false';

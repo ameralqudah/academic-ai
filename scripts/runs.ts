@@ -12,6 +12,7 @@
 import './support/unit-env';
 
 import { actionHash, inputHash, stepIdempotencyKey } from '@/server/runs/approvals';
+import { createLeaseKeeper, LEASE_RENEW_MAX_ERRORS } from '@/server/runs/lease';
 import { activeElapsedMs, DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
 import { decide, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
 import { resolveReferences, toolsFor, validatePlan } from '@/server/runs/planner';
@@ -81,6 +82,34 @@ async function main() {
   check('a failed step may be retried', canStep('FAILED', 'QUEUED'), true);
   check('an approval is single use', [canApproval('APPROVED', 'CONSUMED'), canApproval('CONSUMED', 'APPROVED'), canApproval('REJECTED', 'APPROVED'), canApproval('EXPIRED', 'APPROVED')], [true, false, false, false]);
   check('an illegal move throws', (() => { try { assertRun('CANCELLED', 'SUCCEEDED'); return 'moved'; } catch (error) { return error instanceof IllegalTransitionError ? 'refused' : 'other'; } })(), 'refused');
+
+  section('Lease keeper: a lost lease stops the runner');
+  {
+    const scripted = (answers: Array<boolean | 'error'>) => {
+      let calls = 0;
+      const keeper = createLeaseKeeper(async () => {
+        const answer = answers[calls++] ?? true;
+        if (answer === 'error') throw new Error('db down');
+        return answer;
+      });
+      return { keeper, calls: () => calls };
+    };
+    const taken = scripted([false]);
+    await taken.keeper.tick();
+    check('a renewal that finds the lease taken loses it at once (and aborts the signal)', [taken.keeper.lost, taken.keeper.reason, taken.keeper.signal.aborted], [true, 'taken', true]);
+    const oneError = scripted(['error']);
+    await oneError.keeper.tick();
+    check('one failed renewal is tolerated', oneError.keeper.lost, false);
+    const twoErrors = scripted(['error', 'error']);
+    await twoErrors.keeper.tick();
+    await twoErrors.keeper.tick();
+    check(`${LEASE_RENEW_MAX_ERRORS} failed renewals in a row lose the lease`, [twoErrors.keeper.lost, twoErrors.keeper.reason, twoErrors.keeper.signal.aborted], [true, 'renew_failed', true]);
+    const recovered = scripted(['error', true, 'error', true]);
+    for (let i = 0; i < 4; i += 1) await recovered.keeper.tick();
+    check('a successful renewal resets the error count', recovered.keeper.lost, false);
+    await taken.keeper.tick();
+    check('once lost, the keeper never renews again', taken.calls(), 1);
+  }
 
   section('Hashes: approvals and idempotency bound to the exact action');
   const base = { projectId: 'p', runId: 'r', stepId: 's', userId: 'u', tool: 'replaceDatasetVersion', toolVersion: '1.0.0', inputHash: inputHash({ oldVersionId: 'a', newVersionId: 'b' }), reason: 'replaces_data', targets: { oldContentHash: 'h1' }, impactHash: 'i1' };

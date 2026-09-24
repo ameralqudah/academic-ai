@@ -7,6 +7,8 @@
  * it applied, and writes a run event in the same transaction.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { researchRuns, runApprovals, runEvents, runSteps, type ResearchRun, type RunApproval, type RunEvent, type RunStep } from '@/server/db/schema';
@@ -41,6 +43,35 @@ export async function appendEvent(tx: RunTx, event: { runId: string; projectId: 
     type: event.type.slice(0, 40),
     data: boundedData(event.data ?? {}),
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Lease fencing                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * While a runner holds a run's lease, every run and step write it makes is
+ * fenced on that lease: it applies only while `research_runs.lease_owner` is
+ * still this runner. A stale runner (its lease lapsed and another runner took
+ * the run) therefore cannot change the run or its steps. Writes outside a
+ * runner (the service: create, cancel, decide; the reaper) are not fenced.
+ */
+const leaseHolder = new AsyncLocalStorage<{ runId: string; owner: string }>();
+
+export function asLeaseHolder<T>(runId: string, owner: string, work: () => Promise<T>): Promise<T> {
+  return leaseHolder.run({ runId, owner }, work);
+}
+
+function runLeaseFence(runId: string) {
+  const held = leaseHolder.getStore();
+  return held && held.runId === runId ? eq(researchRuns.leaseOwner, held.owner) : undefined;
+}
+
+/** For a step write: its run must still be leased by this runner. Without `runId`, applies to whatever run the runner holds. */
+function stepLeaseFence(runId?: string) {
+  const held = leaseHolder.getStore();
+  if (!held || (runId && held.runId !== runId)) return undefined;
+  return sql`exists (select 1 from ${researchRuns} where ${researchRuns.id} = ${runSteps.runId} and ${researchRuns.leaseOwner} = ${held.owner})`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -168,7 +199,7 @@ export async function transitionRun(
         /* The run moved: claims are counted again from here (see claimRunLease). */
         attempts: 0,
       })
-      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from)))
+      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from), runLeaseFence(runId)))
       .returning({ id: researchRuns.id, projectId: researchRuns.projectId });
     if (rows.length === 0) return false;
     await appendEvent(t, { runId, projectId: rows[0]!.projectId, userId, type: event?.type ?? `run.${to.toLowerCase()}`, data: { from, to, ...(patch.stopReason ? { stopReason: patch.stopReason } : {}), ...(event?.data ?? {}) } });
@@ -181,7 +212,7 @@ export async function transitionRun(
 export async function patchRun(userId: string, runId: string, patch: Pick<RunPatch, 'spent' | 'planner'>): Promise<void> {
   await withRunScope(userId, async (tx) => {
     const { spent, ...rest } = patch;
-    await tx.update(researchRuns).set({ ...rest, ...spentSet({ spent }), updatedAt: new Date() }).where(eq(researchRuns.id, runId));
+    await tx.update(researchRuns).set({ ...rest, ...spentSet({ spent }), updatedAt: new Date() }).where(and(eq(researchRuns.id, runId), runLeaseFence(runId)));
   });
 }
 
@@ -303,7 +334,7 @@ export async function transitionStep(
     const rows = await tx
       .update(runSteps)
       .set({ status: to, updatedAt: new Date(), ...patch })
-      .where(and(eq(runSteps.id, step.id), inArray(runSteps.status, from), ...(options.claimToken ? [eq(runSteps.claimToken, options.claimToken)] : [])))
+      .where(and(eq(runSteps.id, step.id), inArray(runSteps.status, from), ...(options.claimToken ? [eq(runSteps.claimToken, options.claimToken)] : []), stepLeaseFence(step.runId)))
       .returning({ id: runSteps.id });
     if (rows.length === 0) return false;
     const [run] = await tx.select({ projectId: researchRuns.projectId }).from(researchRuns).where(eq(researchRuns.id, step.runId)).limit(1);
@@ -316,7 +347,7 @@ export async function transitionStep(
 /** Marks a failed step as final (no attempts left): a permanent error, or the run was cancelled. */
 export async function exhaustAttempts(userId: string, stepId: string): Promise<void> {
   await withRunScope(userId, async (tx) => {
-    await tx.update(runSteps).set({ attempts: sql`${runSteps.maxAttempts}`, updatedAt: new Date() }).where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'FAILED')));
+    await tx.update(runSteps).set({ attempts: sql`${runSteps.maxAttempts}`, updatedAt: new Date() }).where(and(eq(runSteps.id, stepId), eq(runSteps.status, 'FAILED'), stepLeaseFence()));
   });
 }
 

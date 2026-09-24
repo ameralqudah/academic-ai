@@ -5,7 +5,8 @@
 
 import { z } from 'zod';
 
-import { previewVersionReplacement, replaceVersion } from '@/server/stats/graph';
+import { AppError } from '@/server/http/errors';
+import { previewVersionReplacement, replacementOf, replaceVersion } from '@/server/stats/graph';
 import { listProjectDatasets, qualityReport, requireVersion, transformSchema, transformVersion } from '@/server/stats/versions';
 
 import { defineRunTool } from '../types';
@@ -198,15 +199,26 @@ export const replaceDatasetVersion = defineRunTool({
   },
   async execute(input, ctx) {
     /* The approval covered this Impact Report; the graph re-checks it at commit (P1-A protocol). */
+    const provenance = ctx.runId && ctx.stepId ? { runId: ctx.runId, stepId: ctx.stepId } : undefined;
     try {
-      const report = await replaceVersion(actor(ctx), ctx.projectId, input.oldVersionId, input.newVersionId, ctx.approvedImpactHash ?? undefined);
+      const report = await replaceVersion(actor(ctx), ctx.projectId, input.oldVersionId, input.newVersionId, ctx.approvedImpactHash ?? undefined, provenance);
       return { output: { replaced: true, impactHash: report.hash, affected: report.items.length }, ref: { kind: 'dataset_version', id: input.newVersionId } };
     } catch (error) {
-      /* A retry after the replacement committed: the graph refuses a second supersede; that is this step's own effect. */
-      if ((error as { details?: { reason?: string } }).details?.reason === 'already_superseded') {
+      if ((error as { details?: { reason?: string } }).details?.reason !== 'already_superseded') throw error;
+      /*
+       * Already replaced. Success only if it is THIS step's own effect: the
+       * `supersedes` edge comes from the requested new version and was recorded
+       * by this step. Anything else (another version, another actor, or no
+       * recorded provenance) is a conflict, never a reported success.
+       */
+      const existing = await replacementOf(ctx.projectId, input.oldVersionId);
+      if (existing && provenance && existing.newVersionId === input.newVersionId && existing.createdByStepId === provenance.stepId && existing.createdByRunId === provenance.runId) {
         return { output: { replaced: true, impactHash: ctx.approvedImpactHash ?? '', affected: 0 }, ref: { kind: 'dataset_version', id: input.newVersionId } };
       }
-      throw error;
+      throw new AppError('CONFLICT', 'This dataset version has already been replaced by another action; nothing was changed.', 'استُبدل هذا الإصدار من قبل بإجراء آخر؛ لم يتغيّر شيء.', {
+        reason: 'already_replaced',
+        replacedBy: existing?.newVersionId ?? null,
+      });
     }
   },
 });

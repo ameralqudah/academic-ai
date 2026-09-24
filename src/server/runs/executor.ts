@@ -14,6 +14,7 @@
  * A tool never runs inside a database transaction.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 
 import { logger } from '@/lib/logger';
@@ -25,6 +26,7 @@ import { AppError } from '@/server/http/errors';
 import { inputHash, stepIdempotencyKey } from './approvals';
 import { withRunScope } from './db-scope';
 import { activeElapsedMs, bytesOf, limitsFor, type RunLimits, type Tier } from './limits';
+import { createLeaseKeeper, type LeaseKeeper } from './lease';
 import { planRun, resolveReferences } from './planner';
 import { decide, productionPolicyDeps, storedDecision, type PolicyDecision } from './policy';
 import { toolByName } from './registry';
@@ -34,6 +36,16 @@ import type { ProjectRole, ToolDef } from './types';
 
 const HEARTBEAT_MS = 30_000;
 const CANCEL_POLL_MS = 2_000;
+let heartbeatMs = HEARTBEAT_MS;
+
+/** For tests: a shorter heartbeat, to exercise lease loss quickly. `null` restores the default. */
+export function setRunHeartbeatForTests(ms: number | null): void {
+  heartbeatMs = ms ?? HEARTBEAT_MS;
+}
+
+/** The lease of the run this runner is advancing (lost ⇒ stop, write nothing more). */
+const keeperScope = new AsyncLocalStorage<LeaseKeeper>();
+const leaseLost = () => keeperScope.getStore()?.lost === true;
 
 /** Errors a retry will not fix. */
 const PERMANENT = new Set(['VALIDATION', 'FORBIDDEN', 'NOT_FOUND', 'UNAUTHORIZED', 'IMPACT_ACK_REQUIRED', 'PLAN_LIMIT', 'UNAVAILABLE']);
@@ -42,6 +54,7 @@ class StepCancelled extends Error {}
 /** Rolls back an authorise-and-claim whose step changed underneath it. */
 class NotClaimed extends Error {}
 class StepTimedOut extends Error {}
+class StepLeaseLost extends Error {}
 
 /**
  * Advances a run as far as it can go now: to its end, to an approval, or to
@@ -64,10 +77,22 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
     throw error;
   }
   if (claims === null) return 'busy';
-  const heartbeat = setInterval(() => {
-    void store.renewRunLease(userId, runId, leaseOwner).catch((error: unknown) => logger.warn('runs.lease.renewFailed', { runId, error: String(error).slice(0, 200) }));
-  }, HEARTBEAT_MS);
+  /*
+   * The heartbeat renews the lease. A renewal that finds the lease gone, or
+   * LEASE_RENEW_MAX_ERRORS failures in a row, means the lease is LOST: the
+   * step in progress is aborted and nothing further is written (the store
+   * also fences every write on this lease), so a runner that took over is
+   * never displaced by this one.
+   */
+  const keeper = createLeaseKeeper(() => store.renewRunLease(userId, runId, leaseOwner), {
+    onLost: (reason) => logger.error('runs.lease.lost', { runId, leaseOwner, reason }),
+  });
+  const heartbeat = setInterval(() => void keeper.tick(), heartbeatMs);
   heartbeat.unref?.();
+  return keeperScope.run(keeper, () => store.asLeaseHolder(runId, leaseOwner, () => advanceHeld(userId, runId, owner.projectId, leaseOwner, claims, keeper, heartbeat)));
+}
+
+async function advanceHeld(userId: string, runId: string, projectId: string, leaseOwner: string, claims: number, keeper: LeaseKeeper, heartbeat: ReturnType<typeof setInterval>): Promise<'ran'> {
   try {
     if (claims > store.MAX_RUN_CLAIMS) {
       /* Claimed again and again without the run moving: nothing more a runner can do. */
@@ -75,9 +100,10 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
       await stopRun(userId, runId, 'worker_lost', { message: `The run was picked up ${claims} times without progress.`, claims });
       return 'ran';
     }
-    await runForUser(userId, () => withCallIds({ projectId: owner.projectId, runId }, () => drive(userId, runId)));
+    await runForUser(userId, () => withCallIds({ projectId, runId }, () => drive(userId, runId)));
     return 'ran';
   } catch (error) {
+    if (keeper.lost) return 'ran'; /* another runner owns the run now: write nothing */
     if (isRlsUnavailable(error)) {
       await failRlsUnavailable(runId, error);
       return 'ran';
@@ -103,6 +129,7 @@ async function failRlsUnavailable(runId: string, error: unknown): Promise<void> 
 
 async function drive(userId: string, runId: string): Promise<void> {
   for (let guard = 0; guard < 200; guard += 1) {
+    if (leaseLost()) return;
     const run = await store.readRun(userId, runId);
     if (!run || ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(run.status)) return;
     if (run.cancelRequestedAt) {
@@ -363,6 +390,7 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
   const started = Date.now();
   try {
     const result = await executeTool(userId, run, step, tool, validated, decision, limits);
+    if (leaseLost()) return 'stop'; /* the lease went while the tool ran: the runner that took over settles the step */
     const output = (tool.output as import('zod').ZodType<Record<string, unknown>>).safeParse(result.output);
     if (!output.success) throw new AppError('INTERNAL', 'The tool returned an output outside its schema.', 'أعادت الأداة نتيجة خارج مخططها.', { reason: 'invalid_output' });
     const stored = { output: output.data };
@@ -378,6 +406,7 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
     if (settled) await store.patchRun(userId, run.id, { spent: await spentOf(run, await store.readSteps(userId, run.id)) });
     return 'continue';
   } catch (error) {
+    if (error instanceof StepLeaseLost) return 'stop';
     if (error instanceof StepCancelled) {
       await store.transitionStep(userId, step, ['RUNNING'], 'CANCELLED', { finishedAt: new Date(), durationMs: Date.now() - started, error: { code: 'cancelled' } }, { claimToken: token });
       return 'continue';
@@ -401,10 +430,18 @@ async function executeTool(
   limits: Readonly<RunLimits>,
 ) {
   const controller = new AbortController();
-  let stop: ((reason: 'timeout' | 'cancelled') => void) | undefined;
-  const stopped = new Promise<'timeout' | 'cancelled'>((resolve) => {
+  let stop: ((reason: 'timeout' | 'cancelled' | 'lease_lost') => void) | undefined;
+  const stopped = new Promise<'timeout' | 'cancelled' | 'lease_lost'>((resolve) => {
     stop = resolve;
   });
+  /* The lease was lost: abort the tool and stop waiting for it (no settle; see advanceRun). */
+  const keeper = keeperScope.getStore();
+  const onLeaseLost = () => {
+    controller.abort();
+    stop?.('lease_lost');
+  };
+  if (keeper?.lost) onLeaseLost();
+  else keeper?.signal.addEventListener('abort', onLeaseLost, { once: true });
   const timeout = setTimeout(() => {
     controller.abort();
     stop?.('timeout');
@@ -437,12 +474,14 @@ async function executeTool(
     );
     running.catch(() => undefined);
     const raced = await Promise.race([running.then((result) => ({ result })), stopped]);
+    if (raced === 'lease_lost') throw new StepLeaseLost();
     if (raced === 'cancelled') throw new StepCancelled();
     if (raced === 'timeout') throw new StepTimedOut();
     return raced.result;
   } finally {
     clearTimeout(timeout);
     clearInterval(watch);
+    keeper?.signal.removeEventListener('abort', onLeaseLost);
   }
 }
 

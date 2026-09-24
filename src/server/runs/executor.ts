@@ -52,15 +52,36 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
   if (!owner || ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(owner.status)) return 'skipped';
   const userId = owner.userId;
   const leaseOwner = `${WORKER_ID}:${randomUUID().slice(0, 8)}`;
-  if (!(await store.claimRunLease(userId, runId, leaseOwner))) return 'busy';
+  let claims: number | null;
+  try {
+    claims = await store.claimRunLease(userId, runId, leaseOwner);
+  } catch (error) {
+    /* The database cannot enforce RLS for this run: stop it with that reason (fail closed), never retry forever. */
+    if (isRlsUnavailable(error)) {
+      await failRlsUnavailable(runId, error);
+      return 'ran';
+    }
+    throw error;
+  }
+  if (claims === null) return 'busy';
   const heartbeat = setInterval(() => {
     void store.renewRunLease(userId, runId, leaseOwner).catch((error: unknown) => logger.warn('runs.lease.renewFailed', { runId, error: String(error).slice(0, 200) }));
   }, HEARTBEAT_MS);
   heartbeat.unref?.();
   try {
+    if (claims > store.MAX_RUN_CLAIMS) {
+      /* Claimed again and again without the run moving: nothing more a runner can do. */
+      logger.error('runs.advance.claimLimit', { runId, claims });
+      await stopRun(userId, runId, 'worker_lost', { message: `The run was picked up ${claims} times without progress.`, claims });
+      return 'ran';
+    }
     await runForUser(userId, () => withCallIds({ projectId: owner.projectId, runId }, () => drive(userId, runId)));
     return 'ran';
   } catch (error) {
+    if (isRlsUnavailable(error)) {
+      await failRlsUnavailable(runId, error);
+      return 'ran';
+    }
     logger.error('runs.advance.crashed', { runId, error: String(error).slice(0, 300) });
     await stopRun(userId, runId, 'worker_lost', { message: String(error).slice(0, 300) }).catch(() => undefined);
     return 'ran';
@@ -68,6 +89,16 @@ export async function advanceRun(runId: string): Promise<'ran' | 'busy' | 'skipp
     clearInterval(heartbeat);
     await store.releaseRunLease(userId, runId, leaseOwner).catch(() => undefined);
   }
+}
+
+function isRlsUnavailable(error: unknown): boolean {
+  return error instanceof AppError && error.code === 'UNAVAILABLE' && (error.details as { reason?: string } | undefined)?.reason === 'rls_unavailable';
+}
+
+/** Records `rls_unavailable` through the one narrowly scoped owner-connection write (the RLS path is what failed). */
+async function failRlsUnavailable(runId: string, error: unknown): Promise<void> {
+  logger.error('runs.rls.unavailable', { runId });
+  await store.systemFailRunRlsUnavailable(runId, error instanceof AppError ? error.message : 'Row-level security is not enforced.').catch((failure: unknown) => logger.error('runs.rls.failRecordFailed', { runId, error: String(failure).slice(0, 200) }));
 }
 
 async function drive(userId: string, runId: string): Promise<void> {
@@ -85,24 +116,47 @@ async function drive(userId: string, runId: string): Promise<void> {
       continue;
     }
     if (run.status === 'WAITING_APPROVAL') {
-      /* Resumed after a decision: continue only if the waiting step's approval is now granted. */
-      const steps = await store.readSteps(userId, runId);
-      const waiting = steps.find((step) => step.status === 'WAITING_APPROVAL');
-      const approvals = waiting ? await store.approvalsForStep(userId, waiting.id) : [];
-      if (waiting && !approvals.some((approval) => approval.status === 'APPROVED' || approval.status === 'PENDING') && approvals.some((approval) => approval.status === 'REJECTED')) {
-        /* Rejected, and the decision did not finish settling the run: settle it here. */
-        await store.transitionStep(userId, waiting, ['WAITING_APPROVAL'], 'SKIPPED', { error: { code: 'approval_rejected' }, finishedAt: new Date() });
-        await stopRun(userId, runId, 'approval_rejected');
-        return;
-      }
-      if (!approvals.some((approval) => approval.status === 'APPROVED')) return;
-      if (!(await store.transitionRun(userId, runId, ['WAITING_APPROVAL'], 'RUNNING', { wait: 'resume' }, { type: 'run.resumed' }))) return;
+      if ((await settleWaiting(userId, run)) === 'stop') return;
       continue;
     }
     if (run.status !== 'RUNNING') return;
     const next = await nextStep(userId, run, limits);
     if (next === 'stop') return;
   }
+}
+
+/**
+ * A run parked on an approval, settled deterministically from the waiting
+ * step's approvals (newest decisions win in this order):
+ * - an open request (PENDING, within its TTL): keep waiting for the person;
+ * - APPROVED within its TTL: resume;
+ * - REJECTED: the step is skipped and the run stops (`approval_rejected`);
+ * - otherwise nothing can authorise it any more (expired, cancelled or already
+ *   used): open requests past their TTL are expired, the step is skipped and
+ *   the run stops (`approval_expired`). The TTL itself is unchanged.
+ * - No step is waiting (an earlier runner stopped part-way): resume, and the
+ *   step logic settles the run from its steps.
+ */
+async function settleWaiting(userId: string, run: ResearchRun): Promise<'continue' | 'stop'> {
+  const steps = await store.readSteps(userId, run.id);
+  const waiting = steps.find((step) => step.status === 'WAITING_APPROVAL');
+  const resume = async () => ((await store.transitionRun(userId, run.id, ['WAITING_APPROVAL'], 'RUNNING', { wait: 'resume' }, { type: 'run.resumed' })) ? 'continue' : 'stop');
+  if (!waiting) return resume();
+  const approvals = await store.approvalsForStep(userId, waiting.id);
+  const now = Date.now();
+  if (approvals.some((approval) => approval.status === 'PENDING' && approval.expiresAt.getTime() > now)) return 'stop';
+  if (approvals.some((approval) => approval.status === 'APPROVED' && approval.expiresAt.getTime() > now)) return resume();
+  if (approvals.some((approval) => approval.status === 'REJECTED')) {
+    await store.transitionStep(userId, waiting, ['WAITING_APPROVAL'], 'SKIPPED', { error: { code: 'approval_rejected' }, finishedAt: new Date() });
+    await stopRun(userId, run.id, 'approval_rejected');
+    return 'stop';
+  }
+  for (const approval of approvals) {
+    if (approval.status === 'PENDING' || approval.status === 'APPROVED') await store.expireApproval(userId, approval, 'timed_out');
+  }
+  await store.transitionStep(userId, waiting, ['WAITING_APPROVAL'], 'SKIPPED', { error: { code: 'approval_expired' }, finishedAt: new Date() });
+  await stopRun(userId, run.id, 'approval_expired');
+  return 'stop';
 }
 
 /* -------------------------------------------------------------------------- */

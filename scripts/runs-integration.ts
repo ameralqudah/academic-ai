@@ -414,6 +414,130 @@ async function main() {
   const approvedClaimSteps = (await getRun(me, P, slow)).events.filter((event) => ['approval.consumed', 'step.authorized', 'step.running'].includes(event.type)).map((event) => event.type);
   check('consume, authorise and claim are recorded together, in order', approvedClaimSteps, ['approval.consumed', 'step.authorized', 'step.running']);
 
+  /* ------------------------------------------------------------------ */
+  section('WS1: no run waits forever; RLS failure is recorded; claims are bounded');
+  const parkOnClaim = async (intent: string) => {
+    planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+    const id = (await createRun(me, P, { intent })).run.id;
+    await drain(id);
+    const [waitingStep] = await store.readSteps(owner, id);
+    const [openApproval] = await store.approvalsForStep(owner, waitingStep!.id);
+    return { id, waitingStep: waitingStep!, openApproval: openApproval! };
+  };
+  /* The reaper considers a run only once it has been quiet (2 minutes) with no live lease. */
+  const quiet = (id: string) => db.update(researchRuns).set({ updatedAt: sql`now() - interval '3 minutes'`, leaseOwner: null, leaseExpiresAt: null }).where(and(eq(researchRuns.id, id), sql`${researchRuns.status} not in ('SUCCEEDED', 'FAILED', 'CANCELLED')`)); /* a finished run is immutable (trigger) */
+  const picked = async (id: string) => (await store.systemStrandedRuns(10_000)).some((run) => run.id === id);
+
+  /* Item 2a: the reaper expired the approval, then died before stopping the run. */
+  const e2 = await parkOnClaim('Expired, never settled.');
+  check('claims are counted only while a run does not move (5 advances: 1 parked it, 4 found nothing to do)', (await store.readRun(owner, e2.id))?.attempts, 4);
+  await store.expireApproval(owner, e2.openApproval, 'timed_out');
+  await quiet(e2.id);
+  check('an expired approval left unsettled: the reaper picks the run up', await picked(e2.id), true);
+  const e2Done = await drain(e2.id);
+  check('… and it ends with approval_expired (step skipped)', [e2Done?.status, e2Done?.stopReason, (await store.readSteps(owner, e2.id))[0]?.status], ['FAILED', 'approval_expired', 'SKIPPED']);
+  await finish(e2.id);
+
+  /* Item 2b: a rejection committed, then the process died before stopping the run. */
+  const r2 = await parkOnClaim('Rejected, never settled.');
+  await store.decideApproval(owner, r2.openApproval, 'REJECTED');
+  await quiet(r2.id);
+  check('a rejection left unsettled: the reaper picks the run up', await picked(r2.id), true);
+  const r2Done = await drain(r2.id);
+  check('… and it ends with approval_rejected', [r2Done?.status, r2Done?.stopReason], ['FAILED', 'approval_rejected']);
+  await finish(r2.id);
+
+  /* Item 2c: a cancellation recorded on a waiting run, but its settling failed part-way. */
+  const c2 = await parkOnClaim('Cancelled, never settled.');
+  await store.requestCancel(owner, c2.id, P);
+  await quiet(c2.id);
+  check('a cancellation left unsettled: the reaper picks the run up', await picked(c2.id), true);
+  const c2Done = await drain(c2.id);
+  check('… and it ends CANCELLED, its step cancelled and its approval expired', [c2Done?.status, (await store.readSteps(owner, c2.id))[0]?.status, (await store.approvalsForStep(owner, c2.waitingStep.id))[0]?.status], ['CANCELLED', 'CANCELLED', 'EXPIRED']);
+  await finish(c2.id);
+
+  /* Item 2d: approved, but the dispatch after the decision was lost. */
+  const a2 = await parkOnClaim('Approved, never dispatched.');
+  await store.decideApproval(owner, a2.openApproval, 'APPROVED');
+  await quiet(a2.id);
+  check('an approval that was never dispatched: the reaper picks the run up', await picked(a2.id), true);
+  const a2Done = await drain(a2.id);
+  check('… and the approved step runs to completion', [a2Done?.status, a2Done?.stopReason], ['SUCCEEDED', 'completed']);
+  await finish(a2.id);
+
+  /* Item 2e: the TTL is unchanged: a run waiting on a person, within the TTL, is left alone. */
+  const w2 = await parkOnClaim('Waiting on a person.');
+  await quiet(w2.id);
+  check('a run waiting on an open request within its TTL is not picked up', await picked(w2.id), false);
+  await drain(w2.id);
+  check('… and advancing it keeps it waiting', [(await store.readRun(owner, w2.id))?.status, (await store.approvalsForStep(owner, w2.waitingStep.id))[0]?.status], ['WAITING_APPROVAL', 'PENDING']);
+  await finish(w2.id);
+  /* Past its TTL (without the reaper's own expiry sweep), advancing it settles it as expired. */
+  process.env.RUN_LIMITS = JSON.stringify({ free: { approvalTtlMs: 1 } });
+  resetEnvCache();
+  resetLimits();
+  planReply([{ tool: 'createClaim', label: 'Claim', input: { runId: statRunId, keys: ['coef:x'] }, dependsOn: [] }]);
+  const t2Id = (await createRun(me, P, { intent: 'Waited past the TTL.' })).run.id;
+  await advanceRun(t2Id); /* one advance: parked, not yet looked at again */
+  const [t2Step] = await store.readSteps(owner, t2Id);
+  const t2 = { id: t2Id, waitingStep: t2Step! };
+  check('parked on a request with a 1 ms TTL', (await store.readRun(owner, t2Id))?.status, 'WAITING_APPROVAL');
+  delete process.env.RUN_LIMITS;
+  resetEnvCache();
+  resetLimits();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await quiet(t2.id);
+  check('once its request is past the TTL, the run is picked up', await picked(t2.id), true);
+  const t2Done = await drain(t2.id);
+  check('… and ends with approval_expired, its request expired', [t2Done?.status, t2Done?.stopReason, (await store.approvalsForStep(owner, t2.waitingStep.id))[0]?.status], ['FAILED', 'approval_expired', 'EXPIRED']);
+  await finish(t2.id);
+
+  /* Item 2f: parked with no waiting step (an older runner stopped part-way): resumed and re-decided. */
+  const n2 = await parkOnClaim('Parked without its step.');
+  await store.expireApproval(owner, n2.openApproval, 'test');
+  await store.transitionStep(owner, n2.waitingStep, ['WAITING_APPROVAL'], 'QUEUED', {});
+  await quiet(n2.id);
+  check('a run parked without a waiting step: the reaper picks it up', await picked(n2.id), true);
+  await drain(n2.id);
+  const n2View = await getRun(me, P, n2.id);
+  check('… it resumes and asks again properly (step and run both waiting, a fresh request)', [n2View.run.status, n2View.steps[0]?.status, n2View.approvals.filter((a) => a.status === 'PENDING').length], ['WAITING_APPROVAL', 'WAITING_APPROVAL', 1]);
+  await finish(n2.id);
+  check('the free user’s single active-run slot is free again after all of these', (await createRun(me, P, { intent: 'Slot check.' }).then(async ({ run }) => { await finish(run.id); return 'created'; }).catch((error: unknown) => (error instanceof AppError ? error.code : 'error'))), 'created');
+
+  /* Item 4a: RLS can no longer be enforced for a queued run: it is stopped with that reason, once. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const rlsRun = (await createRun(me, P, { intent: 'RLS breaks after creation.' })).run.id;
+  await db.execute(sql`alter role academic_app bypassrls`);
+  forgetRlsCheck();
+  let rlsOutcome: string;
+  try {
+    rlsOutcome = await advanceRun(rlsRun);
+  } catch (error) {
+    rlsOutcome = `threw:${error instanceof AppError ? error.code : 'error'}`;
+  }
+  await db.execute(sql`alter role academic_app nobypassrls`);
+  forgetRlsCheck();
+  await assertRlsEnforced();
+  const [rlsRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, rlsRun));
+  check('a run whose RLS cannot be enforced is not left QUEUED: FAILED with rls_unavailable', [rlsOutcome, rlsRow?.status, rlsRow?.stopReason], ['ran', 'FAILED', 'rls_unavailable']);
+  check('… recorded as one run.failed event', (await db.select().from(runEvents).where(and(eq(runEvents.runId, rlsRun), eq(runEvents.type, 'run.failed')))).length, 1);
+  check('… nothing executed (no step ran)', (await db.select().from(runSteps).where(eq(runSteps.runId, rlsRun))).length, 0);
+  await quiet(rlsRun);
+  check('… and it is never re-dispatched (no loop)', [await picked(rlsRun), await advanceRun(rlsRun), await advanceRun(rlsRun)], [false, 'skipped', 'skipped']);
+  await finish(({ id: rlsRun }).id);
+
+  /* Item 4b: picked up 20 times without moving: the 21st claim stops it as worker_lost. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const loopRun = (await createRun(me, P, { intent: 'Never moves.' })).run.id;
+  await db.update(researchRuns).set({ attempts: 20 }).where(eq(researchRuns.id, loopRun));
+  const loopOutcome = await advanceRun(loopRun);
+  const [loopRow] = await db.select().from(researchRuns).where(eq(researchRuns.id, loopRun));
+  check('the 21st claim without progress stops the run as worker_lost', [loopOutcome, loopRow?.status, loopRow?.stopReason], ['ran', 'FAILED', 'worker_lost']);
+  await quiet(loopRun);
+  check('… and it is never re-dispatched', await picked(loopRun), false);
+  await finish(({ id: loopRun }).id);
+  check('a run that progresses is not stopped by the claim limit (claims reset on each state change)', a2Done?.attempts, 0);
+
   section('Flags');
   process.env.FF_RUNS = 'false';
   resetEnvCache();

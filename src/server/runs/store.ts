@@ -7,7 +7,7 @@
  * it applied, and writes a run event in the same transaction.
  */
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { researchRuns, runApprovals, runEvents, runSteps, type ResearchRun, type RunApproval, type RunEvent, type RunStep } from '@/server/db/schema';
 
@@ -165,6 +165,8 @@ export async function transitionRun(
         ...(TERMINAL_RUN.has(to) ? { finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null } : {}),
         ...rest,
         ...spentSet({ spent, wait }),
+        /* The run moved: claims are counted again from here (see claimRunLease). */
+        attempts: 0,
       })
       .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, from)))
       .returning({ id: researchRuns.id, projectId: researchRuns.projectId });
@@ -201,16 +203,26 @@ export async function requestCancel(userId: string, runId: string, projectId: st
 
 export const RUN_LEASE_SECONDS = 120;
 
-export async function claimRunLease(userId: string, runId: string, owner: string): Promise<boolean> {
+/**
+ * Claims a run's lease. Returns the number of claims since the run last
+ * changed state (`attempts` is reset by every transition), or null when
+ * another runner holds it. A run claimed again and again without moving is
+ * stopped by the executor (MAX_RUN_CLAIMS), so a run the engine cannot
+ * advance is never re-dispatched forever.
+ */
+export async function claimRunLease(userId: string, runId: string, owner: string): Promise<number | null> {
   return withRunScope(userId, async (tx) => {
     const rows = await tx
       .update(researchRuns)
       .set({ leaseOwner: owner, leaseExpiresAt: sql`now() + make_interval(secs => ${RUN_LEASE_SECONDS})`, attempts: sql`${researchRuns.attempts} + 1`, updatedAt: new Date() })
       .where(and(eq(researchRuns.id, runId), or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`), eq(researchRuns.leaseOwner, owner))))
-      .returning({ id: researchRuns.id });
-    return rows.length > 0;
+      .returning({ attempts: researchRuns.attempts });
+    return rows[0]?.attempts ?? null;
   });
 }
+
+/** Claims without a state change after which a run is stopped as `worker_lost`. */
+export const MAX_RUN_CLAIMS = 20;
 
 export async function renewRunLease(userId: string, runId: string, owner: string): Promise<boolean> {
   return withRunScope(userId, async (tx) => {
@@ -427,18 +439,53 @@ export async function systemRunOwner(runId: string): Promise<{ userId: string; p
   return row ?? null;
 }
 
-/** Runs the reaper should pick up: unfinished, not waiting on a person, lease lapsed or never taken for a while. */
+/**
+ * Runs the reaper should pick up (a read of the owner connection; the run is
+ * then advanced in `withRunScope` as its owner). Unfinished, no live lease, and:
+ * - a runner disappeared (lease lapsed, or never taken for a while); or
+ * - quiet for 2 minutes and needing attention: a cancellation to finish, or a
+ *   wait on an approval that no PENDING, unexpired request can end any more
+ *   (approved but never dispatched; rejected, expired or cancelled but never
+ *   settled). A run waiting on a person, within the TTL, is never picked up.
+ */
 export async function systemStrandedRuns(limit = 50): Promise<{ id: string; userId: string }[]> {
+  const quiet = lt(researchRuns.updatedAt, sql`now() - interval '2 minutes'`);
+  const leaseFree = or(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.leaseExpiresAt, sql`now()`));
+  const noOpenRequest = sql`not exists (select 1 from ${runApprovals} where ${runApprovals.runId} = ${researchRuns.id} and ${runApprovals.status} = 'PENDING' and ${runApprovals.expiresAt} > now())`;
   return systemDb
     .select({ id: researchRuns.id, userId: researchRuns.userId })
     .from(researchRuns)
     .where(
       and(
-        inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING']),
-        or(lt(researchRuns.leaseExpiresAt, sql`now()`), and(isNull(researchRuns.leaseExpiresAt), lt(researchRuns.updatedAt, sql`now() - interval '2 minutes'`))),
+        inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL']),
+        leaseFree,
+        or(
+          and(inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING']), or(lt(researchRuns.leaseExpiresAt, sql`now()`), and(isNull(researchRuns.leaseExpiresAt), quiet))),
+          and(quiet, or(isNotNull(researchRuns.cancelRequestedAt), and(eq(researchRuns.status, 'WAITING_APPROVAL'), noOpenRequest))),
+        ),
       ),
     )
     .limit(limit);
+}
+
+/**
+ * The ONLY write through the owner connection (P1-D WS1, approved): ends a
+ * run as FAILED with `rls_unavailable` when the database can no longer enforce
+ * row-level security for it. Fail-closed: nothing is executed; the run can
+ * only stop. The row's triggers still enforce a legal transition. Any other
+ * write goes through `withRunScope` (a smoke gate checks this).
+ */
+export async function systemFailRunRlsUnavailable(runId: string, message: string): Promise<boolean> {
+  return systemDb.transaction(async (tx) => {
+    const rows = await tx
+      .update(researchRuns)
+      .set({ status: 'FAILED', stopReason: 'rls_unavailable', error: { reason: 'rls_unavailable', message: message.slice(0, 300) }, finishedAt: new Date(), leaseOwner: null, leaseExpiresAt: null, updatedAt: new Date() })
+      .where(and(eq(researchRuns.id, runId), inArray(researchRuns.status, ['QUEUED', 'PLANNING', 'RUNNING', 'WAITING_APPROVAL'])))
+      .returning({ projectId: researchRuns.projectId, userId: researchRuns.userId });
+    if (!rows[0]) return false;
+    await appendEvent(tx, { runId, projectId: rows[0].projectId, userId: rows[0].userId, type: 'run.failed', data: { to: 'FAILED', stopReason: 'rls_unavailable', via: 'system' } });
+    return true;
+  });
 }
 
 /** Open approvals past their expiry, with the run owner to act as. */

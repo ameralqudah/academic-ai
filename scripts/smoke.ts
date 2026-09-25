@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
-import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
+import { buildResultsContext, describeRun, hasComputedResults, usableLegacyRuns } from '@/ai/context/results';
 import { generalPrompt } from '@/ai/prompts/general';
 import {
   canUseModel,
@@ -1345,7 +1345,10 @@ assertTrue('a very small p is written as "< .001", not as zeros', tinyP.includes
 /* The block that carries the rules the model must follow. */
 const block = buildResultsContext([sampleRun]);
 assertTrue('the block exists when there are results', block !== null);
-assertTrue('and states the figures are facts', (block ?? '').includes('They are facts.'));
+/* Legacy results are computed, never "verified" (WS2 N2): the header and the rules say so. */
+assertTrue('the block is labelled computed, not verified', (block ?? '').startsWith('## COMPUTED ANALYSIS RESULTS (legacy engine, not independently verified)'));
+assertTrue('and never presents them as VERIFIED', !(block ?? '').includes('VERIFIED') && !(block ?? '').includes('They are facts.'));
+assertTrue('and tells the model not to call them verified', (block ?? '').includes('Do not describe these results as verified.'));
 assertTrue('and forbids recomputing them', (block ?? '').toLowerCase().includes('do not recompute'));
 assertTrue(
   'and forbids adding statistics that are not present',
@@ -1363,8 +1366,34 @@ assertTrue(
  * researcher's own analysis. The change is strictly additive.
  */
 check('no attached analyses means no block', buildResultsContext([]), null);
-check('and the section knows it has nothing to write from', hasVerifiedResults([]), false);
-check('while one analysis is enough', hasVerifiedResults([sampleRun]), true);
+check('and the section knows it has nothing to write from', hasComputedResults([]), false);
+check('while one analysis is enough', hasComputedResults([sampleRun]), true);
+
+/*
+ * Each analysis carries its tier (WS2 N2, D3), and a windowed one (computed on
+ * the first rows of a file) is left out of the block and of the section's
+ * numbers, with the block saying it was left out.
+ */
+assertTrue('a run with no recorded data is shown as unpinned', described.includes('Tier: unpinned: the exact data this was computed on is not recorded'));
+const pinnedRun = { ...sampleRun, datasetVersionId: 'dv-1', datasetContentHash: 'h'.repeat(64), engineVersion: 'engine-7' } as typeof sampleRun;
+assertTrue('a run with its data and engine recorded is shown as pinned', describeRun(pinnedRun, 0).includes('Tier: pinned: the dataset version, its content hash and the engine version (engine-7) are recorded'));
+const windowedLegacy = {
+  ...pinnedRun,
+  id: 'run-w',
+  testKey: 'correlation.pearson',
+  spec: { columns: { x: 'a', y: 'b' }, truncatedTo: 5000 },
+  result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+} as typeof sampleRun;
+assertTrue('a windowed run is shown as windowed, with its row count', describeRun(windowedLegacy, 0).includes('Tier: windowed: computed on the first 5000 rows of the file only'));
+check('usable runs leave the windowed one out', [usableLegacyRuns([pinnedRun, windowedLegacy]).usable.map((run) => run.id), usableLegacyRuns([pinnedRun, windowedLegacy]).windowed.map((run) => run.id)], [['run-1'], ['run-w']]);
+const mixedBlock = buildResultsContext([pinnedRun, windowedLegacy]) ?? '';
+assertTrue('the windowed run\u2019s figures do not reach the prompt', !mixedBlock.includes('0.812') && !mixedBlock.includes('0.004') && mixedBlock.includes('-2.221'));
+assertTrue('and the block says it was left out', mixedBlock.includes('Left out: 1 attached analysis was computed on the first rows of a file only (correlation.pearson)'));
+check('only windowed runs attached means no block', buildResultsContext([windowedLegacy]), null);
+check('and nothing to write from', hasComputedResults([windowedLegacy]), false);
+const legacyAllowed = allowedFromLegacyResults([pinnedRun, windowedLegacy]);
+check('the allowed numbers come from the usable run only', [legacyAllowed.used, legacyAllowed.excluded], [[{ id: 'run-1', tier: 'pinned' }], [{ id: 'run-w', tier: 'windowed' }]]);
+check('a windowed run\u2019s value is untraced, a pinned one\u2019s is traced', [checkNumbers('r = .81', { mode: 'model', allowed: legacyAllowed.values }).clean, checkNumbers('d = -0.52', { mode: 'model', allowed: legacyAllowed.values }).clean], [false, true]);
 
 /* A reliability result has a different shape and must survive it. */
 const alphaRun = {

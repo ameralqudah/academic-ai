@@ -32,6 +32,7 @@ import { eq, like } from 'drizzle-orm';
 
 import type { AgentEvent } from '@/agents/events';
 import { buildResultsContext } from '@/ai/context/results';
+import { allowedFromLegacyResults, checkNumbers } from '@/server/integrity/numbers';
 import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
 import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
@@ -1409,7 +1410,10 @@ async function main() {
     chapterContext.includes(computed.pValue < 0.001 ? 'p < .001' : `p = ${computed.pValue.toFixed(3)}`),
   );
   assertTrue('the variables are named', chapterContext.includes('male'));
-  assertTrue('the rules travel with the numbers', chapterContext.includes('They are facts.'));
+  assertTrue('the rules travel with the numbers', chapterContext.includes('Report these numbers exactly as written.'));
+  /* Legacy results are labelled computed, with their tier, never "verified" (WS2 N2). */
+  assertTrue('the chapter block is labelled computed, not verified', chapterContext.startsWith('## COMPUTED ANALYSIS RESULTS (legacy engine, not independently verified)') && !chapterContext.includes('VERIFIED'));
+  assertTrue('a run pinned to its data version shows the pinned tier', chapterContext.includes('Tier: pinned:'));
 
   /*
    * Detaching restores the original behaviour exactly. This is what makes the
@@ -1422,6 +1426,63 @@ async function main() {
     buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')),
     null,
   );
+
+  {
+    /*
+     * WS2 D3: a result computed on the first rows of a file only is not the
+     * study's. It cannot be attached, and one attached before this rule is
+     * left out of the chapter's prompt and of the numbers it may repeat.
+     */
+    const windowedRun = await analysisRunsRepo.create({
+      userId: statsOwner,
+      datasetId: statsFile.dataset.id,
+      testKey: 'correlation.pearson',
+      spec: { columns: { x: 'score', y: 'score' }, rowsAnalysed: 5000, truncatedTo: 5000 },
+      result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+      datasetVersionId: chapterRun.run.datasetVersionId,
+      datasetContentHash: chapterRun.run.datasetContentHash,
+      engineVersion: chapterRun.run.engineVersion,
+    });
+    let refusal: unknown = null;
+    try {
+      await attachRun({ runId: windowedRun.id, userId: statsOwner, projectId: statsProject.id, sectionKey: 'RESULTS' });
+    } catch (error) {
+      refusal = error;
+    }
+    check(
+      'attaching a windowed run is refused (409, windowed_run)',
+      refusal instanceof AppError ? [refusal.code, refusal.status, (refusal.details as { reason?: string; rows?: number }).reason, (refusal.details as { rows?: number }).rows] : refusal,
+      ['CONFLICT', 409, 'windowed_run', 5000],
+    );
+    check('and nothing is attached', (await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')).length, 0);
+
+    let intruderAttach = false;
+    try {
+      await attachRun({ runId: windowedRun.id, userId: statsIntruder, projectId: statsProject.id, sectionKey: 'RESULTS' });
+    } catch (error) {
+      intruderAttach = error instanceof AppError && (error.code === 'NOT_FOUND' || error.code === 'FORBIDDEN');
+    }
+    assertTrue('another user still cannot attach it', intruderAttach);
+
+    /* A whole-file run still attaches as before. */
+    check('a whole-file run still attaches', (await attachRun({ runId: chapterRun.run.id, userId: statsOwner, projectId: statsProject.id, sectionKey: 'RESULTS' })).sectionKey, 'RESULTS');
+
+    /* One attached before the rule (written directly, as an old row would be). */
+    await analysisRunsRepo.attachToSection(windowedRun.id, statsOwner, statsProject.id, 'RESULTS');
+    const attachedBoth = await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS');
+    check('both runs are attached in the table', attachedBoth.length, 2);
+    const mixedContext = buildResultsContext(attachedBoth) ?? '';
+    assertTrue('the windowed run\u2019s figures do not reach the chapter prompt', !mixedContext.includes('0.812') && mixedContext.includes(computed.statistic.value.toFixed(3)));
+    assertTrue('and the prompt says it was left out', mixedContext.includes('Left out: 1 attached analysis was computed on the first rows of a file only (correlation.pearson)'));
+    const legacyAllowed = allowedFromLegacyResults(attachedBoth);
+    check('the allowed numbers exclude the windowed run', [legacyAllowed.used.map((entry) => [entry.id, entry.tier]), legacyAllowed.excluded.map((entry) => [entry.id, entry.tier])], [[[chapterRun.run.id, 'pinned']], [[windowedRun.id, 'windowed']]]);
+    check('so its value is untraced in the text', checkNumbers('r = .81', { mode: 'model', allowed: legacyAllowed.values }).clean, false);
+
+    /* Detaching is always allowed, and restores the template behaviour. */
+    check('a windowed run can be detached', (await detachRun(windowedRun.id, statsOwner)).sectionKey, null);
+    await detachRun(chapterRun.run.id, statsOwner);
+    check('the section is back to a template', buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')), null);
+  }
 
   /* ------------------------------------------------------ PLS-SEM as a job */
 

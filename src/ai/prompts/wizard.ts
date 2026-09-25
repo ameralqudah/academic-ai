@@ -100,12 +100,13 @@ export function sectionPrompt(
   context: ProjectContext,
   extra?: string,
   /**
-   * Analyses the researcher attached to this section, already formatted as
-   * facts. Its presence changes what the section is: with it, the results are
-   * written from real figures; without it, the old behaviour stands and a
-   * template is produced instead.
+   * Analyses the researcher attached to this section, already formatted, with
+   * each one's tier (legacy results, not independently verified: WS2 N2). Its
+   * presence changes what the section is: with it, the results are written
+   * from real figures; without it, the old behaviour stands and a template is
+   * produced instead.
    */
-  verifiedResults?: string | null,
+  computedResults?: string | null,
 ): string {
   const definition = SECTION_BY_KEY[sectionKey];
   const instruction =
@@ -124,13 +125,13 @@ export function sectionPrompt(
    * figures that were supplied. It is replaced by an instruction to use them
    * and nothing else.
    */
-  const dataWarning = verifiedResults
-    ? '\n\nThe researcher has supplied verified analysis results, included below. Write this section from those figures. Every number in your output must appear in that block; do not compute, estimate, or add any other.'
+  const dataWarning = computedResults
+    ? '\n\nThe researcher has attached computed analysis results (legacy engine, not independently verified), included below. Write this section from those figures. Every number in your output must appear in that block; do not compute, estimate, or add any other.'
     : definition?.requiresUserData
       ? '\n\nThis section depends on the researcher\'s own data. If it has not been provided, produce the structure and say what is needed — do not invent content.'
       : '';
 
-  const results = verifiedResults ? `\n\n${verifiedResults}` : '';
+  const results = computedResults ? `\n\n${computedResults}` : '';
 
   return buildSystemPrompt(
     `${instruction}${target}${dataWarning}${extra ? `\n\nAdditional instruction from the researcher: ${extra}` : ''}${results}

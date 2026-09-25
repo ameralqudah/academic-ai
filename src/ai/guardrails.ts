@@ -15,7 +15,7 @@ export type GuardrailFlag =
   | 'EXTERNAL_URL'
   | 'CLAIMED_EXPERIMENT'
   | 'FABRICATED_STATISTIC'
-  /** A number in a results section that matches none of the verified analyses attached to it (P1-C). */
+  /** A number in a results section that matches none of the analyses attached to it (P1-C). */
   | 'UNTRACED_STATISTIC';
 
 export interface GuardrailFinding {
@@ -65,10 +65,10 @@ export interface InspectOptions {
   /** Sections that must not contain numeric findings unless the user supplied data. */
   expectsNoStatistics?: boolean;
   /**
-   * For results sections: every number the verified analyses attached to the
-   * section contain, as the text may write them. A statistic in the text that
-   * is not one of them is flagged as untraced (P1-C: the check used to be off
-   * exactly where numbers belong).
+   * For results sections: every number the analyses attached to the section
+   * contain (windowed runs excluded, WS2 D3), as the text may write them. A
+   * statistic in the text that is not one of them is flagged as untraced
+   * (P1-C: the check used to be off exactly where numbers belong).
    */
   verifiedNumbers?: ReadonlySet<string>;
   /** Text the user supplied (their instruction, project metadata): numbers in it are theirs, not findings (WS2). */
@@ -129,8 +129,8 @@ function noticeFor(flags: GuardrailFlag[]): GuardrailResult['notice'] {
 
   if (flags.includes('UNTRACED_STATISTIC')) {
     parts.push({
-      en: 'Some numbers here do not match any verified analysis attached to this section. Replace them with values from your own analyses, or insert verified values from the analysis workbench.',
-      ar: 'بعض الأرقام هنا لا تطابق أي تحليل موثّق مرفق بهذا القسم. استبدلها بقيم من تحليلاتك، أو أدرج قيمًا موثّقة من منصة التحليل.',
+      en: 'Some numbers here do not match any analysis attached to this section. Replace them with values from your own analyses, or insert verified values from the analysis workbench.',
+      ar: 'بعض الأرقام هنا لا تطابق أي تحليل مرفق بهذا القسم. استبدلها بقيم من تحليلاتك، أو أدرج قيمًا موثّقة من منصة التحليل.',
     });
   }
 

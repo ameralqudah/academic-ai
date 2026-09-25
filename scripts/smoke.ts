@@ -65,7 +65,7 @@ import { attemptCost } from '@/server/ai/gateway/metering';
 import { inspectOutput, numberSpellings, parseJsonOutput } from '@/ai/guardrails';
 import * as statisticsText from '@/lib/statistics-text';
 import { normaliseDigits, untracedNumbers } from '@/lib/statistics-text';
-import { allowedSpellings, checkNumbers, legacyResultTier, NUMERIC_GUARD_VERSION, quarantine, QUARANTINE_MARKER, researchNumbers } from '@/server/integrity/numbers';
+import { allowedFromLegacyResults, allowedSpellings, checkNumbers, emptyScopedValues, legacyResultTier, NUMERIC_GUARD_VERSION, quarantine, QUARANTINE_MARKER, researchNumbers, valueClassesOf } from '@/server/integrity/numbers';
 import { sectionI18nKey } from '@/lib/sections';
 import { countWords, slugify, truncate } from '@/lib/text';
 import { assertSafeKey, datasetKey, datasetPrefix, keyBelongsTo } from '@/server/storage/keys';
@@ -280,6 +280,56 @@ console.log('\nnumeric integrity guard (WS2 group 1)');
     external.test('β = 1 overall');
     check('M4: a caller moving its own copy’s lastIndex cannot affect P1-C detection or the guard', [untracedNumbers('β = 1 overall'), found('β = 1 overall'), untracedNumbers('β = 1 overall')], [['β = 1'], ['β = 1'], ['β = 1']]);
   }
+
+  /* WS2 Workstream A, commit 1: M5 performance, M3 context narrowing, M2 field-scoped tracing, the shared legacy helper. */
+  {
+    const dense = (sentences: number) => Array.from({ length: sentences }, (_, i) => `Item ${i}: loadings above .${(i % 90) + 10} are acceptable; r = .${(i % 90) + 10}, t(98) = 2.${i % 10}.`).join(' ');
+    const big = dense(4000);
+    const started = performance.now();
+    const bigCheck = checkNumbers(big, { mode: 'model', context: ['N = 250'] });
+    const bigQuarantined = quarantine(big, bigCheck);
+    const elapsed = performance.now() - started;
+    check(`M5: a ${Math.round(big.length / 1000)}k-character, number-dense text is checked and quarantined in under 750 ms`, [elapsed < 750, bigCheck.findings.length, checkNumbers(bigQuarantined.text, { mode: 'model' }).clean], [true, 8000, true]);
+    /* The one-pass quarantine equals the straightforward one (replace from the end), on a varied corpus. */
+    const naive = (text: string, spans: { index: number; length: number }[], marker: string) => [...spans].sort((a, b) => b.index - a.index).reduce((out, f) => out.slice(0, f.index) + marker + out.slice(f.index + f.length), text);
+    const corpus = [dense(40), 'r = .45 and p < .01; β = −0,31 (SD = 1.2), χ²(3) = 45, ٤٥٪ of ٢٥٠', 'no numbers here', 'b = .777\nM = 3.2\n## 0.45 of it'];
+    check('M5: the one-pass quarantine gives exactly the same text as replacing each finding in turn', corpus.every((text) => { const c = checkNumbers(text, { mode: 'model' }); return quarantine(text, c).text === naive(text, c.findings, QUARANTINE_MARKER.en); }), true);
+    check('M5: detection is unchanged by the index structures (same findings as before, in text order)', found('see Table 2.1; r = .45, then .30 (ns) and 12% of 1.2.3 items; t(98) = 2.31'), ['r = .45', '.30', '12%', 't(98) = 2.31']);
+  }
+  /* M3: the user's context allows only the research numbers they wrote, within their class. */
+  check('M3: labels, chapter and page numbers in the user’s text allow nothing', [found('t(98) = 3 and b = 2', new Set(), ['Write chapter 3 in 2 pages.']), found('F = 12', new Set(), ['See Table 12 and pp. 12–15.'])], [['t(98) = 3', 'b = 2'], ['F = 12']]);
+  check('M3: a statistic the user wrote is allowed only with the same class', [found('N = 250', new Set(), ['Use N = 250.']), found('t = 250', new Set(), ['Use N = 250.']), found('p = .05', new Set(), ['with α = .05']), found('α = .05', new Set(), ['with α = .05'])], [[], ['t = 250'], ['p = .05'], []]);
+  check('M3: a sample size stated in words allows it as N (English and Arabic)', [found('(N = 250)', new Set(), ['Our sample was 250 students.']), found('(N = 312)', new Set(), ['a sample of 312']), found('(N = 250)', new Set(), ['بلغت العينة ٢٥٠ طالبًا']), found('(t = 250)', new Set(), ['250 students'])], [[], [], [], ['t = 250']]);
+  check('M3: the user’s own stated criterion is still theirs', found('α = .05 throughout', new Set(), ['Significance was set at α = .05.']), []);
+  /* M2 (WS2 part): stored values trace only within their class, and only reportable fields count. */
+  const legacyRun = {
+    id: 'run-1',
+    datasetVersionId: 'v1',
+    datasetContentHash: 'h1',
+    engineVersion: 'legacy-1',
+    spec: { columns: {}, rowsAnalysed: 100 },
+    result: { test: 't.independent', statistic: { name: 't', value: 2.31 }, df: 98, pValue: 0.013, effect: { name: 'cohensD', value: 0.45, band: 'small' }, estimates: [{ label: 'A', n: 50, mean: 3.2, sd: 1.1, se: 0.16 }], n: 100, rowsSupplied: 100, rowsDropped: 0, seed: 12345 },
+  };
+  const scoped = allowedFromLegacyResults([legacyRun]);
+  const traceOf = (text: string) => checkNumbers(text, { mode: 'model', allowed: scoped.values }).findings.map((f) => f.text);
+  check('M2: stored values are traced in their own class', [traceOf('t(98) = 2.31, p = .013, d = .45'), traceOf('M = 3.20 (SD = 1.10), N = 100'), traceOf('a value of .013 and 45%')], [[], [], []]);
+  check('M2: a p-value is traced only to a p-value field (not to an effect of the same value)', traceOf('p = .45'), ['p = .45']);
+  check('M2: degrees of freedom and counts do not trace estimates (t = 98, b = 50), and estimates do not trace counts (N = 2.31)', [traceOf('t = 98'), traceOf('b = 50'), traceOf('N = 3.2')], [['t = 98'], ['b = 50'], ['N = 3.2']]);
+  check('M2: a test with degrees of freedom only is traced to the df field', [traceOf('with t(98) reported below'), traceOf('with t(97) reported below')], [[], ['t(97)']]);
+  check('M2: fields that describe the computation are not reportable (seed)', traceOf('b = 12345'), ['b = 12345']);
+  check('M2: value classes of a number in the text', [valueClassesOf({ text: 'p < .05', kind: 'statistic' }), valueClassesOf({ text: 'N = 250', kind: 'statistic' }), valueClassesOf({ text: 't(98)', kind: 'statistic' }), valueClassesOf({ text: 'β = .31', kind: 'statistic' }), valueClassesOf({ text: '.013', kind: 'decimal' }), valueClassesOf({ text: '45%', kind: 'percent' })], [['p'], ['n'], ['df'], ['estimate'], ['estimate', 'p'], ['estimate']]);
+  check('M2: a plain set of spellings keeps the earlier value-only tracing (existing callers unchanged)', checkNumbers('p = .45', { mode: 'model', allowed: allowedSpellings([0.45]) }).clean, true);
+  check('M2: an empty scoped set traces nothing', checkNumbers('r = .45', { mode: 'model', allowed: emptyScopedValues() }).findings.map((f) => f.text), ['r = .45']);
+  /* The shared helper: one way to build allowed values from legacy results, with tiers (D3: windowed runs excluded by default). */
+  const windowedRun = { ...legacyRun, id: 'run-2', spec: { truncatedTo: 5000 }, result: { statistic: { name: 'r', value: 0.62 }, pValue: 0.001 } };
+  const unpinnedRun = { id: 'run-3', datasetVersionId: null, datasetContentHash: null, engineVersion: null, result: { statistic: { name: 'F', value: 7.5 }, df: [2, 97], pValue: 0.002 } };
+  const mixed = allowedFromLegacyResults([legacyRun, windowedRun, unpinnedRun]);
+  check('helper: windowed runs are excluded by default, and every run is reported with its tier', [mixed.used, mixed.excluded], [[{ id: 'run-1', tier: 'pinned' }, { id: 'run-3', tier: 'unpinned' }], [{ id: 'run-2', tier: 'windowed' }]]);
+  check('helper: an excluded run’s numbers are not allowed; an included one’s are', [checkNumbers('r = .62', { mode: 'model', allowed: mixed.values }).clean, checkNumbers('F(2, 97) = 7.50, p = .002', { mode: 'model', allowed: mixed.values }).clean], [false, true]);
+  check('helper: windowed runs can be included explicitly', [checkNumbers('r = .62', { mode: 'model', allowed: allowedFromLegacyResults([windowedRun], { includeWindowed: true }).values }).clean, allowedFromLegacyResults([windowedRun], { includeWindowed: true }).used], [true, [{ id: 'run-2', tier: 'windowed' }]]);
+  check('helper: nothing attached allows nothing', [checkNumbers('r = .45', { mode: 'model', allowed: allowedFromLegacyResults([]).values }).clean, allowedFromLegacyResults([]).used], [false, []]);
+  check('helper: the result is never labelled verified', Object.keys(mixed).sort(), ['excluded', 'used', 'values']);
+  check('guard version bumped for the tracing change', NUMERIC_GUARD_VERSION, 'ws2-2');
 
   check(
     'money and ranges the user supplied (instruction, project metadata) are theirs',

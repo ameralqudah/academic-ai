@@ -51,7 +51,7 @@ const DECIMAL = new RegExp(DECIMAL_SOURCE, 'gu');
 const VALUE_TOKEN = /\{\{value:([^{}]{1,300})\}\}/g;
 
 /** Bumped when detection changes, so a stored check says which rules it used. */
-export const NUMERIC_GUARD_VERSION = 'ws2-1';
+export const NUMERIC_GUARD_VERSION = 'ws2-2';
 
 export type IntegrityMode = 'strict' | 'model' | 'person';
 
@@ -76,11 +76,36 @@ export interface NumberCheck {
   clean: boolean;
 }
 
+/**
+ * What a stored or supplied number is, for tracing (WS2 M2): a p-value may be
+ * traced only to a p-value, a sample size only to a count, degrees of freedom
+ * only to degrees of freedom, and anything else to the other estimates. A
+ * number in the text is never traced across these classes ("t = 98" is not
+ * made legitimate by df = 98, nor "p = .45" by d = .45).
+ */
+export type ValueClass = 'p' | 'n' | 'df' | 'estimate';
+export type ScopedValues = Record<ValueClass, Set<string>>;
+
+export function emptyScopedValues(): ScopedValues {
+  return { p: new Set(), n: new Set(), df: new Set(), estimate: new Set() };
+}
+
 export interface CheckOptions {
   mode: IntegrityMode;
-  /** Spellings of stored values the text may repeat (see `allowedSpellings`). Ignored in `strict`. */
-  allowed?: ReadonlySet<string>;
-  /** Text the user supplied (their instruction, project metadata): numbers in it are theirs. Ignored in `strict`. */
+  /**
+   * The stored values the text may repeat. `ScopedValues` (from
+   * `allowedFromLegacyResults`) traces each number only within its class. A
+   * plain set of spellings (`allowedSpellings`) is the earlier value-only
+   * tracing, kept for existing callers. Ignored in `strict`.
+   */
+  allowed?: ReadonlySet<string> | ScopedValues;
+  /**
+   * Text the user supplied (their instruction, project metadata). Only the
+   * research numbers written in it are theirs, each within its class ("N = 250"
+   * allows "N = 250", not "t = 250"), plus a sample size stated in words
+   * ("250 students"). Labels, page and chapter numbers in it allow nothing
+   * ("Write chapter 3" does not allow "t = 3"). Ignored in `strict`.
+   */
   context?: readonly string[];
   /**
    * Keys of the `{{value:key}}` tokens the caller renders from stored results.
@@ -122,15 +147,44 @@ function isAllowed(value: string, allowed: ReadonlySet<string>): boolean {
   return allowed.has(value) || allowed.has(value.replace(/^-/, ''));
 }
 
-/** Every number in the user's own text, as the allowed set spells it. */
-function contextNumbers(context: readonly string[]): Set<string> {
-  const out = new Set<string>();
+function isScoped(allowed: ReadonlySet<string> | ScopedValues | undefined): allowed is ScopedValues {
+  return Boolean(allowed) && !(allowed instanceof Set);
+}
+
+/**
+ * The classes a number in the text may be traced to:
+ * - an assignment by its symbol: "p = .01" → p; "N = 250" / "n = 12" → n;
+ *   "df = 3", or a test with degrees of freedom and no value ("t(98)") → df;
+ *   any other symbol → estimate;
+ * - a bare decimal → estimate or p (".013" may be a p-value written bare);
+ * - a percentage → estimate.
+ */
+export function valueClassesOf(found: Pick<NumberSpan, 'text' | 'kind'>): readonly ValueClass[] {
+  if (found.kind === 'decimal') return ['estimate', 'p'];
+  if (found.kind !== 'statistic') return ['estimate'];
+  if (!/[=<>≤≥]/.test(found.text)) return ['df'];
+  const symbol = /^\s*([^\s(=<>≤≥]+)/u.exec(found.text)?.[1] ?? '';
+  if (symbol === 'p') return ['p'];
+  if (symbol === 'n' || symbol === 'N') return ['n'];
+  if (symbol === 'df') return ['df'];
+  return ['estimate'];
+}
+
+/** The spellings of a number exactly as written (no rounding): "0.31" and ".31". */
+function exactSpellings(value: string): string[] {
+  return [value, value.replace(/^(-?)0\./, '$1.'), value.replace(/^(-?)\./, '$10.')];
+}
+
+/** The numbers in the user's own text, by class (see `CheckOptions.context`). */
+function contextValues(context: readonly string[]): ScopedValues {
+  const out = emptyScopedValues();
   for (const text of context) {
-    for (const match of normaliseDigits(text).matchAll(/[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)/g)) {
-      const value = normaliseValue(match[0]);
-      out.add(value);
-      out.add(value.replace(/^(-?)0\./, '$1.'));
-      out.add(value.replace(/^(-?)\./, '$10.'));
+    for (const found of detect(text, 'person', undefined, false)) {
+      for (const valueClass of valueClassesOf(found)) for (const spelling of exactSpellings(found.value)) out[valueClass].add(spelling);
+    }
+    const normalised = readable(text, 'person');
+    for (const pattern of [SAMPLE_WORDS, SAMPLE_OF]) {
+      for (const match of normalised.matchAll(pattern)) out.n.add(match[1]!);
     }
   }
   return out;
@@ -162,6 +216,13 @@ function readable(text: string, mode: IntegrityMode, tokens?: ReadonlySet<string
 
 /** Arabic words may carry an attached proclitic (و ف ب ل ك): "بالجدول", "وفي الملحق" → "والملحق". */
 const AR = (words: string) => String.raw`[وفبلك]?(?:${words})`;
+/* A sample size stated in words: "250 students", "a sample of 250", "٢٥٠ طالبًا". */
+const SAMPLE_WORDS = new RegExp(
+  String.raw`(?<![\p{N}.,])(\d+)\s+(?:participants?|students?|respondents?|subjects?|teachers?|patients?|pupils?|employees?|cases|individuals|people|adults|children|${AR('مشاركًا|مشاركا|مشارك|مشاركين|طالبًا|طالبا|طالب|طالبة|طالبات|طلاب|معلمًا|معلما|معلم|معلمين|مستجيبًا|مستجيب|فردًا|فردا|فرد|أفراد|حالة')})`,
+  'giu',
+);
+const SAMPLE_OF = /\b(?:sample|sample size)\s+(?:of\s+|was\s+|=\s*)?(\d+)(?![\p{N}.,])/giu;
+
 const LABEL_WORDS = String.raw`(?:Table|Tables|Figure|Figures|Fig\.|Section|Sections|Chapter|Chapters|Appendix|Equation|Eq\.|Hypothesis|Hypotheses|Step|Phase|Stage|Model|Study|Experiment|Item|Question|Part|Article|Clause|§|${AR('الجدول|جدول|الشكل|شكل|الفصل|فصل|القسم|قسم|المبحث|الفرضية|فرضية|الملحق|ملحق|المعادلة|معادلة|البند|المادة|الخطوة|المرحلة|النموذج|الدراسة|السؤال')})`;
 /** "Table 2.1", "Section 3.4.1", "الجدول 4.2", "Equation (3.2)": a label followed by a dotted number. A bare "(3.2)" is not a label. */
 const LABELLED = new RegExp(String.raw`(?<![\p{L}\p{N}])${LABEL_WORDS}\s*\(?\d+(?:\.\d+)+\)?`, 'gu');
@@ -250,21 +311,65 @@ const COMPARATOR_BEFORE = new RegExp(
 );
 const THRESHOLD_WORDS = /acceptable|adequate|recommended|conventional|threshold|cut-?off|criterion|benchmark|rule of thumb|suggested|guideline|مقبول|الحد الأدنى|حد أدنى|المعيار|معيار|يوصى|الموصى|المقترح|عتبة|الحد الفاصل/iu;
 
-/** The sentence around a span: bounded by ; ! ? ؛ a line break, or a full stop followed by a space (not a decimal point). */
-function sentenceAround(normalised: string, start: number, end: number): string {
-  let from = 0;
-  let to = normalised.length;
-  for (const match of normalised.matchAll(/[;!?؛\n]|\.(?=\s|$)/g)) {
-    if (match.index < start) from = match.index + 1;
-    else if (match.index >= end) {
-      to = match.index;
-      break;
-    }
+/*
+ * M5: every lookup below is a binary search over positions computed once per
+ * text, so checking and quarantining a 120,000-character section is a single
+ * linear pass plus O(log n) per number, not a rescan per number.
+ */
+
+/** The first index in the sorted `values` whose value is >= `target`. */
+function lowerBound(values: readonly number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (values[middle]! < target) low = middle + 1;
+    else high = middle;
   }
-  return normalised.slice(from, to);
+  return low;
 }
 
-function isStatedCriterion(normalised: string, found: NumberSpan): boolean {
+/** Ranges merged and sorted once; `overlaps` is a binary search. */
+class RangeIndex {
+  private readonly starts: number[] = [];
+  private readonly ends: number[] = [];
+
+  constructor(ranges: readonly [number, number][]) {
+    for (const [from, to] of [...ranges].sort((a, b) => a[0] - b[0])) {
+      const last = this.ends.length - 1;
+      if (last >= 0 && from <= this.ends[last]!) this.ends[last] = Math.max(this.ends[last]!, to);
+      else {
+        this.starts.push(from);
+        this.ends.push(to);
+      }
+    }
+  }
+
+  /** Whether [start, end) overlaps any range. */
+  overlaps(start: number, end: number): boolean {
+    /* The last merged range starting before `end` is the only candidate: merged ranges do not overlap each other. */
+    const candidate = lowerBound(this.starts, end) - 1;
+    return candidate >= 0 && this.ends[candidate]! > start;
+  }
+}
+
+/** Sentence boundaries: ; ! ? ؛ a line break, or a full stop followed by a space (not a decimal point). Computed once per text. */
+class Sentences {
+  private boundaries: number[] | null = null;
+
+  constructor(private readonly normalised: string) {}
+
+  around(start: number, end: number): string {
+    this.boundaries ??= [...this.normalised.matchAll(/[;!?؛\n]|\.(?=\s|$)/g)].map((match) => match.index);
+    const before = lowerBound(this.boundaries, start) - 1;
+    const after = lowerBound(this.boundaries, end);
+    const from = before >= 0 ? this.boundaries[before]! + 1 : 0;
+    const to = after < this.boundaries.length ? this.boundaries[after]! : this.normalised.length;
+    return this.normalised.slice(from, to);
+  }
+}
+
+function isStatedCriterion(normalised: string, found: NumberSpan, sentences: Sentences): boolean {
   const start = found.index;
   const end = found.index + found.length;
   const before = normalised.slice(Math.max(0, start - 60), start);
@@ -281,11 +386,7 @@ function isStatedCriterion(normalised: string, found: NumberSpan): boolean {
       if (symbol && /[<≤]/.test(symbol[2]!) && CONSIDERED_AFTER.test(after)) return true;
     }
   }
-  return found.kind === 'decimal' && COMPARATOR_BEFORE.test(before) && THRESHOLD_WORDS.test(sentenceAround(normalised, start, end));
-}
-
-function overlaps(start: number, end: number, ranges: readonly [number, number][]): boolean {
-  return ranges.some(([from, to]) => start < to && from < end);
+  return found.kind === 'decimal' && COMPARATOR_BEFORE.test(before) && THRESHOLD_WORDS.test(sentences.around(start, end));
 }
 
 function span(original: string, start: number, end: number, value: string, kind: NumberSpan['kind']): NumberSpan {
@@ -304,37 +405,47 @@ function span(original: string, start: number, end: number, value: string, kind:
  * headings excluded as ordinary.
  */
 export function researchNumbers(text: string, mode: IntegrityMode, tokens?: ReadonlySet<string>): NumberSpan[] {
+  return detect(text, mode, tokens, true);
+}
+
+/** `criteria: false` keeps stated criteria (for reading the user's own context, where "α = .05" is theirs either way). */
+function detect(text: string, mode: IntegrityMode, tokens: ReadonlySet<string> | undefined, criteria: boolean): NumberSpan[] {
   const normalised = readable(text, mode, tokens);
   if (mode === 'strict') {
     return [...normalised.matchAll(/\d[\d.,]*/g)].map((match) => span(text, match.index, match.index + match[0].length, normaliseValue(match[0]), 'digit'));
   }
 
   const spans: NumberSpan[] = [];
-  const taken: [number, number][] = [];
+  const assignments: [number, number][] = [];
   for (const match of normalised.matchAll(ASSIGNMENT)) {
     const end = match.index + match[0].length;
     const value = /[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.exec(match[0])?.[0] ?? match[0];
     spans.push(span(text, match.index, end, normaliseValue(value), 'statistic'));
-    taken.push([match.index, end]);
+    assignments.push([match.index, end]);
   }
+  /* The two test forms cannot overlap each other (they start with different words), only an assignment. */
+  const assigned = new RangeIndex(assignments);
+  const taken = [...assignments];
   for (const pattern of [CHI_SPELLED, TEST_WITH_DF]) {
     for (const match of normalised.matchAll(pattern)) {
       const end = match.index + match[0].length;
-      if (overlaps(match.index, end, taken)) continue;
+      if (assigned.overlaps(match.index, end)) continue;
       const numbers = match[0].match(/[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)/g) ?? [];
       spans.push(span(text, match.index, end, normaliseValue(numbers.at(-1) ?? match[0]), 'statistic'));
       taken.push([match.index, end]);
     }
   }
-  const ordinary = ordinaryRanges(normalised);
+  const excluded = new RangeIndex([...taken, ...ordinaryRanges(normalised)]);
   for (const match of normalised.matchAll(DECIMAL)) {
     const start = match.index;
     const end = start + match[0].length;
-    if (overlaps(start, end, taken) || overlaps(start, end, ordinary)) continue;
+    if (excluded.overlaps(start, end)) continue;
     const percent = match[0].includes('%');
     spans.push(span(text, start, end, normaliseValue(match[0].replace(/\s?%$/, '')), percent ? 'percent' : 'decimal'));
   }
-  return spans.filter((found) => !isStatedCriterion(normalised, found)).sort((a, b) => a.index - b.index);
+  const sentences = new Sentences(normalised);
+  const kept = criteria ? spans.filter((found) => !isStatedCriterion(normalised, found, sentences)) : spans;
+  return kept.sort((a, b) => a.index - b.index);
 }
 
 /** Checks the research numbers in `text` against the allowed values, under `mode`. */
@@ -343,10 +454,14 @@ export function checkNumbers(text: string, options: CheckOptions): NumberCheck {
   if (options.mode === 'strict') {
     return { mode: 'strict', guardVersion: NUMERIC_GUARD_VERSION, findings: spans, traced: [], clean: spans.length === 0 };
   }
-  const allowed = new Set([...(options.allowed ?? []), ...contextNumbers(options.context ?? [])]);
+  const stored = options.allowed;
+  const context = options.context?.length ? contextValues(options.context) : null;
+  const inClass = (values: ScopedValues, found: NumberSpan) => valueClassesOf(found).some((valueClass) => isAllowed(found.value, values[valueClass]));
+  const isTraced = (found: NumberSpan) =>
+    (stored !== undefined && (isScoped(stored) ? inClass(stored, found) : isAllowed(found.value, stored))) || (context !== null && inClass(context, found));
   const findings: NumberSpan[] = [];
   const traced: NumberSpan[] = [];
-  for (const found of spans) (isAllowed(found.value, allowed) ? traced : findings).push(found);
+  for (const found of spans) (isTraced(found) ? traced : findings).push(found);
   return { mode: options.mode, guardVersion: NUMERIC_GUARD_VERSION, findings, traced, clean: findings.length === 0 };
 }
 
@@ -365,11 +480,16 @@ export const QUARANTINE_MARKER = { en: '⟦unverified value⟧', ar: '⟦قيم�
 export function quarantine(text: string, check: NumberCheck, locale: 'en' | 'ar' = 'en'): { text: string; quarantined: number } {
   if (check.mode === 'person') throw new Error('A person’s text is reported, never rewritten.');
   const marker = QUARANTINE_MARKER[locale];
-  let out = text;
-  for (const found of [...check.findings].sort((a, b) => b.index - a.index)) {
-    out = out.slice(0, found.index) + marker + out.slice(found.index + found.length);
+  /* One pass, in text order (M5): the untouched stretches and a marker for each finding, joined once. */
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const found of [...check.findings].sort((a, b) => a.index - b.index)) {
+    if (found.index < cursor) continue; /* findings never overlap; guard anyway */
+    parts.push(text.slice(cursor, found.index), marker);
+    cursor = found.index + found.length;
   }
-  return { text: out, quarantined: check.findings.length };
+  parts.push(text.slice(cursor));
+  return { text: parts.join(''), quarantined: check.findings.length };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -389,4 +509,88 @@ export function legacyResultTier(run: { datasetVersionId?: string | null; datase
   const spec = (run.spec ?? {}) as { truncatedTo?: unknown };
   if (typeof spec.truncatedTo === 'number' && spec.truncatedTo > 0) return 'windowed';
   return run.datasetVersionId && run.datasetContentHash && run.engineVersion ? 'pinned' : 'unpinned';
+}
+
+/* -------------------------------------------------------------------------- */
+/*                     Allowed values from legacy results                     */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Which stored fields a result's numbers belong to, by key (WS2 M2). Legacy
+ * results come in several shapes (an inferential envelope, a regression, a
+ * matrix, a reliability report), so fields are classified by their key name,
+ * and an array inherits its key's class ("df": [2, 97]). Keys that describe
+ * the computation rather than report a result (ids, seeds, indices, versions,
+ * iteration counts, the row window) are not reportable and allow nothing.
+ */
+const P_KEY = /^(?:p|pvalue|p_value|pval|pvalues|padjusted|p_adjusted|padj|sig|significance)$|pvalue$/i;
+const N_KEY = /^(?:n|nused|n_used|count|counts|total|samplesize|sample_size|size|rowssupplied|rowsdropped|rowsanalysed|supplied|dropped|used|frequency|frequencies|observed|expected)$/i;
+const DF_KEY = /^(?:df|df1|df2|dfnum|dfden|dfresidual|dfmodel|degreesoffreedom)$/i;
+const SKIP_KEY = /^(?:id|seed|version|index|order|rank|columnindex|iterations|resamples|truncatedto|attempt|attempts)$/i;
+
+function keyClass(key: string, inherited: ValueClass): ValueClass | null {
+  if (SKIP_KEY.test(key)) return null;
+  if (P_KEY.test(key)) return 'p';
+  if (N_KEY.test(key)) return 'n';
+  if (DF_KEY.test(key)) return 'df';
+  return /^\d+$/.test(key) ? inherited : 'estimate';
+}
+
+export interface LegacyResultLike {
+  id?: string;
+  result: unknown;
+  spec?: unknown;
+  datasetVersionId?: string | null;
+  datasetContentHash?: string | null;
+  engineVersion?: string | null;
+}
+
+export interface LegacyAllowedValues {
+  /** The values the text may repeat, by class (pass as `CheckOptions.allowed`). */
+  values: ScopedValues;
+  /** The runs whose values are included, with their tier. None is "verified". */
+  used: { id?: string; tier: LegacyResultTier }[];
+  /** Runs left out, with their tier (by default: windowed ones, computed on the first rows only). */
+  excluded: { id?: string; tier: LegacyResultTier }[];
+}
+
+/**
+ * The one way to build the numbers a text may repeat from legacy analysis
+ * results (section writing, chat, task writing and export all use it). Each
+ * reportable field is spelled as the text may write it (`allowedSpellings`)
+ * and kept in its class. Windowed runs are excluded unless the caller asks
+ * (WS2 D3): a result computed on the first rows of a file is not the study's.
+ */
+export function allowedFromLegacyResults(runs: readonly LegacyResultLike[], options: { includeWindowed?: boolean } = {}): LegacyAllowedValues {
+  const values = emptyScopedValues();
+  const used: LegacyAllowedValues['used'] = [];
+  const excluded: LegacyAllowedValues['excluded'] = [];
+  const byClass: Record<ValueClass, number[]> = { p: [], n: [], df: [], estimate: [] };
+  const walk = (value: unknown, valueClass: ValueClass, depth: number) => {
+    if (depth > 8) return;
+    if (typeof value === 'number') {
+      if (Number.isFinite(value)) byClass[valueClass].push(value);
+    } else if (Array.isArray(value)) {
+      for (const [index, item] of value.slice(0, 5000).entries()) {
+        const itemClass = keyClass(String(index), valueClass);
+        if (itemClass) walk(item, itemClass, depth + 1);
+      }
+    } else if (value && typeof value === 'object') {
+      for (const [key, item] of Object.entries(value)) {
+        const itemClass = keyClass(key, valueClass);
+        if (itemClass) walk(item, itemClass, depth + 1);
+      }
+    }
+  };
+  for (const run of runs) {
+    const tier = legacyResultTier(run);
+    if (tier === 'windowed' && !options.includeWindowed) {
+      excluded.push({ ...(run.id ? { id: run.id } : {}), tier });
+      continue;
+    }
+    used.push({ ...(run.id ? { id: run.id } : {}), tier });
+    walk(run.result, 'estimate', 0);
+  }
+  for (const valueClass of Object.keys(byClass) as ValueClass[]) values[valueClass] = allowedSpellings(byClass[valueClass]);
+  return { values, used, excluded };
 }

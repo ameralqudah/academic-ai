@@ -32,6 +32,7 @@ import { eq, like } from 'drizzle-orm';
 
 import type { AgentEvent } from '@/agents/events';
 import { buildResultsContext } from '@/ai/context/results';
+import { allowedFromLegacyResults, checkNumbers, QUARANTINE_MARKER } from '@/server/integrity/numbers';
 import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
 import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
@@ -99,7 +100,8 @@ import {
   switchDocType,
 } from '@/server/services/project.service';
 import { addReference, listReferences, markVerified } from '@/server/services/reference.service';
-import { approveSection, listVersions, saveSection } from '@/server/services/section.service';
+import { approveSection, getSection, listVersions, saveSection, saveUserEdit } from '@/server/services/section.service';
+import { updateSectionSchema } from '@/server/validation/project';
 import {
   deleteEverything,
   deleteFileOnly,
@@ -122,13 +124,15 @@ import {
   listRecent,
   prepareRegeneration,
   recordRegeneratedAnswer,
+  recordReply,
   recordTurn,
   renameConversation,
   startConversation,
   switchToBranch,
 } from '@/server/services/chat.service';
 import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
-import { clearUnselectedTitles, deleteTitle, listTitles } from '@/server/services/ai.service';
+import { clearUnselectedTitles, deleteTitle, generateSection, listTitles, selectTitle, streamChat } from '@/server/services/ai.service';
+import { chatAllowedValues, checkChatReply, inspectChatReply } from '@/server/services/chat-integrity';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -314,6 +318,53 @@ async function main() {
   await expectAppError('an empty section cannot be approved', 'CONFLICT', () =>
     approveSection(project.id, userA, 'CONCLUSION'),
   );
+
+  /* ----------------------------------------------- WS2 N3: the edit boundary */
+  section('section edits from the editor (WS2 N3)');
+  {
+
+    /* The route's body schema: only a draft or the person's own edit; the server decides who wrote it. */
+    const parsed = (body: unknown) => updateSectionSchema.safeParse(body);
+    check('a client cannot approve through an edit (status APPROVED is refused)', parsed({ content: 'x', status: 'APPROVED' }).success, false);
+    check('a client cannot mark text as AI-suggested (status AI_SUGGESTED is refused)', parsed({ content: 'x', status: 'AI_SUGGESTED' }).success, false);
+    check('an unknown status is refused', [parsed({ content: 'x', status: 'PUBLISHED' }).success, parsed({ content: 'x', status: 'EMPTY' }).success], [false, false]);
+    check('a draft or the person’s own edit is accepted', [parsed({ content: '', status: 'DRAFT' }).success, parsed({ content: 'x', status: 'USER_EDITED' }).success, parsed({ content: 'x' }).success], [true, true, true]);
+    const withOrigin = parsed({ content: 'x', status: 'USER_EDITED', origin: 'AI' });
+    check('an origin sent by the client is dropped (the server decides)', withOrigin.success && !('origin' in withOrigin.data), true);
+
+    /* The service: always recorded as the person's, never approved by an edit. */
+    const editKey = 'OBJECTIVES' as const;
+    const firstEdit = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: 'تهدف الدراسة إلى تعرّف أثر البرنامج.', heading: 'أهداف الدراسة' });
+    check('an edit with text is the person’s edit', firstEdit.status, 'USER_EDITED');
+    const editVersions = await listVersions(project.id, userA, editKey);
+    check('… and its version is recorded as the person’s (origin USER)', editVersions.map((v) => v.origin), ['USER']);
+    check('an empty edit is a draft', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'HYPOTHESES', content: '' })).status, 'DRAFT');
+    check('an explicit draft stays a draft', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'RECOMMENDATIONS', content: 'مسودة أولى', status: 'DRAFT' })).status, 'DRAFT');
+    await expectAppError('another user cannot edit the section', 'NOT_FOUND', () =>
+      saveUserEdit({ projectId: project.id, userId: userB, sectionKey: editKey, content: 'x' }),
+    );
+
+    /* D4: editing an approved section revokes its approval; saving the same text does not. */
+    const approvedEdit = await approveSection(project.id, userA, editKey);
+    check('the section is approved', approvedEdit.status, 'APPROVED');
+    const unchanged = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: approvedEdit.content, heading: approvedEdit.heading ?? undefined });
+    check('saving the same text keeps the approval (the editor’s Save on an unchanged section)', [unchanged.status, unchanged.approvedAt?.getTime()], ['APPROVED', approvedEdit.approvedAt?.getTime()]);
+    check('… and adds no version', (await listVersions(project.id, userA, editKey)).length, editVersions.length);
+    const edited = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: `${approvedEdit.content} ويُعنى بطلبة المرحلة الأساسية.` });
+    check('editing an approved section revokes its approval', [edited.status, edited.approvedAt], ['USER_EDITED', null]);
+    const revokedVersion = (await listVersions(project.id, userA, editKey)).find((v) => v.note === 'Edited after approval: approval revoked');
+    check('… the revocation is recorded on the version, as the person’s edit', [Boolean(revokedVersion), revokedVersion?.origin], [true, 'USER']);
+    check('… and it can be approved again, deliberately', (await approveSection(project.id, userA, editKey)).status, 'APPROVED');
+    const retitled = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: edited.content, heading: 'عنوان آخر للقسم' });
+    check('changing the heading of an approved section is an edit too', retitled.status, 'USER_EDITED');
+
+    /* The server still approves where it should: choosing a title writes an approved TITLE section. */
+    const [candidate] = await titlesRepo.insertMany([{ projectId: project.id, title: 'أثر برنامج تدريبي في التحصيل', batch: 1, selected: false }] as never);
+    await selectTitle(userA, project.id, candidate!.id);
+    const titleSection = await getSection(project.id, userA, 'TITLE');
+    check('selecting a title still approves the TITLE section server-side', [titleSection.status, titleSection.approvedAt instanceof Date, titleSection.content], ['APPROVED', true, 'أثر برنامج تدريبي في التحصيل']);
+    check('… and a later edit of the title revokes it', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'TITLE', content: 'عنوان معدّل' })).status, 'USER_EDITED');
+  }
 
   /* ------------------------------------------------------------- doc type */
   section('document type switching');
@@ -1361,7 +1412,10 @@ async function main() {
     chapterContext.includes(computed.pValue < 0.001 ? 'p < .001' : `p = ${computed.pValue.toFixed(3)}`),
   );
   assertTrue('the variables are named', chapterContext.includes('male'));
-  assertTrue('the rules travel with the numbers', chapterContext.includes('They are facts.'));
+  assertTrue('the rules travel with the numbers', chapterContext.includes('Report these numbers exactly as written.'));
+  /* Legacy results are labelled computed, with their tier, never "verified" (WS2 N2). */
+  assertTrue('the chapter block is labelled computed, not verified', chapterContext.startsWith('## COMPUTED ANALYSIS RESULTS (legacy engine, not independently verified)') && !chapterContext.includes('VERIFIED'));
+  assertTrue('a run pinned to its data version shows the pinned tier', chapterContext.includes('Tier: pinned:'));
 
   /*
    * Detaching restores the original behaviour exactly. This is what makes the
@@ -1374,6 +1428,291 @@ async function main() {
     buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')),
     null,
   );
+
+  {
+    /*
+     * WS2 D3: a result computed on the first rows of a file only is not the
+     * study's. It cannot be attached, and one attached before this rule is
+     * left out of the chapter's prompt and of the numbers it may repeat.
+     */
+    const windowedRun = await analysisRunsRepo.create({
+      userId: statsOwner,
+      datasetId: statsFile.dataset.id,
+      testKey: 'correlation.pearson',
+      spec: { columns: { x: 'score', y: 'score' }, rowsAnalysed: 5000, truncatedTo: 5000 },
+      result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+      datasetVersionId: chapterRun.run.datasetVersionId,
+      datasetContentHash: chapterRun.run.datasetContentHash,
+      engineVersion: chapterRun.run.engineVersion,
+    });
+    let refusal: unknown = null;
+    try {
+      await attachRun({ runId: windowedRun.id, userId: statsOwner, projectId: statsProject.id, sectionKey: 'RESULTS' });
+    } catch (error) {
+      refusal = error;
+    }
+    check(
+      'attaching a windowed run is refused (409, windowed_run)',
+      refusal instanceof AppError ? [refusal.code, refusal.status, (refusal.details as { reason?: string; rows?: number }).reason, (refusal.details as { rows?: number }).rows] : refusal,
+      ['CONFLICT', 409, 'windowed_run', 5000],
+    );
+    check('and nothing is attached', (await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')).length, 0);
+
+    let intruderAttach = false;
+    try {
+      await attachRun({ runId: windowedRun.id, userId: statsIntruder, projectId: statsProject.id, sectionKey: 'RESULTS' });
+    } catch (error) {
+      intruderAttach = error instanceof AppError && (error.code === 'NOT_FOUND' || error.code === 'FORBIDDEN');
+    }
+    assertTrue('another user still cannot attach it', intruderAttach);
+
+    /* A whole-file run still attaches as before. */
+    check('a whole-file run still attaches', (await attachRun({ runId: chapterRun.run.id, userId: statsOwner, projectId: statsProject.id, sectionKey: 'RESULTS' })).sectionKey, 'RESULTS');
+
+    /* One attached before the rule (written directly, as an old row would be). */
+    await analysisRunsRepo.attachToSection(windowedRun.id, statsOwner, statsProject.id, 'RESULTS');
+    const attachedBoth = await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS');
+    check('both runs are attached in the table', attachedBoth.length, 2);
+    const mixedContext = buildResultsContext(attachedBoth) ?? '';
+    assertTrue('the windowed run\u2019s figures do not reach the chapter prompt', !mixedContext.includes('0.812') && mixedContext.includes(computed.statistic.value.toFixed(3)));
+    assertTrue('and the prompt says it was left out', mixedContext.includes('Left out: 1 attached analysis was computed on the first rows of a file only (correlation.pearson)'));
+    const legacyAllowed = allowedFromLegacyResults(attachedBoth);
+    check('the allowed numbers exclude the windowed run', [legacyAllowed.used.map((entry) => [entry.id, entry.tier]), legacyAllowed.excluded.map((entry) => [entry.id, entry.tier])], [[[chapterRun.run.id, 'pinned']], [[windowedRun.id, 'windowed']]]);
+    check('so its value is untraced in the text', checkNumbers('r = .81', { mode: 'model', allowed: legacyAllowed.values }).clean, false);
+
+    /* Detaching is always allowed, and restores the template behaviour. */
+    check('a windowed run can be detached', (await detachRun(windowedRun.id, statsOwner)).sectionKey, null);
+    await detachRun(chapterRun.run.id, statsOwner);
+    check('the section is back to a template', buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')), null);
+  }
+
+  {
+    section('section generation quarantines untraced numbers before saving (WS2 N1)');
+
+    /*
+     * A scripted model through the real gateway path: a placeholder key makes
+     * one provider count as configured, and the gateway is replaced for the
+     * test so nothing leaves the process. Both are restored afterwards.
+     */
+    const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+    const { createGateway } = await import('@/server/ai/gateway/gateway');
+    const { productionDeps, setGatewayForTests } = await import('@/server/ai/gateway');
+    const { resetEnvCache } = await import('@/config/env');
+    const { runForUser } = await import('@/server/ai/request-scope');
+    /* As the API does: every model call runs in its user's scope. */
+    const generate = (userId: string, ...args: [string, Parameters<typeof generateSection>[2], string?]) => runForUser(userId, () => generateSection(userId, ...args));
+    const fake = new FakeAdapter('openai');
+    setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: fake }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+    resetEnvCache();
+    const reply = (text: string) => fake.push({ reply: { text } });
+    const markers = (text: string, marker: string) => text.split(marker).length - 1;
+
+    try {
+      /* A results section in the (Arabic) stats project, with a whole-file run and a windowed one attached. */
+      const target = statsProject.id;
+      await attachRun({ runId: chapterRun.run.id, userId: statsOwner, projectId: target, sectionKey: 'RESULTS' });
+      const windowedRun = await analysisRunsRepo.create({
+        userId: statsOwner,
+        datasetId: statsFile.dataset.id,
+        testKey: 'correlation.pearson',
+        spec: { columns: { x: 'score', y: 'score' }, truncatedTo: 5000 },
+        result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+      });
+      /* Attached before the D3 rule, as an old row would be. */
+      await analysisRunsRepo.attachToSection(windowedRun.id, statsOwner, target, 'RESULTS');
+
+      /* An earlier, person-written section in the same project must not change. */
+      await saveUserEdit({ projectId: target, userId: statsOwner, sectionKey: 'DISCUSSION', content: 'Earlier finding: t = 9.99, p = .001.' });
+      const discussionBefore = await getSection(target, statsOwner, 'DISCUSSION');
+
+      const realStatistic = computed.statistic.value.toFixed(3);
+      reply(`The groups differed, t = ${realStatistic}. A further test found t(98) = 2.31, p = .012. The correlation was r = .81.`);
+      const results = await generate(statsOwner, target, 'RESULTS');
+      const savedResults = await getSection(target, statsOwner, 'RESULTS');
+
+      assertTrue('the traced statistic survives', results.content.includes(`t = ${realStatistic}`));
+      assertTrue('invented numbers are gone from the returned text', !/2\.31|\.012|\.81/.test(results.content));
+      check('the saved text is the quarantined text', savedResults?.content, results.content);
+      check('each untraced number is replaced by a visible marker (Arabic project: Arabic marker)', markers(results.content, QUARANTINE_MARKER.ar), results.integrity.quarantined);
+      assertTrue('including the windowed run\u2019s value (D3)', results.integrity.findings.some((found) => found.value.includes('81')));
+      assertTrue('at least the three invented or windowed values were quarantined', results.integrity.quarantined >= 3);
+      check('the findings name the guard version', results.integrity.guardVersion, 'ws2-2');
+      assertTrue('the notice says values were replaced', (results.guardrails.notice?.en ?? '').includes(`replaced with ${QUARANTINE_MARKER.en}`) && (results.guardrails.notice?.ar ?? '').includes(QUARANTINE_MARKER.ar));
+      check('status stays AI_SUGGESTED', savedResults?.status, 'AI_SUGGESTED');
+      const resultVersions = await listVersions(target, statsOwner, 'RESULTS');
+      check('the version is recorded as AI, with the quarantined text', [resultVersions[0]?.origin, resultVersions[0]?.content], ['AI', results.content]);
+      check('the earlier section is untouched', [(await getSection(target, statsOwner, 'DISCUSSION'))?.content, (await listVersions(target, statsOwner, 'DISCUSSION')).length], [discussionBefore?.content, 1]);
+      await detachRun(chapterRun.run.id, statsOwner);
+      await detachRun(windowedRun.id, statsOwner);
+
+      /* An English project (its own user: one project per free plan) gets the English marker. */
+      const enOwner = await newUser('n1-en-owner');
+      const enProject = await createProject(enOwner, { ...projectInput, language: 'EN' });
+
+      /* A non-results section: only numbers in this request's instruction are the researcher's. */
+      reply('The study sampled N = 250 students. Earlier work reported r = .45 and M = 3.72.');
+      const intro = await generate(enOwner, enProject.id, 'INTRODUCTION', 'Mention that the sample was N = 250 students.');
+      assertTrue('a number stated in the instruction is kept', intro.content.includes('N = 250'));
+      assertTrue('others are quarantined with the English marker', !/\.45|3\.72/.test(intro.content) && markers(intro.content, QUARANTINE_MARKER.en) === intro.integrity.quarantined && intro.integrity.quarantined === 2);
+      reply('The study sampled N = 250 students.');
+      const noInstruction = await generate(enOwner, enProject.id, 'INTRODUCTION');
+      check('without it in the instruction the same number is quarantined (project text is not used)', [noInstruction.content.includes('250'), noInstruction.integrity.quarantined], [false, 1]);
+
+      /* Text with no research numbers is saved exactly as written. */
+      reply('This section describes the aims of the study in general terms.');
+      const plain = await generate(enOwner, enProject.id, 'OBJECTIVES');
+      check('clean text is saved unchanged, with no notice', [plain.content, plain.integrity.quarantined, plain.guardrails.notice], ['This section describes the aims of the study in general terms.', 0, null]);
+    } finally {
+      setGatewayForTests(null);
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+      resetEnvCache();
+    }
+  }
+
+  {
+    section('chat flags numbers it cannot trace and never rewrites them (WS2 N11)');
+
+    /* The same scripted-model setup as the N1 block, restored afterwards. */
+    const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+    const { createGateway } = await import('@/server/ai/gateway/gateway');
+    const { productionDeps, setGatewayForTests } = await import('@/server/ai/gateway');
+    const { resetEnvCache } = await import('@/config/env');
+    const { runForUser } = await import('@/server/ai/request-scope');
+    const fake = new FakeAdapter('openai');
+    setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: fake }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+    resetEnvCache();
+    const untraced = (flags: readonly string[] | undefined) => (flags ?? []).includes('UNTRACED_STATISTIC');
+    const lastAssistant = async (conversationId: string) => (await chatRepo.activeThread(conversationId)).filter((message) => message.role === 'ASSISTANT').at(-1);
+
+    try {
+      const chatUser = await newUser('n11-owner');
+      const chatProject = await createProject(chatUser, { ...projectInput, language: 'EN' });
+      const chatFile = await saveUpload({ userId: chatUser, file: { name: 'chat.csv', bytes: new TextEncoder().encode(statsCsv).buffer as ArrayBuffer } });
+      const whole = await runAnalysis({ datasetId: chatFile.dataset.id, userId: chatUser, test: 't.independent', columns: { dependent: 'score', grouping: 'gender' } });
+      const wholeT = (whole.result as { statistic: { value: number } }).statistic.value.toFixed(3);
+      const windowedChat = await analysisRunsRepo.create({
+        userId: chatUser,
+        datasetId: chatFile.dataset.id,
+        testKey: 'correlation.pearson',
+        spec: { columns: { x: 'score', y: 'score' }, truncatedTo: 5000 },
+        result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+      });
+
+      const agentTurn = (intent: string, message: string, extra: Partial<Parameters<typeof runAgent>[0]> = {}) =>
+        runForUser(chatUser, async () => {
+          setIntentStubForTests({ intent: intent as Parameters<typeof setIntentStubForTests>[0]['intent'], confidence: 0.95, mentionedColumns: [], restatement: intent, clarifyingQuestion: null, searchQueries: [], usage: { tokensIn: 0, tokensOut: 0 } });
+          const events: AgentEvent[] = [];
+          for await (const event of runAgent({ userId: chatUser, message, locale: 'en', projectId: chatProject.id, ...extra })) events.push(event);
+          return events;
+        });
+      const conversationOf = (events: AgentEvent[]) => (events.find((event) => event.type === 'conversation') as { conversationId: string } | undefined)?.conversationId ?? '';
+      const deltaOf = (events: AgentEvent[]) => events.filter((event): event is Extract<AgentEvent, { type: 'delta' }> => event.type === 'delta').map((event) => event.text).join('');
+
+      /* gatherResults (D3): only a windowed run attached is not a results chapter. */
+      await analysisRunsRepo.attachToSection(windowedChat.id, chatUser, chatProject.id, 'RESULTS');
+      const windowedOnly = await agentTurn('research.results', 'Write my results chapter.');
+      check(
+        'only windowed runs attached: a question, no results and no chapter',
+        [windowedOnly.some((event) => event.type === 'question' && event.question.includes('first rows of a file only')), windowedOnly.some((event) => event.type === 'result'), deltaOf(windowedOnly)],
+        [true, false, ''],
+      );
+
+      /* Mixed: the whole-file run counts, the windowed one is reported as left out. */
+      await attachRun({ runId: whole.run.id, userId: chatUser, projectId: chatProject.id, sectionKey: 'RESULTS' });
+      fake.push({ reply: { text: `The groups differed, t = ${wholeT}. The correlation was r = .81.` } });
+      const mixed = await agentTurn('research.results', 'Write my results chapter.');
+      const gathered = mixed.find((event): event is Extract<AgentEvent, { type: 'result' }> => event.type === 'result' && event.kind === 'analysis');
+      check('mixed runs: only the usable one is counted, the windowed one reported as left out', gathered?.payload, { attachedCount: 1, tests: ['t.independent'], excludedWindowed: 1 });
+
+      /* writeResults: the saved section's markers, then the note, in the reply and the stored message. */
+      const written = deltaOf(mixed);
+      assertTrue('the chapter streamed with its marker and the traced value', written.includes(QUARANTINE_MARKER.en) && written.includes(`t = ${wholeT}`) && !written.includes('.81'));
+      assertTrue('followed by the note about the replaced value', written.includes(`Note: the results section was saved with 1 number replaced by ${QUARANTINE_MARKER.en}`));
+      assertTrue('the note does not speak of "attached to this section"', !written.includes('attached to this section'));
+      const writtenMessage = await lastAssistant(conversationOf(mixed));
+      check('the stored reply is what was streamed, with the flags', [writtenMessage?.content, untraced(writtenMessage?.flags)], [written, true]);
+
+      /* From here chat must not touch any section. */
+      const sectionsOf = async () => JSON.stringify((await getProjectWithSections(chatProject.id, chatUser)).sections.map((row) => [row.sectionKey, row.content, row.status]));
+      const sectionsBefore = await sectionsOf();
+
+      /* Agent respond: flags only, against the project's usable runs and the current message. */
+      const answerText = `Your comparison gave t = ${wholeT}. Another study found t(98) = 2.31, and your sample was N = 120.`;
+      fake.push({ reply: { text: answerText } });
+      const answered = await agentTurn('general.question', 'What did my comparison show? My sample was N = 120.');
+      const answeredId = conversationOf(answered);
+      const answeredMessage = await lastAssistant(answeredId);
+      check('respond: the answer is streamed and stored unchanged', [deltaOf(answered), answeredMessage?.content], [answerText, answerText]);
+      check('and the invented value is flagged on the stored reply', untraced(answeredMessage?.flags), true);
+      fake.push({ reply: { text: `Your comparison gave t = ${wholeT}, with N = 120.` } });
+      const traced = await agentTurn('general.question', 'Remind me of the result for my sample of N = 120.');
+      check('respond: a traced value and the current message’s number raise no flag', untraced((await lastAssistant(conversationOf(traced)))?.flags), false);
+
+      /* A regenerated answer keeps its own flags. */
+      const question = (await chatRepo.activeThread(answeredId)).filter((message) => message.role === 'USER').at(-1)!;
+      fake.push({ reply: { text: 'On reflection, the effect was r = .81.' } });
+      await agentTurn('general.question', question.content, { conversationId: answeredId, regeneratedParentId: question.id });
+      const regenerated = await lastAssistant(answeredId);
+      check('a regenerated answer is stored with its flags', [regenerated?.content, regenerated?.parentMessageId, untraced(regenerated?.flags)], ['On reflection, the effect was r = .81.', question.id, true]);
+
+      /* streamChat (project chat): the same rules, reading the stream as the client does. */
+      const streamed = async (message: string, text: string) => {
+        fake.push({ stream: [text] });
+        const handle = await runForUser(chatUser, () => streamChat(chatUser, chatProject.id, message));
+        const raw = await new Response(handle.stream).text();
+        const events = raw.split('\n\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6)) as { type: string; text?: string; flags?: string[]; guardrails?: { en: string } | null });
+        const done = events.find((event) => event.type === 'done');
+        const stored = await lastAssistant(handle.conversationId);
+        return { text: events.filter((event) => event.type === 'delta').map((event) => event.text).join(''), done, stored };
+      };
+      const allowedRun = await streamed('Summarise my comparison.', `The comparison gave t = ${wholeT}.`);
+      check('streamChat: an attached run’s value is not flagged, and the text is unchanged', [untraced(allowedRun.done?.flags), allowedRun.stored?.content], [false, `The comparison gave t = ${wholeT}.`]);
+      const windowedValue = await streamed('And the correlation?', 'The correlation was r = .81.');
+      check('streamChat: a windowed run’s value is flagged (D3), stored with the flag', [untraced(windowedValue.done?.flags), untraced(windowedValue.stored?.flags)], [true, true]);
+      const invented = await streamed('Any other result?', 'A further test found t(98) = 2.31.');
+      check('streamChat: an invented value is flagged', untraced(invented.done?.flags), true);
+      assertTrue('with the chat wording, not the section wording', (invented.done?.guardrails?.en ?? '').includes('in this reply') && !(invented.done?.guardrails?.en ?? '').includes('attached to this section'));
+      const stated = await streamed('My sample was N = 250 students.', 'With N = 250 students, the design is adequate.');
+      check('streamChat: a number in the current message is the researcher’s', untraced(stated.done?.flags), false);
+      const earlier = await streamed('And how large was the sample?', 'The sample was N = 250.');
+      check('streamChat: a number from an earlier turn is not', untraced(earlier.done?.flags), true);
+
+      /* Result payloads with no run row are unpinned values; a payload of a windowed run follows the run. */
+      const payloadThread = await startConversation({ userId: chatUser, projectId: chatProject.id, firstMessage: 'profile' });
+      await chatRepo.addMessage({ conversationId: payloadThread.id, role: 'ASSISTANT', content: '', payload: { results: [{ kind: 'profile', payload: { mean: 3.4567 } }, { kind: 'analysis', runId: windowedChat.id, payload: { statistic: { name: 'r', value: 0.8123 } } }] } });
+      const payloadAllowed = await chatAllowedValues({ userId: chatUser, conversationId: payloadThread.id });
+      check(
+        'a payload with no run row allows its values (unpinned); a windowed run’s payload does not',
+        [untraced(inspectChatReply('The mean was M = 3.46.', { allowed: payloadAllowed, message: '' }).flags), untraced(inspectChatReply('The correlation was r = .81.', { allowed: payloadAllowed, message: '' }).flags)],
+        [false, true],
+      );
+
+      /* /api/chat: the route checks with checkChatReply and stores the flags through recordReply. */
+      const routeThread = await startConversation({ userId: chatUser, projectId: chatProject.id, firstMessage: 'route' });
+      const routeCheck = await checkChatReply({ userId: chatUser, projectId: chatProject.id, conversationId: routeThread.id, message: 'What was my result?', text: 'It was t(98) = 2.31.' });
+      const routeIds = await recordReply({ conversationId: routeThread.id, userId: chatUser, userMessage: 'What was my result?', assistantMessage: 'It was t(98) = 2.31.', flags: routeCheck.flags });
+      const routeRegen = await recordReply({ conversationId: routeThread.id, userId: chatUser, userMessage: 'What was my result?', assistantMessage: `It was t = ${wholeT}.`, replyToMessageId: routeIds.userMessageId, flags: (await checkChatReply({ userId: chatUser, projectId: chatProject.id, conversationId: routeThread.id, message: 'What was my result?', text: `It was t = ${wholeT}.` })).flags });
+      const routeRows = await chatRepo.activeThread(routeThread.id);
+      check(
+        '/api/chat: a reply and a regenerated reply are stored with their own flags',
+        [untraced(routeRows.find((row) => row.id === routeIds.assistantMessageId)?.flags ?? (await chatRepo.findMessage(routeIds.assistantMessageId, routeThread.id))?.flags), untraced((await chatRepo.findMessage(routeRegen.assistantMessageId, routeThread.id))?.flags)],
+        [true, false],
+      );
+
+      check('chat never changed a section', await sectionsOf(), sectionsBefore);
+    } finally {
+      clearIntentStubForTests();
+      setGatewayForTests(null);
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+      resetEnvCache();
+    }
+  }
 
   /* ------------------------------------------------------ PLS-SEM as a job */
 

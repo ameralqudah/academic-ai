@@ -9,6 +9,7 @@ import { ok, withApi } from '@/server/http/api';
 import { answerGeneralQuestion, streamGeneralAnswer } from '@/server/services/ai.service';
 import { startTask } from '@/server/services/task.service';
 import { recordReply, recordTaskTurn, requireOwned } from '@/server/services/chat.service';
+import { checkChatReply } from '@/server/services/chat-integrity';
 import { resolveRequestedModel } from '@/server/services/model-access.service';
 import { streamResponse } from '@/server/http/stream';
 import { ensureTasksReady } from '@/server/services/startup';
@@ -432,7 +433,7 @@ export const POST = withApi<Body>(
      * answer gone, and a conversation with only direct answers in it was stored
      * as an empty one.
      */
-    const keepTurn = async (assistantMessage: string) => {
+    const keepTurn = async (assistantMessage: string, flags: string[]) => {
       if (!body.conversationId || !assistantMessage.trim()) return null;
 
       return recordReply({
@@ -441,11 +442,26 @@ export const POST = withApi<Body>(
         userMessage: body.message,
         assistantMessage,
         replyToMessageId,
+        flags,
       }).catch((error: unknown) => {
         logger.warn('chat.turnNotRecorded', { error: String(error).slice(0, 200) });
         return null;
       });
     };
+
+    /*
+     * The finished answer's numbers, flagged against this conversation's and
+     * project's analyses and the current message (WS2 N11). Flag only: the
+     * text the researcher saw is the text that is kept.
+     */
+    const checkAnswer = (content: string) =>
+      checkChatReply({
+        userId: user.id,
+        projectId: body.projectId ?? null,
+        conversationId: body.conversationId ?? null,
+        message: body.message,
+        text: content,
+      });
 
     const routing = {
       intent: decision.intent.intent,
@@ -531,14 +547,15 @@ export const POST = withApi<Body>(
           return;
         }
 
-        const messageIds = await keepTurn(content);
+        const integrity = await checkAnswer(content);
+        const messageIds = await keepTurn(content, integrity.flags);
         logger.info('chat.stream.done', {
           ms: Date.now() - receivedAt,
           firstWordMs,
           chars: content.length,
         });
         /* The stored ids, so edit and regenerate work on this turn without a reload. */
-        send({ type: 'done', routing, messageIds });
+        send({ type: 'done', routing, messageIds, guardrails: integrity.notice, flags: integrity.flags });
       });
     }
 
@@ -575,12 +592,16 @@ export const POST = withApi<Body>(
       );
     }
 
-    const messageIds = await keepTurn(answer.content);
+    const integrity = await checkAnswer(answer.content);
+    const messageIds = await keepTurn(answer.content, integrity.flags);
 
     return ok({
       path: 'fast' as const,
       content: answer.content,
       messageIds,
+      /* Integrity flags and their notice (WS2 N11); the text above is unchanged. */
+      guardrails: integrity.notice,
+      flags: integrity.flags,
       /*
        * The routing decision travels with the answer.
        *

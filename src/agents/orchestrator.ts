@@ -30,6 +30,9 @@ import { logger } from '@/lib/logger';
 import * as tasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
+import { usableLegacyRuns } from '@/ai/context/results';
+import { QUARANTINE_MARKER } from '@/server/integrity/numbers';
+import { checkChatReply } from '@/server/services/chat-integrity';
 import { answerGeneralQuestion, summariseSources } from '@/server/services/ai.service';
 import {
   recordRegeneratedAnswer,
@@ -130,6 +133,8 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
    * place.
    */
   const structuredResults: Record<string, unknown>[] = [];
+  /* Integrity flags on the prose (WS2 N11): stored with the reply, never used to change it. */
+  const replyFlags = new Set<string>();
 
   try {
     if (!conversationId) {
@@ -337,6 +342,7 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
          * a second generation of it.
          */
         if (outcome.event.type === 'delta') assistantText += outcome.event.text;
+        for (const flag of outcome.flags ?? []) replyFlags.add(flag);
         if (outcome.event.type === 'result') {
           structuredResults.push({
             kind: outcome.event.kind,
@@ -357,6 +363,7 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
       assistantText,
       structured: structuredResults,
       regeneratedParentId,
+      flags: [...replyFlags],
     });
 
     await finish(taskId, 'COMPLETED', { aiRequests, stepsDone, startedAt, units: capability.units });
@@ -422,6 +429,8 @@ async function persist(input: {
   failed?: boolean;
   /** A regeneration: the answer joins this question instead of a new one. */
   regeneratedParentId?: string | null;
+  /** Integrity flags on the reply (WS2 N11). */
+  flags?: string[];
 }): Promise<void> {
   if (!input.conversationId) return;
 
@@ -433,6 +442,7 @@ async function persist(input: {
         parentMessageId: input.regeneratedParentId,
         content: input.assistantText,
         payload: input.structured.length > 0 ? { results: input.structured } : null,
+        ...(input.flags?.length ? { flags: input.flags } : {}),
       });
       return;
     }
@@ -446,6 +456,7 @@ async function persist(input: {
         input.structured.length > 0 || input.failed
           ? { ...(input.structured.length > 0 ? { results: input.structured } : {}), ...(input.failed ? { failed: true } : {}) }
           : null,
+      ...(input.flags?.length ? { flags: input.flags } : {}),
     });
   } catch (error) {
     logger.error('agent.persistFailed', {
@@ -550,7 +561,8 @@ function planFor(intent: IntentKey): PlanStep[] {
 /* -------------------------------------------------------------------------- */
 
 type StepOutcome =
-  | { kind: 'event'; event: AgentEvent | null }
+  /** `flags`: integrity flags on the text the step produced (WS2 N11), kept on the saved reply. */
+  | { kind: 'event'; event: AgentEvent | null; flags?: string[] }
   | { kind: 'question'; question: string; options?: { value: string; label: string }[] }
   | { kind: 'unavailable'; intent: IntentKey; reasonKey: string };
 
@@ -710,6 +722,18 @@ async function executeStep(input: {
       }
 
       const attached = await analysisRunsRepo.listAttached(request.projectId, request.userId);
+      /* Windowed runs (the first rows of a file only) cannot be reported, so they are not counted (WS2 D3). */
+      const { usable, windowed } = usableLegacyRuns(attached);
+
+      if (attached.length > 0 && usable.length === 0) {
+        return {
+          kind: 'question',
+          question:
+            locale === 'ar'
+              ? 'التحليلات المرتبطة بهذا المشروع حُسبت على أول صفوف من الملف فقط، فلا يمكن كتابة فصل النتائج منها. أرفق تحليلات حُسبت على الملف كاملًا، وسأكتب الفصل من أرقامك.'
+              : 'The analyses attached to this project were computed on the first rows of a file only, so the results chapter cannot be written from them. Attach analyses computed on the whole file, and I will write the chapter from your figures.',
+        };
+      }
 
       if (attached.length === 0) {
         return {
@@ -727,8 +751,9 @@ async function executeStep(input: {
           type: 'result',
           kind: 'analysis',
           payload: {
-            attachedCount: attached.length,
-            tests: attached.map((run) => run.testKey),
+            attachedCount: usable.length,
+            tests: usable.map((run) => run.testKey),
+            ...(windowed.length > 0 ? { excludedWindowed: windowed.length } : {}),
           },
         },
       };
@@ -744,7 +769,20 @@ async function executeStep(input: {
         'RESULTS' as Parameters<typeof generateSection>[2],
       );
 
-      return { kind: 'event', event: { type: 'delta', text: generated.content } };
+      /*
+       * The section was saved with untraced numbers replaced (WS2 N1). Chat
+       * says so in a short note after the text (WS2 N11); the note speaks of
+       * the saved results section, not of this reply.
+       */
+      const replaced = generated.integrity.quarantined;
+      const note =
+        replaced > 0
+          ? locale === 'ar'
+            ? `\n\nملاحظة: حُفظ قسم النتائج مع استبدال ${replaced === 1 ? 'رقم واحد' : `${replaced} أرقام`} بـ ${QUARANTINE_MARKER.ar} لتعذّر تتبّعها إلى التحليلات التي أرفقتها. أدخل القيم الحقيقية من تحليلك قبل استخدامه.`
+            : `\n\nNote: the results section was saved with ${replaced} ${replaced === 1 ? 'number' : 'numbers'} replaced by ${QUARANTINE_MARKER.en}, because ${replaced === 1 ? 'it' : 'they'} could not be traced to the analyses you attached. Enter the real values from your own analysis before using it.`
+          : '';
+
+      return { kind: 'event', event: { type: 'delta', text: `${generated.content}${note}` }, flags: generated.guardrails.flags };
     }
 
     case 'analyse': {
@@ -896,7 +934,16 @@ async function executeStep(input: {
           : {}),
       });
 
-      return { kind: 'event', event: { type: 'delta', text: answer.content } };
+      /* Flag only (WS2 N11): the answer is checked, never rewritten. */
+      const integrity = await checkChatReply({
+        userId: request.userId,
+        projectId: request.projectId ?? null,
+        conversationId: request.conversationId ?? null,
+        message: request.message,
+        text: answer.content,
+      });
+
+      return { kind: 'event', event: { type: 'delta', text: answer.content }, flags: integrity.flags };
     }
 
     default:

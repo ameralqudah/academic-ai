@@ -8,8 +8,9 @@
 
 import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
-import { inspectOutput, numberSpellings, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
+import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
 import { buildResultsContext } from '@/ai/context/results';
+import { allowedFromLegacyResults, checkNumbers, quarantine, type NumberSpan } from '@/server/integrity/numbers';
 import { generalPrompt } from '@/ai/prompts/general';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
 import {
@@ -35,6 +36,7 @@ import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
 
 import { getOwnedProject, getProjectWithSections, updateProject } from './project.service';
+import { checkChatReply } from './chat-integrity';
 import { saveSection } from './section.service';
 import { assertCanUseAI } from './usage.service';
 
@@ -349,22 +351,16 @@ export async function clearUnselectedTitles(
 
 export interface GeneratedSection {
   sectionKey: SectionKey;
+  /** The text as saved: untraced research numbers replaced by the quarantine marker (WS2 N1). */
   content: string;
   wordCount: number;
   guardrails: GuardrailResult;
-}
-
-/** Every finite number inside stored analysis results. */
-function numbersIn(values: unknown[]): number[] {
-  const out: number[] = [];
-  const walk = (value: unknown, depth: number) => {
-    if (depth > 8) return;
-    if (typeof value === 'number' && Number.isFinite(value)) out.push(value);
-    else if (Array.isArray(value)) for (const item of value.slice(0, 5000)) walk(item, depth + 1);
-    else if (value && typeof value === 'object') for (const item of Object.values(value)) walk(item, depth + 1);
+  /** What the numeric guard replaced before saving (WS2 N1, D1). */
+  integrity: {
+    guardVersion: string;
+    quarantined: number;
+    findings: Pick<NumberSpan, 'text' | 'value' | 'kind'>[];
   };
-  for (const value of values) walk(value, 0);
-  return out;
 }
 
 export async function generateSection(
@@ -386,15 +382,21 @@ export async function generateSection(
    * as a finding. Empty is the normal case and leaves the old behaviour exactly
    * as it was — the section produces a template and says the numbers must come
    * from their own analysis.
+   *
+   * These are legacy results, labelled as computed rather than verified, and a
+   * windowed run (the first rows of a file only) is neither shown to the model
+   * nor allowed in the text (WS2 N2, D3).
    */
   const attachedRuns = await analysisRunsRepo.listForSection(projectId, userId, sectionKey);
-  const verifiedResults = buildResultsContext(attachedRuns);
+  const computedResults = buildResultsContext(attachedRuns);
+  const legacy = allowedFromLegacyResults(attachedRuns);
 
-  if (verifiedResults) {
-    logger.info('ai.section.withVerifiedResults', {
+  if (computedResults || legacy.excluded.length > 0) {
+    logger.info('ai.section.withComputedResults', {
       projectId,
       sectionKey,
-      analyses: attachedRuns.length,
+      analyses: legacy.used.length,
+      excludedWindowed: legacy.excluded.length,
     });
   }
 
@@ -404,7 +406,7 @@ export async function generateSection(
     provider,
     task: 'wizard.section',
     locale: project.language === 'AR' ? 'ar' : 'en',
-    system: sectionPrompt(sectionKey, context, instruction, verifiedResults),
+    system: sectionPrompt(sectionKey, context, instruction, computedResults),
     messages: [
       {
         role: 'user',
@@ -417,18 +419,39 @@ export async function generateSection(
     temperature: 0.6,
   });
 
+  /*
+   * Quarantine before saving (WS2 N1, D1). A research number the model wrote
+   * is kept only if it traces to the attached analyses (results sections,
+   * windowed runs excluded, each value within its field type) or was written
+   * in this request's instruction; every other one is replaced in the saved
+   * text by a visible marker. Only this new generation is guarded: sections
+   * saved earlier are never rewritten.
+   */
   const resultsSection = sectionKey === 'RESULTS' || sectionKey === 'CHAPTER_4';
+  const stated = instruction?.trim() ? [instruction] : undefined;
+  const check = checkNumbers(result.text, {
+    mode: 'model',
+    ...(resultsSection ? { allowed: legacy.values } : {}),
+    ...(stated ? { context: stated } : {}),
+  });
+  const guarded = quarantine(result.text, check, project.language === 'AR' ? 'ar' : 'en');
   const guardrails = inspectOutput(result.text, {
     expectsNoStatistics: !resultsSection,
-    /* Numbers in a results section must be ones the attached, verified analyses produced (P1-C). */
-    ...(resultsSection ? { verifiedNumbers: numberSpellings(numbersIn(attachedRuns.map((run) => run.result))) } : {}),
+    /* Numbers in a results section must be ones the attached analyses produced (P1-C), windowed runs excluded (WS2 D3). */
+    ...(resultsSection ? { verifiedNumbers: legacy.values } : {}),
+    ...(stated ? { context: stated } : {}),
+    quarantined: guarded.quarantined,
   });
+
+  if (guarded.quarantined > 0) {
+    logger.info('ai.section.quarantined', { projectId, sectionKey, quarantined: guarded.quarantined, guardVersion: check.guardVersion });
+  }
 
   await saveSection({
     projectId,
     userId,
     sectionKey,
-    content: result.text,
+    content: guarded.text,
     heading: labelFor(sectionKey),
     status: 'AI_SUGGESTED',
     origin: 'AI',
@@ -437,9 +460,14 @@ export async function generateSection(
 
   return {
     sectionKey,
-    content: result.text,
-    wordCount: countWords(result.text),
+    content: guarded.text,
+    wordCount: countWords(guarded.text),
     guardrails,
+    integrity: {
+      guardVersion: check.guardVersion,
+      quarantined: guarded.quarantined,
+      findings: check.findings.slice(0, 20).map((found) => ({ text: found.text, value: found.value, kind: found.kind })),
+    },
   };
 }
 
@@ -1379,7 +1407,8 @@ export async function streamChat(
        * gateway's, including a cancelled stream (P1-B), so a client that
        * aborts every response still pays for what it consumed.
        */
-      const guardrails = inspectOutput(full);
+      /* Flag only (WS2 N11): the reply is checked against this conversation's and project's analyses and the current message, never rewritten. */
+      const guardrails = await checkChatReply({ userId, projectId, conversationId: conversation.id, message, text: full });
 
       if (full) {
         try {

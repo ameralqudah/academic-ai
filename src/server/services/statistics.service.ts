@@ -55,6 +55,7 @@ import {
 import { logger } from '@/lib/logger';
 import type { AnalysisRun } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { legacyResultTier } from '@/server/integrity/numbers';
 import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
 import { ensureInitialVersion } from '@/server/stats/versions';
 import { ENGINE } from '@/analysis/engine/types';
@@ -590,6 +591,24 @@ export async function attachRun(input: {
   sectionKey: string;
 }): Promise<AnalysisRun> {
   await assertProjectLink(input.userId, input.projectId);
+  /*
+   * A result computed on the first rows of a file is not the study's result,
+   * so it cannot be attached for reporting (WS2 D3). Detaching is always
+   * allowed.
+   */
+  const existing = await runsRepo.findOwned(input.runId, input.userId);
+  if (!existing) {
+    throw new AppError('NOT_FOUND', 'That analysis was not found.', 'لم يُعثر على التحليل.');
+  }
+  if (legacyResultTier(existing) === 'windowed') {
+    const rows = (existing.spec as { truncatedTo?: unknown }).truncatedTo;
+    throw new AppError(
+      'CONFLICT',
+      `This analysis was computed on the first ${String(rows)} rows of the file only, so it cannot be attached to a section: its figures are not the study's.`,
+      `حُسب هذا التحليل على أول ${String(rows)} صف من الملف فقط، فلا يمكن إرفاقه بقسم: أرقامه ليست أرقام الدراسة.`,
+      { reason: 'windowed_run', rows: typeof rows === 'number' ? rows : null },
+    );
+  }
   const run = await runsRepo.attachToSection(
     input.runId,
     input.userId,

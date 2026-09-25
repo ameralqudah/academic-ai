@@ -12,7 +12,7 @@
  * safeguard elsewhere in this product exists to stop that one thing.
  *
  * The solution is not a better instruction. It is removing the need to invent:
- * the numbers arrive in the prompt, already computed by verified engines, and
+ * the numbers arrive in the prompt, already computed by the system's engines, and
  * the model's job shrinks to describing what it was given. That is a task
  * language models are genuinely good at, and it is bounded — there is nothing
  * to hallucinate when every figure is on the page.
@@ -36,6 +36,7 @@
  */
 
 import type { AnalysisRun } from '@/server/db/schema';
+import { legacyResultTier } from '@/server/integrity/numbers';
 
 /** APA rounding: three decimals, and "< .001" rather than a string of zeros. */
 function fmtP(p: unknown): string {
@@ -91,6 +92,7 @@ export function describeRun(run: AnalysisRun, index: number): string {
   const lines: string[] = [];
 
   lines.push(`### Analysis ${index + 1}: ${run.testKey}`);
+  lines.push(`Tier: ${tierLine(run)}`);
 
   if (result.variables?.length) {
     lines.push(`Variables: ${result.variables.join(', ')}`);
@@ -220,22 +222,58 @@ export function describeRun(run: AnalysisRun, index: number): string {
 }
 
 /**
+ * What the tier means, in the words the prompt carries (WS2 N2). None of these
+ * is "verified": that word is kept for P1-C statistics runs, whose results are
+ * pinned, hashed and re-checked.
+ */
+function tierLine(run: AnalysisRun): string {
+  const tier = legacyResultTier(run);
+  if (tier === 'windowed') {
+    const rows = (run.spec as { truncatedTo?: unknown }).truncatedTo;
+    return `windowed: computed on the first ${String(rows)} rows of the file only`;
+  }
+  if (tier === 'pinned') return `pinned: the dataset version, its content hash and the engine version (${run.engineVersion}) are recorded`;
+  return 'unpinned: the exact data this was computed on is not recorded';
+}
+
+/**
+ * The attached runs a section may be written from, and the ones left out (WS2
+ * D3). A windowed run was computed on the first rows of a file, not on the
+ * study's data, so its numbers are neither given to the model nor allowed in
+ * the text.
+ */
+export function usableLegacyRuns(runs: AnalysisRun[]): { usable: AnalysisRun[]; windowed: AnalysisRun[] } {
+  const usable: AnalysisRun[] = [];
+  const windowed: AnalysisRun[] = [];
+  for (const run of runs) (legacyResultTier(run) === 'windowed' ? windowed : usable).push(run);
+  return { usable, windowed };
+}
+
+/**
  * The block that goes into the prompt.
  *
- * Returns null when nothing is attached, which is what keeps the old behaviour
- * intact: no verified results means the section still produces table shells and
- * says the numbers must come from the researcher's own analysis. The new
- * behaviour is strictly additive — it appears only when there is something real
- * to write from.
+ * Returns null when nothing usable is attached, which is what keeps the old
+ * behaviour intact: the section still produces table shells and says the
+ * numbers must come from the researcher's own analysis. The block appears only
+ * when there is something to write from.
+ *
+ * These are legacy `analysis_runs` results (WS2 N2): computed by this system's
+ * engines, but not independently verified, so the block says exactly that and
+ * gives each analysis its tier. Windowed runs are left out (D3), and the block
+ * names them so the section can say they were not used.
  */
 export function buildResultsContext(runs: AnalysisRun[]): string | null {
-  if (runs.length === 0) return null;
+  const { usable, windowed } = usableLegacyRuns(runs);
+  if (usable.length === 0) return null;
 
-  const described = runs.map((run, index) => describeRun(run, index)).join('\n\n');
+  const described = usable.map((run, index) => describeRun(run, index)).join('\n\n');
+  const leftOut = windowed.length
+    ? `\n\nLeft out: ${windowed.length} attached ${windowed.length === 1 ? 'analysis was' : 'analyses were'} computed on the first rows of a file only (${windowed.map((run) => run.testKey).join(', ')}). Do not report any figure from ${windowed.length === 1 ? 'it' : 'them'}.`
+    : '';
 
-  return `## VERIFIED ANALYSIS RESULTS
+  return `## COMPUTED ANALYSIS RESULTS (legacy engine, not independently verified)
 
-The following were computed by this system's statistical engines from the researcher's own data. They are facts.
+The following were computed by this system's statistical engines from the researcher's data. They have not been independently verified; each analysis states its tier (pinned: the exact data and engine are recorded; unpinned: the exact data is not recorded). They are the only figures this section may report.
 
 RULES FOR USING THEM — these override any other instruction about results:
 
@@ -244,11 +282,12 @@ RULES FOR USING THEM — these override any other instruction about results:
 3. Report every violated assumption and every listed warning in the text. A finding whose assumptions failed must say so where the finding is stated, not in a footnote.
 4. Describe and organise. Interpretation belongs in the discussion, not here.
 5. Where a secondary form is given and disagrees with the primary one, report both and say which is being relied on.
+6. Do not describe these results as verified.
 
-${described}`;
+${described}${leftOut}`;
 }
 
-/** Whether a section should be written from data rather than from a template. */
-export function hasVerifiedResults(runs: AnalysisRun[]): boolean {
-  return runs.length > 0;
+/** Whether a section should be written from data rather than from a template (windowed runs do not count, WS2 D3). */
+export function hasComputedResults(runs: AnalysisRun[]): boolean {
+  return usableLegacyRuns(runs).usable.length > 0;
 }

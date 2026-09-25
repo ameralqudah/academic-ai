@@ -7,7 +7,7 @@
  * the researcher must see what was flagged.
  */
 
-import { allowedSpellings, checkNumbers } from '@/server/integrity/numbers';
+import { allowedSpellings, checkNumbers, QUARANTINE_MARKER, type ScopedValues } from '@/server/integrity/numbers';
 
 export type GuardrailFlag =
   | 'UNVERIFIED_CITATION'
@@ -15,7 +15,7 @@ export type GuardrailFlag =
   | 'EXTERNAL_URL'
   | 'CLAIMED_EXPERIMENT'
   | 'FABRICATED_STATISTIC'
-  /** A number in a results section that matches none of the verified analyses attached to it (P1-C). */
+  /** A number in a results section that matches none of the analyses attached to it (P1-C). */
   | 'UNTRACED_STATISTIC';
 
 export interface GuardrailFinding {
@@ -65,14 +65,18 @@ export interface InspectOptions {
   /** Sections that must not contain numeric findings unless the user supplied data. */
   expectsNoStatistics?: boolean;
   /**
-   * For results sections: every number the verified analyses attached to the
-   * section contain, as the text may write them. A statistic in the text that
-   * is not one of them is flagged as untraced (P1-C: the check used to be off
-   * exactly where numbers belong).
+   * For results sections: every number the analyses attached to the section
+   * contain (windowed runs excluded, WS2 D3), as the text may write them. A
+   * statistic in the text that is not one of them is flagged as untraced
+   * (P1-C: the check used to be off exactly where numbers belong).
    */
-  verifiedNumbers?: ReadonlySet<string>;
+  verifiedNumbers?: ReadonlySet<string> | ScopedValues;
   /** Text the user supplied (their instruction, project metadata): numbers in it are theirs, not findings (WS2). */
   context?: readonly string[];
+  /** How many untraced numbers were replaced by the quarantine marker before saving (WS2 N1); the notice says so. */
+  quarantined?: number;
+  /** Where the text appears: a chat reply is worded as one, never as a section (WS2 N11). */
+  surface?: 'section' | 'chat';
 }
 
 /**
@@ -87,7 +91,7 @@ export const numberSpellings = allowedSpellings;
  * headings treated as ordinary. This module only turns its findings into
  * flags; it never rewrites the text.
  */
-function statisticFindings(text: string, flag: 'FABRICATED_STATISTIC' | 'UNTRACED_STATISTIC', allowed: ReadonlySet<string>, context: readonly string[] | undefined, limit = 5): GuardrailFinding[] {
+function statisticFindings(text: string, flag: 'FABRICATED_STATISTIC' | 'UNTRACED_STATISTIC', allowed: ReadonlySet<string> | ScopedValues, context: readonly string[] | undefined, limit = 5): GuardrailFinding[] {
   return checkNumbers(text, { mode: 'model', allowed, context })
     .findings.slice(0, limit)
     .map((found) => ({ flag, sample: sample(found.text) }));
@@ -105,13 +109,20 @@ export function inspectOutput(text: string, options: InspectOptions = {}): Guard
 
   const flags = [...new Set(findings.map((finding) => finding.flag))];
 
-  return { flags, findings, notice: noticeFor(flags) };
+  return { flags, findings, notice: noticeFor(flags, options.quarantined ?? 0, options.surface ?? 'section') };
 }
 
-function noticeFor(flags: GuardrailFlag[]): GuardrailResult['notice'] {
-  if (flags.length === 0) return null;
+function noticeFor(flags: GuardrailFlag[], quarantined: number, surface: 'section' | 'chat'): GuardrailResult['notice'] {
+  if (flags.length === 0 && quarantined === 0) return null;
 
   const parts: { en: string; ar: string }[] = [];
+
+  if (quarantined > 0) {
+    parts.push({
+      en: `${quarantined} ${quarantined === 1 ? 'number' : 'numbers'} could not be traced to your analyses or your instruction and ${quarantined === 1 ? 'was' : 'were'} replaced with ${QUARANTINE_MARKER.en}. Enter the real values from your own analysis.`,
+      ar: `تعذّر تتبّع ${quarantined === 1 ? 'رقم واحد' : `${quarantined} أرقام`} إلى تحليلاتك أو تعليماتك، فاستُبدل بـ ${QUARANTINE_MARKER.ar}. أدخل القيم الحقيقية من تحليلك.`,
+    });
+  }
 
   if (flags.includes('UNVERIFIED_CITATION') || flags.includes('DOI_PRESENT')) {
     parts.push({
@@ -127,10 +138,15 @@ function noticeFor(flags: GuardrailFlag[]): GuardrailResult['notice'] {
     });
   }
 
-  if (flags.includes('UNTRACED_STATISTIC')) {
+  if (flags.includes('UNTRACED_STATISTIC') && surface === 'chat') {
     parts.push({
-      en: 'Some numbers here do not match any verified analysis attached to this section. Replace them with values from your own analyses, or insert verified values from the analysis workbench.',
-      ar: 'بعض الأرقام هنا لا تطابق أي تحليل موثّق مرفق بهذا القسم. استبدلها بقيم من تحليلاتك، أو أدرج قيمًا موثّقة من منصة التحليل.',
+      en: 'Some numbers in this reply do not match any analysis in this conversation or project, or your message. Check them against your own results before using them.',
+      ar: 'بعض الأرقام في هذا الرد لا تطابق أي تحليل في هذه المحادثة أو المشروع، ولا ما ورد في رسالتك. تحقّق منها مقابل نتائجك قبل استخدامها.',
+    });
+  } else if (flags.includes('UNTRACED_STATISTIC')) {
+    parts.push({
+      en: 'Some numbers here do not match any analysis attached to this section. Replace them with values from your own analyses, or insert verified values from the analysis workbench.',
+      ar: 'بعض الأرقام هنا لا تطابق أي تحليل مرفق بهذا القسم. استبدلها بقيم من تحليلاتك، أو أدرج قيمًا موثّقة من منصة التحليل.',
     });
   }
 

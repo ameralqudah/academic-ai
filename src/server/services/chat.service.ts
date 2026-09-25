@@ -161,6 +161,8 @@ export async function recordTurn(input: {
   model?: string;
   tokensIn?: number;
   tokensOut?: number;
+  /** Integrity flags on the assistant reply (WS2 N11). */
+  flags?: string[];
 }): Promise<{ user: AIMessageRow; assistant?: AIMessageRow }> {
   await requireOwned(input.conversationId, input.userId);
 
@@ -185,6 +187,7 @@ export async function recordTurn(input: {
     model: input.model ?? null,
     tokensIn: input.tokensIn ?? 0,
     tokensOut: input.tokensOut ?? 0,
+    ...(input.flags?.length ? { flags: input.flags } : {}),
   });
 
   /*
@@ -315,6 +318,8 @@ export async function recordRegeneratedAnswer(input: {
   parentMessageId: string;
   content: string;
   payload?: Record<string, unknown> | null;
+  /** Integrity flags on the reply (WS2 N11): a regenerated answer keeps its own. */
+  flags?: string[];
 }): Promise<AIMessageRow> {
   await requireOwned(input.conversationId, input.userId);
 
@@ -324,6 +329,7 @@ export async function recordRegeneratedAnswer(input: {
     content: input.content,
     parentMessageId: input.parentMessageId,
     payload: input.payload ?? null,
+    ...(input.flags?.length ? { flags: input.flags } : {}),
   });
 }
 
@@ -461,6 +467,8 @@ export async function recordReply(input: {
   assistantMessage: string;
   payload?: Record<string, unknown> | null;
   replyToMessageId?: string | null;
+  /** Integrity flags on the reply (WS2 N11). */
+  flags?: string[];
 }): Promise<RecordedIds> {
   if (input.replyToMessageId) {
     await requireOwned(input.conversationId, input.userId);
@@ -476,6 +484,7 @@ export async function recordReply(input: {
       parentMessageId: question.id,
       content: input.assistantMessage,
       payload: input.payload ?? null,
+      ...(input.flags ? { flags: input.flags } : {}),
     });
 
     return { userMessageId: question.id, assistantMessageId: answer.id };
@@ -487,6 +496,7 @@ export async function recordReply(input: {
     userMessage: input.userMessage,
     assistantMessage: input.assistantMessage,
     payload: input.payload ?? null,
+    ...(input.flags ? { flags: input.flags } : {}),
   });
 
   return { userMessageId: recorded.user.id, assistantMessageId: recorded.assistant?.id as string };

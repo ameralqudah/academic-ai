@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { AlignmentType, Document, Packer, Paragraph, TextRun } from 'docx';
 
 import { classifyByKeyword, KEYWORD_RULE_ORDER } from '@/agents/keywords';
-import { buildResultsContext, describeRun, hasVerifiedResults } from '@/ai/context/results';
+import { buildResultsContext, describeRun, hasComputedResults, usableLegacyRuns } from '@/ai/context/results';
 import { generalPrompt } from '@/ai/prompts/general';
 import {
   canUseModel,
@@ -65,7 +65,7 @@ import { attemptCost } from '@/server/ai/gateway/metering';
 import { inspectOutput, numberSpellings, parseJsonOutput } from '@/ai/guardrails';
 import * as statisticsText from '@/lib/statistics-text';
 import { normaliseDigits, untracedNumbers } from '@/lib/statistics-text';
-import { allowedSpellings, checkNumbers, legacyResultTier, NUMERIC_GUARD_VERSION, quarantine, QUARANTINE_MARKER, researchNumbers } from '@/server/integrity/numbers';
+import { allowedFromLegacyResults, allowedSpellings, checkNumbers, emptyScopedValues, legacyResultTier, NUMERIC_GUARD_VERSION, quarantine, QUARANTINE_MARKER, researchNumbers, valueClassesOf } from '@/server/integrity/numbers';
 import { sectionI18nKey } from '@/lib/sections';
 import { countWords, slugify, truncate } from '@/lib/text';
 import { assertSafeKey, datasetKey, datasetPrefix, keyBelongsTo } from '@/server/storage/keys';
@@ -280,6 +280,76 @@ console.log('\nnumeric integrity guard (WS2 group 1)');
     external.test('β = 1 overall');
     check('M4: a caller moving its own copy’s lastIndex cannot affect P1-C detection or the guard', [untracedNumbers('β = 1 overall'), found('β = 1 overall'), untracedNumbers('β = 1 overall')], [['β = 1'], ['β = 1'], ['β = 1']]);
   }
+
+  /* WS2 Workstream A, commit 1: M5 performance, M3 context narrowing, M2 field-scoped tracing, the shared legacy helper. */
+  {
+    const dense = (sentences: number) => Array.from({ length: sentences }, (_, i) => `Item ${i}: loadings above .${(i % 90) + 10} are acceptable; r = .${(i % 90) + 10}, t(98) = 2.${i % 10}.`).join(' ');
+    const big = dense(4000);
+    const started = performance.now();
+    const bigCheck = checkNumbers(big, { mode: 'model', context: ['N = 250'] });
+    const bigQuarantined = quarantine(big, bigCheck);
+    const elapsed = performance.now() - started;
+    check(`M5: a ${Math.round(big.length / 1000)}k-character, number-dense text is checked and quarantined in under 750 ms`, [elapsed < 750, bigCheck.findings.length, checkNumbers(bigQuarantined.text, { mode: 'model' }).clean], [true, 8000, true]);
+    /* The one-pass quarantine equals the straightforward one (replace from the end), on a varied corpus. */
+    const naive = (text: string, spans: { index: number; length: number }[], marker: string) => [...spans].sort((a, b) => b.index - a.index).reduce((out, f) => out.slice(0, f.index) + marker + out.slice(f.index + f.length), text);
+    const corpus = [dense(40), 'r = .45 and p < .01; β = −0,31 (SD = 1.2), χ²(3) = 45, ٤٥٪ of ٢٥٠', 'no numbers here', 'b = .777\nM = 3.2\n## 0.45 of it'];
+    check('M5: the one-pass quarantine gives exactly the same text as replacing each finding in turn', corpus.every((text) => { const c = checkNumbers(text, { mode: 'model' }); return quarantine(text, c).text === naive(text, c.findings, QUARANTINE_MARKER.en); }), true);
+    check('M5: detection is unchanged by the index structures (same findings as before, in text order)', found('see Table 2.1; r = .45, then .30 (ns) and 12% of 1.2.3 items; t(98) = 2.31'), ['r = .45', '.30', '12%', 't(98) = 2.31']);
+  }
+  /* M3: the user's context allows only the research numbers they wrote, within their class. */
+  check('M3: labels, chapter and page numbers in the user’s text allow nothing', [found('t(98) = 3 and b = 2', new Set(), ['Write chapter 3 in 2 pages.']), found('F = 12', new Set(), ['See Table 12 and pp. 12–15.'])], [['t(98) = 3', 'b = 2'], ['F = 12']]);
+  check('M3: a statistic the user wrote is allowed only with the same class', [found('N = 250', new Set(), ['Use N = 250.']), found('t = 250', new Set(), ['Use N = 250.']), found('p = .05', new Set(), ['with α = .05']), found('α = .05', new Set(), ['with α = .05'])], [[], ['t = 250'], ['p = .05'], []]);
+  check('M3: a sample size stated in words allows it as N (English and Arabic)', [found('(N = 250)', new Set(), ['Our sample was 250 students.']), found('(N = 312)', new Set(), ['a sample of 312']), found('(N = 250)', new Set(), ['بلغت العينة ٢٥٠ طالبًا']), found('(t = 250)', new Set(), ['250 students'])], [[], [], [], ['t = 250']]);
+  check('M3: the user’s own stated criterion is still theirs', found('α = .05 throughout', new Set(), ['Significance was set at α = .05.']), []);
+  /* M2 (WS2 part): stored values trace only within their class, and only reportable fields count. */
+  const legacyRun = {
+    id: 'run-1',
+    datasetVersionId: 'v1',
+    datasetContentHash: 'h1',
+    engineVersion: 'legacy-1',
+    spec: { columns: {}, rowsAnalysed: 100 },
+    result: { test: 't.independent', statistic: { name: 't', value: 2.31 }, df: 98, pValue: 0.013, effect: { name: 'cohensD', value: 0.45, band: 'small' }, estimates: [{ label: 'A', n: 50, mean: 3.2, sd: 1.1, se: 0.16 }], n: 100, rowsSupplied: 100, rowsDropped: 0, seed: 12345 },
+  };
+  const scoped = allowedFromLegacyResults([legacyRun]);
+  const traceOf = (text: string) => checkNumbers(text, { mode: 'model', allowed: scoped.values }).findings.map((f) => f.text);
+  check('M2: stored values are traced in their own class', [traceOf('t(98) = 2.31, p = .013, d = .45'), traceOf('M = 3.20 (SD = 1.10), N = 100'), traceOf('a value of .013 and 45%')], [[], [], []]);
+  check('M2: a p-value is traced only to a p-value field (not to an effect of the same value)', traceOf('p = .45'), ['p = .45']);
+  check('M2: degrees of freedom and counts do not trace estimates (t = 98, b = 50), and estimates do not trace counts (N = 2.31)', [traceOf('t = 98'), traceOf('b = 50'), traceOf('N = 3.2')], [['t = 98'], ['b = 50'], ['N = 3.2']]);
+  check('M2: a test with degrees of freedom only is traced to the df field', [traceOf('with t(98) reported below'), traceOf('with t(97) reported below')], [[], ['t(97)']]);
+  check('M2: fields that describe the computation are not reportable (seed)', traceOf('b = 12345'), ['b = 12345']);
+  check('M2: value classes of a number in the text', [valueClassesOf({ text: 'p < .05', kind: 'statistic' }), valueClassesOf({ text: 'N = 250', kind: 'statistic' }), valueClassesOf({ text: 't(98)', kind: 'statistic' }), valueClassesOf({ text: 'β = .31', kind: 'statistic' }), valueClassesOf({ text: '.013', kind: 'decimal' }), valueClassesOf({ text: '45%', kind: 'percent' })], [['p'], ['n'], ['df'], ['estimate'], ['estimate', 'p'], ['estimate']]);
+  check('M2: a plain set of spellings keeps the earlier value-only tracing (existing callers unchanged)', checkNumbers('p = .45', { mode: 'model', allowed: allowedSpellings([0.45]) }).clean, true);
+  check('M2: an empty scoped set traces nothing', checkNumbers('r = .45', { mode: 'model', allowed: emptyScopedValues() }).findings.map((f) => f.text), ['r = .45']);
+  /* The shared helper: one way to build allowed values from legacy results, with tiers (D3: windowed runs excluded by default). */
+  const windowedRun = { ...legacyRun, id: 'run-2', spec: { truncatedTo: 5000 }, result: { statistic: { name: 'r', value: 0.62 }, pValue: 0.001 } };
+  const unpinnedRun = { id: 'run-3', datasetVersionId: null, datasetContentHash: null, engineVersion: null, result: { statistic: { name: 'F', value: 7.5 }, df: [2, 97], pValue: 0.002 } };
+  const mixed = allowedFromLegacyResults([legacyRun, windowedRun, unpinnedRun]);
+  check('helper: windowed runs are excluded by default, and every run is reported with its tier', [mixed.used, mixed.excluded], [[{ id: 'run-1', tier: 'pinned' }, { id: 'run-3', tier: 'unpinned' }], [{ id: 'run-2', tier: 'windowed' }]]);
+  check('helper: an excluded run’s numbers are not allowed; an included one’s are', [checkNumbers('r = .62', { mode: 'model', allowed: mixed.values }).clean, checkNumbers('F(2, 97) = 7.50, p = .002', { mode: 'model', allowed: mixed.values }).clean], [false, true]);
+  check('helper: windowed runs can be included explicitly', [checkNumbers('r = .62', { mode: 'model', allowed: allowedFromLegacyResults([windowedRun], { includeWindowed: true }).values }).clean, allowedFromLegacyResults([windowedRun], { includeWindowed: true }).used], [true, [{ id: 'run-2', tier: 'windowed' }]]);
+  check('helper: nothing attached allows nothing', [checkNumbers('r = .45', { mode: 'model', allowed: allowedFromLegacyResults([]).values }).clean, allowedFromLegacyResults([]).used], [false, []]);
+
+  /* Section generation (WS2 N1): quarantine the model's section text before it is saved. */
+  const sectionText = [
+    '## 4.2 Results of the first hypothesis',
+    'Table 2 shows the group means. As in Chapter 3, the analysis followed the plan in Section 3.4.',
+    'The groups differed, d = .45, and a further test gave t(40) = 5.67, p = .021.',
+  ].join('\n');
+  const sectionCheck = checkNumbers(sectionText, { mode: 'model', allowed: scoped.values });
+  const sectionGuarded = quarantine(sectionText, sectionCheck, 'en');
+  check('section text: headings, table and chapter labels are left alone', [sectionGuarded.text.includes('## 4.2 Results'), sectionGuarded.text.includes('Table 2'), sectionGuarded.text.includes('Chapter 3'), sectionGuarded.text.includes('Section 3.4')], [true, true, true, true]);
+  check('section text: the traced value stays, the invented ones are replaced', [sectionGuarded.text.includes('d = .45'), /5\.67|\.021/.test(sectionGuarded.text), sectionGuarded.quarantined > 0, sectionGuarded.quarantined], [true, false, true, sectionCheck.findings.length]);
+  check('section text: quarantined text checks clean again', checkNumbers(sectionGuarded.text, { mode: 'model', allowed: scoped.values }).clean, true);
+  check('section text: the instruction\u2019s own number is the researcher\u2019s', checkNumbers('The sample was N = 250.', { mode: 'model', context: ['Say the sample was N = 250.'] }).clean, true);
+  const quarantineNotice = inspectOutput('text', { quarantined: 2 }).notice;
+  check('the notice says how many values were replaced, in both languages', [quarantineNotice?.en.startsWith('2 numbers could not be traced'), quarantineNotice?.en.includes(QUARANTINE_MARKER.en), quarantineNotice?.ar.includes(QUARANTINE_MARKER.ar)], [true, true, true]);
+  check('no replacement and no flag means no notice', inspectOutput('text', { quarantined: 0 }).notice, null);
+  /* Chat (WS2 N11): flagged, worded as a reply, never as a section. */
+  const chatNotice = inspectOutput('A study found t(98) = 2.31.', { verifiedNumbers: emptyScopedValues(), surface: 'chat' });
+  check('chat: an untraced value is flagged with the chat wording', [chatNotice.flags.includes('UNTRACED_STATISTIC'), chatNotice.notice?.en.includes('in this reply'), chatNotice.notice?.en.includes('attached to this section'), chatNotice.notice?.ar.includes('هذا الرد')], [true, true, false, true]);
+  check('sections keep their own wording', inspectOutput('A study found t(98) = 2.31.', { verifiedNumbers: emptyScopedValues() }).notice?.en.includes('attached to this section'), true);
+  check('helper: the result is never labelled verified', Object.keys(mixed).sort(), ['excluded', 'used', 'values']);
+  check('guard version bumped for the tracing change', NUMERIC_GUARD_VERSION, 'ws2-2');
 
   check(
     'money and ranges the user supplied (instruction, project metadata) are theirs',
@@ -1295,7 +1365,10 @@ assertTrue('a very small p is written as "< .001", not as zeros', tinyP.includes
 /* The block that carries the rules the model must follow. */
 const block = buildResultsContext([sampleRun]);
 assertTrue('the block exists when there are results', block !== null);
-assertTrue('and states the figures are facts', (block ?? '').includes('They are facts.'));
+/* Legacy results are computed, never "verified" (WS2 N2): the header and the rules say so. */
+assertTrue('the block is labelled computed, not verified', (block ?? '').startsWith('## COMPUTED ANALYSIS RESULTS (legacy engine, not independently verified)'));
+assertTrue('and never presents them as VERIFIED', !(block ?? '').includes('VERIFIED') && !(block ?? '').includes('They are facts.'));
+assertTrue('and tells the model not to call them verified', (block ?? '').includes('Do not describe these results as verified.'));
 assertTrue('and forbids recomputing them', (block ?? '').toLowerCase().includes('do not recompute'));
 assertTrue(
   'and forbids adding statistics that are not present',
@@ -1313,8 +1386,34 @@ assertTrue(
  * researcher's own analysis. The change is strictly additive.
  */
 check('no attached analyses means no block', buildResultsContext([]), null);
-check('and the section knows it has nothing to write from', hasVerifiedResults([]), false);
-check('while one analysis is enough', hasVerifiedResults([sampleRun]), true);
+check('and the section knows it has nothing to write from', hasComputedResults([]), false);
+check('while one analysis is enough', hasComputedResults([sampleRun]), true);
+
+/*
+ * Each analysis carries its tier (WS2 N2, D3), and a windowed one (computed on
+ * the first rows of a file) is left out of the block and of the section's
+ * numbers, with the block saying it was left out.
+ */
+assertTrue('a run with no recorded data is shown as unpinned', described.includes('Tier: unpinned: the exact data this was computed on is not recorded'));
+const pinnedRun = { ...sampleRun, datasetVersionId: 'dv-1', datasetContentHash: 'h'.repeat(64), engineVersion: 'engine-7' } as typeof sampleRun;
+assertTrue('a run with its data and engine recorded is shown as pinned', describeRun(pinnedRun, 0).includes('Tier: pinned: the dataset version, its content hash and the engine version (engine-7) are recorded'));
+const windowedLegacy = {
+  ...pinnedRun,
+  id: 'run-w',
+  testKey: 'correlation.pearson',
+  spec: { columns: { x: 'a', y: 'b' }, truncatedTo: 5000 },
+  result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+} as typeof sampleRun;
+assertTrue('a windowed run is shown as windowed, with its row count', describeRun(windowedLegacy, 0).includes('Tier: windowed: computed on the first 5000 rows of the file only'));
+check('usable runs leave the windowed one out', [usableLegacyRuns([pinnedRun, windowedLegacy]).usable.map((run) => run.id), usableLegacyRuns([pinnedRun, windowedLegacy]).windowed.map((run) => run.id)], [['run-1'], ['run-w']]);
+const mixedBlock = buildResultsContext([pinnedRun, windowedLegacy]) ?? '';
+assertTrue('the windowed run\u2019s figures do not reach the prompt', !mixedBlock.includes('0.812') && !mixedBlock.includes('0.004') && mixedBlock.includes('-2.221'));
+assertTrue('and the block says it was left out', mixedBlock.includes('Left out: 1 attached analysis was computed on the first rows of a file only (correlation.pearson)'));
+check('only windowed runs attached means no block', buildResultsContext([windowedLegacy]), null);
+check('and nothing to write from', hasComputedResults([windowedLegacy]), false);
+const legacyAllowed = allowedFromLegacyResults([pinnedRun, windowedLegacy]);
+check('the allowed numbers come from the usable run only', [legacyAllowed.used, legacyAllowed.excluded], [[{ id: 'run-1', tier: 'pinned' }], [{ id: 'run-w', tier: 'windowed' }]]);
+check('a windowed run\u2019s value is untraced, a pinned one\u2019s is traced', [checkNumbers('r = .81', { mode: 'model', allowed: legacyAllowed.values }).clean, checkNumbers('d = -0.52', { mode: 'model', allowed: legacyAllowed.values }).clean], [false, true]);
 
 /* A reliability result has a different shape and must survive it. */
 const alphaRun = {

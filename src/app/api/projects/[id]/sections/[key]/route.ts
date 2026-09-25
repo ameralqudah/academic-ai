@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { isSectionKey } from '@/config/research';
 import { ok, withApi } from '@/server/http/api';
 import { AppError } from '@/server/http/errors';
-import { approveSection, getSection, saveSection } from '@/server/services/section.service';
+import { approveSection, getSection, saveUserEdit } from '@/server/services/section.service';
 import { updateSectionSchema } from '@/server/validation/project';
 
 type Params = { id: string; key: string };
@@ -19,17 +19,17 @@ export const GET = withApi<undefined, Params>({}, async ({ user, params }) => {
   return ok(section);
 });
 
+/** A person's edit: only a draft or their own edit, always recorded as theirs (WS2 N3). */
 export const PATCH = withApi<Body, Params>(
   { schema: updateSectionSchema },
   async ({ user, params, body }) => {
-    const section = await saveSection({
+    const section = await saveUserEdit({
       projectId: params.id,
       userId: user.id,
       sectionKey: sectionKeyOf(params),
       content: body.content,
       heading: body.heading,
       status: body.status,
-      origin: body.origin,
     });
     return ok(section);
   },

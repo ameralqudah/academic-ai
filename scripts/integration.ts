@@ -32,7 +32,7 @@ import { eq, like } from 'drizzle-orm';
 
 import type { AgentEvent } from '@/agents/events';
 import { buildResultsContext } from '@/ai/context/results';
-import { allowedFromLegacyResults, checkNumbers, QUARANTINE_MARKER } from '@/server/integrity/numbers';
+import { allowedFromLegacyResults, checkNumbers, NUMERIC_GUARD_VERSION, QUARANTINE_MARKER } from '@/server/integrity/numbers';
 import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
 import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
@@ -364,6 +364,24 @@ async function main() {
     const titleSection = await getSection(project.id, userA, 'TITLE');
     check('selecting a title still approves the TITLE section server-side', [titleSection.status, titleSection.approvedAt instanceof Date, titleSection.content], ['APPROVED', true, 'أثر برنامج تدريبي في التحصيل']);
     check('… and a later edit of the title revokes it', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'TITLE', content: 'عنوان معدّل' })).status, 'USER_EDITED');
+
+    /* WS2 D2: every person's edit records a flag-only scan with its version; the text is never changed. */
+    const scanned = 'بلغ حجم العينة N = 250 طالبًا، وكانت النتيجة t(98) = 2.31, p = .012.';
+    await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'DISCUSSION', content: scanned });
+    const [scannedVersion] = await listVersions(project.id, userA, 'DISCUSSION');
+    check(
+      'D2: an edit records a person-mode scan with its version, text unchanged',
+      [scannedVersion?.content, scannedVersion?.integrity?.mode, scannedVersion?.integrity?.quarantined, scannedVersion?.integrity?.guardVersion, (await getSection(project.id, userA, 'DISCUSSION')).status],
+      [scanned, 'person', 0, NUMERIC_GUARD_VERSION, 'USER_EDITED'],
+    );
+    check('D2: numbers tracing to no attached analysis are counted as manual (flag only)', [(scannedVersion?.integrity?.manual ?? 0) >= 2, scannedVersion?.integrity?.findings.some((found) => found.text.includes('2.31')), scannedVersion?.integrity?.sources], [true, true, []]);
+    const plainEdit = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'DISCUSSION', content: 'نص بلا أرقام بحثية.' });
+    const [plainVersion] = await listVersions(project.id, userA, 'DISCUSSION');
+    check('D2: text without research numbers records no manual numbers', [plainEdit.status, plainVersion?.integrity?.manual, plainVersion?.integrity?.findings], ['USER_EDITED', 0, []]);
+    check('D2: the revoked-approval edit also carries its scan', Boolean(revokedVersion?.integrity && revokedVersion.integrity.mode === 'person'), true);
+    check('D2: a version saved without the guard (a chosen title, an earlier save) has no record', [(await listVersions(project.id, userA, 'TITLE')).find((v) => v.origin === 'AI')?.integrity ?? null, (await listVersions(project.id, userA, 'PROBLEM')).every((v) => v.integrity === null)], [null, true]);
+    await approveSection(project.id, userA, 'DISCUSSION');
+    check('D2: a section with manual numbers can still be approved (no blocking)', (await getSection(project.id, userA, 'DISCUSSION')).status, 'APPROVED');
   }
 
   /* ------------------------------------------------------------- doc type */
@@ -1543,7 +1561,25 @@ async function main() {
       check('status stays AI_SUGGESTED', savedResults?.status, 'AI_SUGGESTED');
       const resultVersions = await listVersions(target, statsOwner, 'RESULTS');
       check('the version is recorded as AI, with the quarantined text', [resultVersions[0]?.origin, resultVersions[0]?.content], ['AI', results.content]);
+      /* WS2 D2: the guard's result is stored with the version: runs checked against, with tiers, and the windowed one left out. */
+      const stored = resultVersions[0]?.integrity;
+      check(
+        'D2: the generated version records the model-mode result',
+        [stored?.mode, stored?.guardVersion, stored?.quarantined, stored?.manual, stored?.findings.length === Math.min(20, results.integrity.quarantined)],
+        ['model', results.integrity.guardVersion, results.integrity.quarantined, 0, true],
+      );
+      check('D2: with the attached runs and their tiers (never "verified"), the windowed one excluded', [stored?.sources, stored?.excluded], [[{ id: chapterRun.run.id, tier: 'pinned' }], [{ id: windowedRun.id, tier: 'windowed' }]]);
+      assertTrue('D2: and the traced statistic is counted as traced', (stored?.traced ?? 0) >= 1);
       check('the earlier section is untouched', [(await getSection(target, statsOwner, 'DISCUSSION'))?.content, (await listVersions(target, statsOwner, 'DISCUSSION')).length], [discussionBefore?.content, 1]);
+      /* WS2 D2: a person's edit of the results section is scanned against the same attached runs, and kept as written. */
+      const personText = `The groups differed, t = ${realStatistic}; I also found r = .44.`;
+      await saveUserEdit({ projectId: target, userId: statsOwner, sectionKey: 'RESULTS', content: personText });
+      const [personVersion] = await listVersions(target, statsOwner, 'RESULTS');
+      check(
+        'D2: a person\u2019s edit of a results section: kept as written, traced and manual numbers counted',
+        [personVersion?.content, personVersion?.origin, personVersion?.integrity?.mode, (personVersion?.integrity?.traced ?? 0) >= 1, personVersion?.integrity?.manual, personVersion?.integrity?.sources, personVersion?.integrity?.excluded],
+        [personText, 'USER', 'person', true, 1, [{ id: chapterRun.run.id, tier: 'pinned' }], [{ id: windowedRun.id, tier: 'windowed' }]],
+      );
       await detachRun(chapterRun.run.id, statsOwner);
       await detachRun(windowedRun.id, statsOwner);
 
@@ -1559,6 +1595,8 @@ async function main() {
       reply('The study sampled N = 250 students.');
       const noInstruction = await generate(enOwner, enProject.id, 'INTRODUCTION');
       check('without it in the instruction the same number is quarantined (project text is not used)', [noInstruction.content.includes('250'), noInstruction.integrity.quarantined], [false, 1]);
+      const [introVersion] = await listVersions(enProject.id, enOwner, 'INTRODUCTION');
+      check('D2: a non-results section records its result with no run sources', [introVersion?.integrity?.mode, introVersion?.integrity?.quarantined, introVersion?.integrity?.sources, introVersion?.integrity?.excluded], ['model', 1, [], []]);
 
       /* Text with no research numbers is saved exactly as written. */
       reply('This section describes the aims of the study in general terms.');

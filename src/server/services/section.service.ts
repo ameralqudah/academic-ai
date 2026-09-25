@@ -2,6 +2,9 @@ import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
 import { countWords } from '@/lib/text';
 import type { ResearchSection } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { allowedFromLegacyResults, checkNumbers } from '@/server/integrity/numbers';
+import { sectionIntegrity, type SectionIntegrity } from '@/server/integrity/section';
+import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 
 import { getOwnedProject, refreshProjectStats } from './project.service';
@@ -15,6 +18,8 @@ export interface SaveSectionInput {
   status?: 'DRAFT' | 'AI_SUGGESTED' | 'USER_EDITED' | 'APPROVED';
   origin: 'AI' | 'USER';
   note?: string;
+  /** What the numeric guard found in this text (WS2 D2), stored with the version. */
+  integrity?: SectionIntegrity;
 }
 
 /**
@@ -48,6 +53,7 @@ export async function saveSection(input: SaveSectionInput): Promise<ResearchSect
       origin: input.origin,
       wordCount,
       note: input.note ?? null,
+      integrity: input.integrity ?? null,
     });
   }
 
@@ -83,6 +89,14 @@ export async function saveUserEdit(input: UserEditInput): Promise<ResearchSectio
     if (existing.content === input.content && sameHeading) return existing;
   }
   const revoked = existing?.status === 'APPROVED';
+  /*
+   * A person's numbers are recorded, never changed (WS2 D2): the text is
+   * scanned in person mode against the analyses attached to this section
+   * (windowed runs excluded, D3), and the numbers that trace to none are
+   * counted as manual. Nothing here blocks the save or a later approval.
+   */
+  const legacy = allowedFromLegacyResults(await analysisRunsRepo.listForSection(input.projectId, input.userId, input.sectionKey));
+  const check = checkNumbers(input.content, { mode: 'person', allowed: legacy.values });
   return saveSection({
     projectId: input.projectId,
     userId: input.userId,
@@ -92,6 +106,7 @@ export async function saveUserEdit(input: UserEditInput): Promise<ResearchSectio
     status: input.status ?? (input.content.trim() ? 'USER_EDITED' : 'DRAFT'),
     origin: 'USER',
     ...(revoked ? { note: 'Edited after approval: approval revoked' } : {}),
+    integrity: sectionIntegrity({ mode: 'person', check, legacy }),
   });
 }
 

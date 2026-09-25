@@ -11,6 +11,7 @@ import { labelFor } from '@/ai/context/labels';
 import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
 import { buildResultsContext } from '@/ai/context/results';
 import { allowedFromLegacyResults, checkNumbers, quarantine, type NumberSpan } from '@/server/integrity/numbers';
+import { sectionIntegrity } from '@/server/integrity/section';
 import { generalPrompt } from '@/ai/prompts/general';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
 import {
@@ -456,6 +457,8 @@ export async function generateSection(
     status: 'AI_SUGGESTED',
     origin: 'AI',
     note: instruction?.slice(0, 200),
+    /* The guard's result, stored with the version (WS2 D2); for a results section, the attached runs and their tiers. */
+    integrity: sectionIntegrity({ mode: 'model', check, legacy: resultsSection ? legacy : null, quarantined: guarded.quarantined }),
   });
 
   return {

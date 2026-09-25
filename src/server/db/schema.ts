@@ -31,6 +31,7 @@ import {
 import type { AdapterAccountType } from 'next-auth/adapters';
 
 import type { SectionKey, ToolKey } from '@/config/research';
+import type { SectionIntegrity } from '@/server/integrity/section';
 
 const id = () =>
   text('id')
@@ -429,6 +430,8 @@ export const sectionVersions = pgTable(
     origin: versionOriginEnum('origin').notNull(),
     wordCount: integer('word_count').default(0).notNull(),
     note: text('note'),
+    /** WS2 D2: what the numeric guard found when this version was saved (null for versions saved before it). */
+    integrity: jsonb('integrity').$type<SectionIntegrity>(),
     createdAt: createdAt(),
   },
   (table) => [index('section_versions_section_idx').on(table.sectionId, table.createdAt)],

@@ -99,7 +99,8 @@ import {
   switchDocType,
 } from '@/server/services/project.service';
 import { addReference, listReferences, markVerified } from '@/server/services/reference.service';
-import { approveSection, listVersions, saveSection } from '@/server/services/section.service';
+import { approveSection, getSection, listVersions, saveSection, saveUserEdit } from '@/server/services/section.service';
+import { updateSectionSchema } from '@/server/validation/project';
 import {
   deleteEverything,
   deleteFileOnly,
@@ -128,7 +129,7 @@ import {
   switchToBranch,
 } from '@/server/services/chat.service';
 import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
-import { clearUnselectedTitles, deleteTitle, listTitles } from '@/server/services/ai.service';
+import { clearUnselectedTitles, deleteTitle, listTitles, selectTitle } from '@/server/services/ai.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -314,6 +315,53 @@ async function main() {
   await expectAppError('an empty section cannot be approved', 'CONFLICT', () =>
     approveSection(project.id, userA, 'CONCLUSION'),
   );
+
+  /* ----------------------------------------------- WS2 N3: the edit boundary */
+  section('section edits from the editor (WS2 N3)');
+  {
+
+    /* The route's body schema: only a draft or the person's own edit; the server decides who wrote it. */
+    const parsed = (body: unknown) => updateSectionSchema.safeParse(body);
+    check('a client cannot approve through an edit (status APPROVED is refused)', parsed({ content: 'x', status: 'APPROVED' }).success, false);
+    check('a client cannot mark text as AI-suggested (status AI_SUGGESTED is refused)', parsed({ content: 'x', status: 'AI_SUGGESTED' }).success, false);
+    check('an unknown status is refused', [parsed({ content: 'x', status: 'PUBLISHED' }).success, parsed({ content: 'x', status: 'EMPTY' }).success], [false, false]);
+    check('a draft or the person’s own edit is accepted', [parsed({ content: '', status: 'DRAFT' }).success, parsed({ content: 'x', status: 'USER_EDITED' }).success, parsed({ content: 'x' }).success], [true, true, true]);
+    const withOrigin = parsed({ content: 'x', status: 'USER_EDITED', origin: 'AI' });
+    check('an origin sent by the client is dropped (the server decides)', withOrigin.success && !('origin' in withOrigin.data), true);
+
+    /* The service: always recorded as the person's, never approved by an edit. */
+    const editKey = 'OBJECTIVES' as const;
+    const firstEdit = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: 'تهدف الدراسة إلى تعرّف أثر البرنامج.', heading: 'أهداف الدراسة' });
+    check('an edit with text is the person’s edit', firstEdit.status, 'USER_EDITED');
+    const editVersions = await listVersions(project.id, userA, editKey);
+    check('… and its version is recorded as the person’s (origin USER)', editVersions.map((v) => v.origin), ['USER']);
+    check('an empty edit is a draft', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'HYPOTHESES', content: '' })).status, 'DRAFT');
+    check('an explicit draft stays a draft', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'RECOMMENDATIONS', content: 'مسودة أولى', status: 'DRAFT' })).status, 'DRAFT');
+    await expectAppError('another user cannot edit the section', 'NOT_FOUND', () =>
+      saveUserEdit({ projectId: project.id, userId: userB, sectionKey: editKey, content: 'x' }),
+    );
+
+    /* D4: editing an approved section revokes its approval; saving the same text does not. */
+    const approvedEdit = await approveSection(project.id, userA, editKey);
+    check('the section is approved', approvedEdit.status, 'APPROVED');
+    const unchanged = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: approvedEdit.content, heading: approvedEdit.heading ?? undefined });
+    check('saving the same text keeps the approval (the editor’s Save on an unchanged section)', [unchanged.status, unchanged.approvedAt?.getTime()], ['APPROVED', approvedEdit.approvedAt?.getTime()]);
+    check('… and adds no version', (await listVersions(project.id, userA, editKey)).length, editVersions.length);
+    const edited = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: `${approvedEdit.content} ويُعنى بطلبة المرحلة الأساسية.` });
+    check('editing an approved section revokes its approval', [edited.status, edited.approvedAt], ['USER_EDITED', null]);
+    const revokedVersion = (await listVersions(project.id, userA, editKey)).find((v) => v.note === 'Edited after approval: approval revoked');
+    check('… the revocation is recorded on the version, as the person’s edit', [Boolean(revokedVersion), revokedVersion?.origin], [true, 'USER']);
+    check('… and it can be approved again, deliberately', (await approveSection(project.id, userA, editKey)).status, 'APPROVED');
+    const retitled = await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: editKey, content: edited.content, heading: 'عنوان آخر للقسم' });
+    check('changing the heading of an approved section is an edit too', retitled.status, 'USER_EDITED');
+
+    /* The server still approves where it should: choosing a title writes an approved TITLE section. */
+    const [candidate] = await titlesRepo.insertMany([{ projectId: project.id, title: 'أثر برنامج تدريبي في التحصيل', batch: 1, selected: false }] as never);
+    await selectTitle(userA, project.id, candidate!.id);
+    const titleSection = await getSection(project.id, userA, 'TITLE');
+    check('selecting a title still approves the TITLE section server-side', [titleSection.status, titleSection.approvedAt instanceof Date, titleSection.content], ['APPROVED', true, 'أثر برنامج تدريبي في التحصيل']);
+    check('… and a later edit of the title revokes it', (await saveUserEdit({ projectId: project.id, userId: userA, sectionKey: 'TITLE', content: 'عنوان معدّل' })).status, 'USER_EDITED');
+  }
 
   /* ------------------------------------------------------------- doc type */
   section('document type switching');

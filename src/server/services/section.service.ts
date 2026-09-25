@@ -55,6 +55,46 @@ export async function saveSection(input: SaveSectionInput): Promise<ResearchSect
   return section;
 }
 
+export interface UserEditInput {
+  projectId: string;
+  userId: string;
+  sectionKey: SectionKey;
+  content: string;
+  heading?: string;
+  status?: 'DRAFT' | 'USER_EDITED';
+}
+
+/**
+ * A person's edit of a section, from the editor (WS2 N3). Their words are
+ * always recorded as theirs (`origin: USER`), whatever the client says, and
+ * the status can only be a draft or their edit — approval stays a separate,
+ * deliberate action (`approveSection`).
+ *
+ * Editing an approved section revokes its approval (D4): what was approved is
+ * no longer what is there, so the researcher approves it again. Saving the
+ * same text is not an edit, so the editor's Save button on an unchanged,
+ * approved section leaves the approval in place.
+ */
+export async function saveUserEdit(input: UserEditInput): Promise<ResearchSection> {
+  await getOwnedProject(input.projectId, input.userId);
+  const existing = await projectsRepo.findSection(input.projectId, input.sectionKey);
+  if (existing?.status === 'APPROVED') {
+    const sameHeading = input.heading === undefined || existing.heading === null || input.heading === existing.heading;
+    if (existing.content === input.content && sameHeading) return existing;
+  }
+  const revoked = existing?.status === 'APPROVED';
+  return saveSection({
+    projectId: input.projectId,
+    userId: input.userId,
+    sectionKey: input.sectionKey,
+    content: input.content,
+    heading: input.heading,
+    status: input.status ?? (input.content.trim() ? 'USER_EDITED' : 'DRAFT'),
+    origin: 'USER',
+    ...(revoked ? { note: 'Edited after approval: approval revoked' } : {}),
+  });
+}
+
 export async function approveSection(
   projectId: string,
   userId: string,

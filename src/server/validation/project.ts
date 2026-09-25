@@ -33,11 +33,17 @@ export const updateProjectSchema = z
   })
   .partial();
 
+/**
+ * A person's edit of a section (WS2 N3). The client may only save a draft or
+ * its own edit: approval is a separate action (POST), AI_SUGGESTED is written
+ * only by the server when a model drafts the section, and who wrote the text
+ * is decided by the server, not sent by the client (an `origin` in the body is
+ * dropped).
+ */
 export const updateSectionSchema = z.object({
   content: z.string().max(120_000),
   heading: z.string().trim().max(300).optional(),
-  status: z.enum(['DRAFT', 'AI_SUGGESTED', 'USER_EDITED', 'APPROVED']).optional(),
-  origin: z.enum(['AI', 'USER']).default('USER'),
+  status: z.enum(['DRAFT', 'USER_EDITED']).optional(),
 });
 
 export const sectionKeySchema = z.enum(SECTION_KEYS);

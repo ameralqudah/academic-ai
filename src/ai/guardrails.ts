@@ -75,6 +75,8 @@ export interface InspectOptions {
   context?: readonly string[];
   /** How many untraced numbers were replaced by the quarantine marker before saving (WS2 N1); the notice says so. */
   quarantined?: number;
+  /** Where the text appears: a chat reply is worded as one, never as a section (WS2 N11). */
+  surface?: 'section' | 'chat';
 }
 
 /**
@@ -107,10 +109,10 @@ export function inspectOutput(text: string, options: InspectOptions = {}): Guard
 
   const flags = [...new Set(findings.map((finding) => finding.flag))];
 
-  return { flags, findings, notice: noticeFor(flags, options.quarantined ?? 0) };
+  return { flags, findings, notice: noticeFor(flags, options.quarantined ?? 0, options.surface ?? 'section') };
 }
 
-function noticeFor(flags: GuardrailFlag[], quarantined: number): GuardrailResult['notice'] {
+function noticeFor(flags: GuardrailFlag[], quarantined: number, surface: 'section' | 'chat'): GuardrailResult['notice'] {
   if (flags.length === 0 && quarantined === 0) return null;
 
   const parts: { en: string; ar: string }[] = [];
@@ -136,7 +138,12 @@ function noticeFor(flags: GuardrailFlag[], quarantined: number): GuardrailResult
     });
   }
 
-  if (flags.includes('UNTRACED_STATISTIC')) {
+  if (flags.includes('UNTRACED_STATISTIC') && surface === 'chat') {
+    parts.push({
+      en: 'Some numbers in this reply do not match any analysis in this conversation or project, or your message. Check them against your own results before using them.',
+      ar: 'بعض الأرقام في هذا الرد لا تطابق أي تحليل في هذه المحادثة أو المشروع، ولا ما ورد في رسالتك. تحقّق منها مقابل نتائجك قبل استخدامها.',
+    });
+  } else if (flags.includes('UNTRACED_STATISTIC')) {
     parts.push({
       en: 'Some numbers here do not match any analysis attached to this section. Replace them with values from your own analyses, or insert verified values from the analysis workbench.',
       ar: 'بعض الأرقام هنا لا تطابق أي تحليل مرفق بهذا القسم. استبدلها بقيم من تحليلاتك، أو أدرج قيمًا موثّقة من منصة التحليل.',

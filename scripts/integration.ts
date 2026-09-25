@@ -124,13 +124,15 @@ import {
   listRecent,
   prepareRegeneration,
   recordRegeneratedAnswer,
+  recordReply,
   recordTurn,
   renameConversation,
   startConversation,
   switchToBranch,
 } from '@/server/services/chat.service';
 import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
-import { clearUnselectedTitles, deleteTitle, generateSection, listTitles, selectTitle } from '@/server/services/ai.service';
+import { clearUnselectedTitles, deleteTitle, generateSection, listTitles, selectTitle, streamChat } from '@/server/services/ai.service';
+import { chatAllowedValues, checkChatReply, inspectChatReply } from '@/server/services/chat-integrity';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -1563,6 +1565,148 @@ async function main() {
       const plain = await generate(enOwner, enProject.id, 'OBJECTIVES');
       check('clean text is saved unchanged, with no notice', [plain.content, plain.integrity.quarantined, plain.guardrails.notice], ['This section describes the aims of the study in general terms.', 0, null]);
     } finally {
+      setGatewayForTests(null);
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+      resetEnvCache();
+    }
+  }
+
+  {
+    section('chat flags numbers it cannot trace and never rewrites them (WS2 N11)');
+
+    /* The same scripted-model setup as the N1 block, restored afterwards. */
+    const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+    const { createGateway } = await import('@/server/ai/gateway/gateway');
+    const { productionDeps, setGatewayForTests } = await import('@/server/ai/gateway');
+    const { resetEnvCache } = await import('@/config/env');
+    const { runForUser } = await import('@/server/ai/request-scope');
+    const fake = new FakeAdapter('openai');
+    setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: fake }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+    resetEnvCache();
+    const untraced = (flags: readonly string[] | undefined) => (flags ?? []).includes('UNTRACED_STATISTIC');
+    const lastAssistant = async (conversationId: string) => (await chatRepo.activeThread(conversationId)).filter((message) => message.role === 'ASSISTANT').at(-1);
+
+    try {
+      const chatUser = await newUser('n11-owner');
+      const chatProject = await createProject(chatUser, { ...projectInput, language: 'EN' });
+      const chatFile = await saveUpload({ userId: chatUser, file: { name: 'chat.csv', bytes: new TextEncoder().encode(statsCsv).buffer as ArrayBuffer } });
+      const whole = await runAnalysis({ datasetId: chatFile.dataset.id, userId: chatUser, test: 't.independent', columns: { dependent: 'score', grouping: 'gender' } });
+      const wholeT = (whole.result as { statistic: { value: number } }).statistic.value.toFixed(3);
+      const windowedChat = await analysisRunsRepo.create({
+        userId: chatUser,
+        datasetId: chatFile.dataset.id,
+        testKey: 'correlation.pearson',
+        spec: { columns: { x: 'score', y: 'score' }, truncatedTo: 5000 },
+        result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+      });
+
+      const agentTurn = (intent: string, message: string, extra: Partial<Parameters<typeof runAgent>[0]> = {}) =>
+        runForUser(chatUser, async () => {
+          setIntentStubForTests({ intent: intent as Parameters<typeof setIntentStubForTests>[0]['intent'], confidence: 0.95, mentionedColumns: [], restatement: intent, clarifyingQuestion: null, searchQueries: [], usage: { tokensIn: 0, tokensOut: 0 } });
+          const events: AgentEvent[] = [];
+          for await (const event of runAgent({ userId: chatUser, message, locale: 'en', projectId: chatProject.id, ...extra })) events.push(event);
+          return events;
+        });
+      const conversationOf = (events: AgentEvent[]) => (events.find((event) => event.type === 'conversation') as { conversationId: string } | undefined)?.conversationId ?? '';
+      const deltaOf = (events: AgentEvent[]) => events.filter((event): event is Extract<AgentEvent, { type: 'delta' }> => event.type === 'delta').map((event) => event.text).join('');
+
+      /* gatherResults (D3): only a windowed run attached is not a results chapter. */
+      await analysisRunsRepo.attachToSection(windowedChat.id, chatUser, chatProject.id, 'RESULTS');
+      const windowedOnly = await agentTurn('research.results', 'Write my results chapter.');
+      check(
+        'only windowed runs attached: a question, no results and no chapter',
+        [windowedOnly.some((event) => event.type === 'question' && event.question.includes('first rows of a file only')), windowedOnly.some((event) => event.type === 'result'), deltaOf(windowedOnly)],
+        [true, false, ''],
+      );
+
+      /* Mixed: the whole-file run counts, the windowed one is reported as left out. */
+      await attachRun({ runId: whole.run.id, userId: chatUser, projectId: chatProject.id, sectionKey: 'RESULTS' });
+      fake.push({ reply: { text: `The groups differed, t = ${wholeT}. The correlation was r = .81.` } });
+      const mixed = await agentTurn('research.results', 'Write my results chapter.');
+      const gathered = mixed.find((event): event is Extract<AgentEvent, { type: 'result' }> => event.type === 'result' && event.kind === 'analysis');
+      check('mixed runs: only the usable one is counted, the windowed one reported as left out', gathered?.payload, { attachedCount: 1, tests: ['t.independent'], excludedWindowed: 1 });
+
+      /* writeResults: the saved section's markers, then the note, in the reply and the stored message. */
+      const written = deltaOf(mixed);
+      assertTrue('the chapter streamed with its marker and the traced value', written.includes(QUARANTINE_MARKER.en) && written.includes(`t = ${wholeT}`) && !written.includes('.81'));
+      assertTrue('followed by the note about the replaced value', written.includes(`Note: the results section was saved with 1 number replaced by ${QUARANTINE_MARKER.en}`));
+      assertTrue('the note does not speak of "attached to this section"', !written.includes('attached to this section'));
+      const writtenMessage = await lastAssistant(conversationOf(mixed));
+      check('the stored reply is what was streamed, with the flags', [writtenMessage?.content, untraced(writtenMessage?.flags)], [written, true]);
+
+      /* From here chat must not touch any section. */
+      const sectionsOf = async () => JSON.stringify((await getProjectWithSections(chatProject.id, chatUser)).sections.map((row) => [row.sectionKey, row.content, row.status]));
+      const sectionsBefore = await sectionsOf();
+
+      /* Agent respond: flags only, against the project's usable runs and the current message. */
+      const answerText = `Your comparison gave t = ${wholeT}. Another study found t(98) = 2.31, and your sample was N = 120.`;
+      fake.push({ reply: { text: answerText } });
+      const answered = await agentTurn('general.question', 'What did my comparison show? My sample was N = 120.');
+      const answeredId = conversationOf(answered);
+      const answeredMessage = await lastAssistant(answeredId);
+      check('respond: the answer is streamed and stored unchanged', [deltaOf(answered), answeredMessage?.content], [answerText, answerText]);
+      check('and the invented value is flagged on the stored reply', untraced(answeredMessage?.flags), true);
+      fake.push({ reply: { text: `Your comparison gave t = ${wholeT}, with N = 120.` } });
+      const traced = await agentTurn('general.question', 'Remind me of the result for my sample of N = 120.');
+      check('respond: a traced value and the current message’s number raise no flag', untraced((await lastAssistant(conversationOf(traced)))?.flags), false);
+
+      /* A regenerated answer keeps its own flags. */
+      const question = (await chatRepo.activeThread(answeredId)).filter((message) => message.role === 'USER').at(-1)!;
+      fake.push({ reply: { text: 'On reflection, the effect was r = .81.' } });
+      await agentTurn('general.question', question.content, { conversationId: answeredId, regeneratedParentId: question.id });
+      const regenerated = await lastAssistant(answeredId);
+      check('a regenerated answer is stored with its flags', [regenerated?.content, regenerated?.parentMessageId, untraced(regenerated?.flags)], ['On reflection, the effect was r = .81.', question.id, true]);
+
+      /* streamChat (project chat): the same rules, reading the stream as the client does. */
+      const streamed = async (message: string, text: string) => {
+        fake.push({ stream: [text] });
+        const handle = await runForUser(chatUser, () => streamChat(chatUser, chatProject.id, message));
+        const raw = await new Response(handle.stream).text();
+        const events = raw.split('\n\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6)) as { type: string; text?: string; flags?: string[]; guardrails?: { en: string } | null });
+        const done = events.find((event) => event.type === 'done');
+        const stored = await lastAssistant(handle.conversationId);
+        return { text: events.filter((event) => event.type === 'delta').map((event) => event.text).join(''), done, stored };
+      };
+      const allowedRun = await streamed('Summarise my comparison.', `The comparison gave t = ${wholeT}.`);
+      check('streamChat: an attached run’s value is not flagged, and the text is unchanged', [untraced(allowedRun.done?.flags), allowedRun.stored?.content], [false, `The comparison gave t = ${wholeT}.`]);
+      const windowedValue = await streamed('And the correlation?', 'The correlation was r = .81.');
+      check('streamChat: a windowed run’s value is flagged (D3), stored with the flag', [untraced(windowedValue.done?.flags), untraced(windowedValue.stored?.flags)], [true, true]);
+      const invented = await streamed('Any other result?', 'A further test found t(98) = 2.31.');
+      check('streamChat: an invented value is flagged', untraced(invented.done?.flags), true);
+      assertTrue('with the chat wording, not the section wording', (invented.done?.guardrails?.en ?? '').includes('in this reply') && !(invented.done?.guardrails?.en ?? '').includes('attached to this section'));
+      const stated = await streamed('My sample was N = 250 students.', 'With N = 250 students, the design is adequate.');
+      check('streamChat: a number in the current message is the researcher’s', untraced(stated.done?.flags), false);
+      const earlier = await streamed('And how large was the sample?', 'The sample was N = 250.');
+      check('streamChat: a number from an earlier turn is not', untraced(earlier.done?.flags), true);
+
+      /* Result payloads with no run row are unpinned values; a payload of a windowed run follows the run. */
+      const payloadThread = await startConversation({ userId: chatUser, projectId: chatProject.id, firstMessage: 'profile' });
+      await chatRepo.addMessage({ conversationId: payloadThread.id, role: 'ASSISTANT', content: '', payload: { results: [{ kind: 'profile', payload: { mean: 3.4567 } }, { kind: 'analysis', runId: windowedChat.id, payload: { statistic: { name: 'r', value: 0.8123 } } }] } });
+      const payloadAllowed = await chatAllowedValues({ userId: chatUser, conversationId: payloadThread.id });
+      check(
+        'a payload with no run row allows its values (unpinned); a windowed run’s payload does not',
+        [untraced(inspectChatReply('The mean was M = 3.46.', { allowed: payloadAllowed, message: '' }).flags), untraced(inspectChatReply('The correlation was r = .81.', { allowed: payloadAllowed, message: '' }).flags)],
+        [false, true],
+      );
+
+      /* /api/chat: the route checks with checkChatReply and stores the flags through recordReply. */
+      const routeThread = await startConversation({ userId: chatUser, projectId: chatProject.id, firstMessage: 'route' });
+      const routeCheck = await checkChatReply({ userId: chatUser, projectId: chatProject.id, conversationId: routeThread.id, message: 'What was my result?', text: 'It was t(98) = 2.31.' });
+      const routeIds = await recordReply({ conversationId: routeThread.id, userId: chatUser, userMessage: 'What was my result?', assistantMessage: 'It was t(98) = 2.31.', flags: routeCheck.flags });
+      const routeRegen = await recordReply({ conversationId: routeThread.id, userId: chatUser, userMessage: 'What was my result?', assistantMessage: `It was t = ${wholeT}.`, replyToMessageId: routeIds.userMessageId, flags: (await checkChatReply({ userId: chatUser, projectId: chatProject.id, conversationId: routeThread.id, message: 'What was my result?', text: `It was t = ${wholeT}.` })).flags });
+      const routeRows = await chatRepo.activeThread(routeThread.id);
+      check(
+        '/api/chat: a reply and a regenerated reply are stored with their own flags',
+        [untraced(routeRows.find((row) => row.id === routeIds.assistantMessageId)?.flags ?? (await chatRepo.findMessage(routeIds.assistantMessageId, routeThread.id))?.flags), untraced((await chatRepo.findMessage(routeRegen.assistantMessageId, routeThread.id))?.flags)],
+        [true, false],
+      );
+
+      check('chat never changed a section', await sectionsOf(), sectionsBefore);
+    } finally {
+      clearIntentStubForTests();
       setGatewayForTests(null);
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousKey;

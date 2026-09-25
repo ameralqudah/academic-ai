@@ -344,6 +344,10 @@ console.log('\nnumeric integrity guard (WS2 group 1)');
   const quarantineNotice = inspectOutput('text', { quarantined: 2 }).notice;
   check('the notice says how many values were replaced, in both languages', [quarantineNotice?.en.startsWith('2 numbers could not be traced'), quarantineNotice?.en.includes(QUARANTINE_MARKER.en), quarantineNotice?.ar.includes(QUARANTINE_MARKER.ar)], [true, true, true]);
   check('no replacement and no flag means no notice', inspectOutput('text', { quarantined: 0 }).notice, null);
+  /* Chat (WS2 N11): flagged, worded as a reply, never as a section. */
+  const chatNotice = inspectOutput('A study found t(98) = 2.31.', { verifiedNumbers: emptyScopedValues(), surface: 'chat' });
+  check('chat: an untraced value is flagged with the chat wording', [chatNotice.flags.includes('UNTRACED_STATISTIC'), chatNotice.notice?.en.includes('in this reply'), chatNotice.notice?.en.includes('attached to this section'), chatNotice.notice?.ar.includes('هذا الرد')], [true, true, false, true]);
+  check('sections keep their own wording', inspectOutput('A study found t(98) = 2.31.', { verifiedNumbers: emptyScopedValues() }).notice?.en.includes('attached to this section'), true);
   check('helper: the result is never labelled verified', Object.keys(mixed).sort(), ['excluded', 'used', 'values']);
   check('guard version bumped for the tracing change', NUMERIC_GUARD_VERSION, 'ws2-2');
 

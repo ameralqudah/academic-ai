@@ -36,6 +36,7 @@ import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
 
 import { getOwnedProject, getProjectWithSections, updateProject } from './project.service';
+import { checkChatReply } from './chat-integrity';
 import { saveSection } from './section.service';
 import { assertCanUseAI } from './usage.service';
 
@@ -1406,7 +1407,8 @@ export async function streamChat(
        * gateway's, including a cancelled stream (P1-B), so a client that
        * aborts every response still pays for what it consumed.
        */
-      const guardrails = inspectOutput(full);
+      /* Flag only (WS2 N11): the reply is checked against this conversation's and project's analyses and the current message, never rewritten. */
+      const guardrails = await checkChatReply({ userId, projectId, conversationId: conversation.id, message, text: full });
 
       if (full) {
         try {

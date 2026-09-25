@@ -32,7 +32,7 @@ import { eq, like } from 'drizzle-orm';
 
 import type { AgentEvent } from '@/agents/events';
 import { buildResultsContext } from '@/ai/context/results';
-import { allowedFromLegacyResults, checkNumbers } from '@/server/integrity/numbers';
+import { allowedFromLegacyResults, checkNumbers, QUARANTINE_MARKER } from '@/server/integrity/numbers';
 import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
 import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
@@ -130,7 +130,7 @@ import {
   switchToBranch,
 } from '@/server/services/chat.service';
 import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
-import { clearUnselectedTitles, deleteTitle, listTitles, selectTitle } from '@/server/services/ai.service';
+import { clearUnselectedTitles, deleteTitle, generateSection, listTitles, selectTitle } from '@/server/services/ai.service';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
 import { resetStorageCache } from '@/server/storage';
 import { isOwnerEmail } from '@/server/auth/owner';
@@ -1482,6 +1482,92 @@ async function main() {
     check('a windowed run can be detached', (await detachRun(windowedRun.id, statsOwner)).sectionKey, null);
     await detachRun(chapterRun.run.id, statsOwner);
     check('the section is back to a template', buildResultsContext(await analysisRunsRepo.listForSection(statsProject.id, statsOwner, 'RESULTS')), null);
+  }
+
+  {
+    section('section generation quarantines untraced numbers before saving (WS2 N1)');
+
+    /*
+     * A scripted model through the real gateway path: a placeholder key makes
+     * one provider count as configured, and the gateway is replaced for the
+     * test so nothing leaves the process. Both are restored afterwards.
+     */
+    const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+    const { createGateway } = await import('@/server/ai/gateway/gateway');
+    const { productionDeps, setGatewayForTests } = await import('@/server/ai/gateway');
+    const { resetEnvCache } = await import('@/config/env');
+    const { runForUser } = await import('@/server/ai/request-scope');
+    /* As the API does: every model call runs in its user's scope. */
+    const generate = (userId: string, ...args: [string, Parameters<typeof generateSection>[2], string?]) => runForUser(userId, () => generateSection(userId, ...args));
+    const fake = new FakeAdapter('openai');
+    setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: fake }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+    const previousKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+    resetEnvCache();
+    const reply = (text: string) => fake.push({ reply: { text } });
+    const markers = (text: string, marker: string) => text.split(marker).length - 1;
+
+    try {
+      /* A results section in the (Arabic) stats project, with a whole-file run and a windowed one attached. */
+      const target = statsProject.id;
+      await attachRun({ runId: chapterRun.run.id, userId: statsOwner, projectId: target, sectionKey: 'RESULTS' });
+      const windowedRun = await analysisRunsRepo.create({
+        userId: statsOwner,
+        datasetId: statsFile.dataset.id,
+        testKey: 'correlation.pearson',
+        spec: { columns: { x: 'score', y: 'score' }, truncatedTo: 5000 },
+        result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+      });
+      /* Attached before the D3 rule, as an old row would be. */
+      await analysisRunsRepo.attachToSection(windowedRun.id, statsOwner, target, 'RESULTS');
+
+      /* An earlier, person-written section in the same project must not change. */
+      await saveUserEdit({ projectId: target, userId: statsOwner, sectionKey: 'DISCUSSION', content: 'Earlier finding: t = 9.99, p = .001.' });
+      const discussionBefore = await getSection(target, statsOwner, 'DISCUSSION');
+
+      const realStatistic = computed.statistic.value.toFixed(3);
+      reply(`The groups differed, t = ${realStatistic}. A further test found t(98) = 2.31, p = .012. The correlation was r = .81.`);
+      const results = await generate(statsOwner, target, 'RESULTS');
+      const savedResults = await getSection(target, statsOwner, 'RESULTS');
+
+      assertTrue('the traced statistic survives', results.content.includes(`t = ${realStatistic}`));
+      assertTrue('invented numbers are gone from the returned text', !/2\.31|\.012|\.81/.test(results.content));
+      check('the saved text is the quarantined text', savedResults?.content, results.content);
+      check('each untraced number is replaced by a visible marker (Arabic project: Arabic marker)', markers(results.content, QUARANTINE_MARKER.ar), results.integrity.quarantined);
+      assertTrue('including the windowed run\u2019s value (D3)', results.integrity.findings.some((found) => found.value.includes('81')));
+      assertTrue('at least the three invented or windowed values were quarantined', results.integrity.quarantined >= 3);
+      check('the findings name the guard version', results.integrity.guardVersion, 'ws2-2');
+      assertTrue('the notice says values were replaced', (results.guardrails.notice?.en ?? '').includes(`replaced with ${QUARANTINE_MARKER.en}`) && (results.guardrails.notice?.ar ?? '').includes(QUARANTINE_MARKER.ar));
+      check('status stays AI_SUGGESTED', savedResults?.status, 'AI_SUGGESTED');
+      const resultVersions = await listVersions(target, statsOwner, 'RESULTS');
+      check('the version is recorded as AI, with the quarantined text', [resultVersions[0]?.origin, resultVersions[0]?.content], ['AI', results.content]);
+      check('the earlier section is untouched', [(await getSection(target, statsOwner, 'DISCUSSION'))?.content, (await listVersions(target, statsOwner, 'DISCUSSION')).length], [discussionBefore?.content, 1]);
+      await detachRun(chapterRun.run.id, statsOwner);
+      await detachRun(windowedRun.id, statsOwner);
+
+      /* An English project (its own user: one project per free plan) gets the English marker. */
+      const enOwner = await newUser('n1-en-owner');
+      const enProject = await createProject(enOwner, { ...projectInput, language: 'EN' });
+
+      /* A non-results section: only numbers in this request's instruction are the researcher's. */
+      reply('The study sampled N = 250 students. Earlier work reported r = .45 and M = 3.72.');
+      const intro = await generate(enOwner, enProject.id, 'INTRODUCTION', 'Mention that the sample was N = 250 students.');
+      assertTrue('a number stated in the instruction is kept', intro.content.includes('N = 250'));
+      assertTrue('others are quarantined with the English marker', !/\.45|3\.72/.test(intro.content) && markers(intro.content, QUARANTINE_MARKER.en) === intro.integrity.quarantined && intro.integrity.quarantined === 2);
+      reply('The study sampled N = 250 students.');
+      const noInstruction = await generate(enOwner, enProject.id, 'INTRODUCTION');
+      check('without it in the instruction the same number is quarantined (project text is not used)', [noInstruction.content.includes('250'), noInstruction.integrity.quarantined], [false, 1]);
+
+      /* Text with no research numbers is saved exactly as written. */
+      reply('This section describes the aims of the study in general terms.');
+      const plain = await generate(enOwner, enProject.id, 'OBJECTIVES');
+      check('clean text is saved unchanged, with no notice', [plain.content, plain.integrity.quarantined, plain.guardrails.notice], ['This section describes the aims of the study in general terms.', 0, null]);
+    } finally {
+      setGatewayForTests(null);
+      if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousKey;
+      resetEnvCache();
+    }
   }
 
   /* ------------------------------------------------------ PLS-SEM as a job */

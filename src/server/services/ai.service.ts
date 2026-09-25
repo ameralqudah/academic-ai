@@ -10,7 +10,7 @@ import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
 import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
 import { buildResultsContext } from '@/ai/context/results';
-import { allowedFromLegacyResults } from '@/server/integrity/numbers';
+import { allowedFromLegacyResults, checkNumbers, quarantine, type NumberSpan } from '@/server/integrity/numbers';
 import { generalPrompt } from '@/ai/prompts/general';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
 import {
@@ -350,9 +350,16 @@ export async function clearUnselectedTitles(
 
 export interface GeneratedSection {
   sectionKey: SectionKey;
+  /** The text as saved: untraced research numbers replaced by the quarantine marker (WS2 N1). */
   content: string;
   wordCount: number;
   guardrails: GuardrailResult;
+  /** What the numeric guard replaced before saving (WS2 N1, D1). */
+  integrity: {
+    guardVersion: string;
+    quarantined: number;
+    findings: Pick<NumberSpan, 'text' | 'value' | 'kind'>[];
+  };
 }
 
 export async function generateSection(
@@ -411,18 +418,39 @@ export async function generateSection(
     temperature: 0.6,
   });
 
+  /*
+   * Quarantine before saving (WS2 N1, D1). A research number the model wrote
+   * is kept only if it traces to the attached analyses (results sections,
+   * windowed runs excluded, each value within its field type) or was written
+   * in this request's instruction; every other one is replaced in the saved
+   * text by a visible marker. Only this new generation is guarded: sections
+   * saved earlier are never rewritten.
+   */
   const resultsSection = sectionKey === 'RESULTS' || sectionKey === 'CHAPTER_4';
+  const stated = instruction?.trim() ? [instruction] : undefined;
+  const check = checkNumbers(result.text, {
+    mode: 'model',
+    ...(resultsSection ? { allowed: legacy.values } : {}),
+    ...(stated ? { context: stated } : {}),
+  });
+  const guarded = quarantine(result.text, check, project.language === 'AR' ? 'ar' : 'en');
   const guardrails = inspectOutput(result.text, {
     expectsNoStatistics: !resultsSection,
     /* Numbers in a results section must be ones the attached analyses produced (P1-C), windowed runs excluded (WS2 D3). */
-    ...(resultsSection ? { verifiedNumbers: new Set(Object.values(legacy.values).flatMap((spellings) => [...spellings])) } : {}),
+    ...(resultsSection ? { verifiedNumbers: legacy.values } : {}),
+    ...(stated ? { context: stated } : {}),
+    quarantined: guarded.quarantined,
   });
+
+  if (guarded.quarantined > 0) {
+    logger.info('ai.section.quarantined', { projectId, sectionKey, quarantined: guarded.quarantined, guardVersion: check.guardVersion });
+  }
 
   await saveSection({
     projectId,
     userId,
     sectionKey,
-    content: result.text,
+    content: guarded.text,
     heading: labelFor(sectionKey),
     status: 'AI_SUGGESTED',
     origin: 'AI',
@@ -431,9 +459,14 @@ export async function generateSection(
 
   return {
     sectionKey,
-    content: result.text,
-    wordCount: countWords(result.text),
+    content: guarded.text,
+    wordCount: countWords(guarded.text),
     guardrails,
+    integrity: {
+      guardVersion: check.guardVersion,
+      quarantined: guarded.quarantined,
+      findings: check.findings.slice(0, 20).map((found) => ({ text: found.text, value: found.value, kind: found.kind })),
+    },
   };
 }
 

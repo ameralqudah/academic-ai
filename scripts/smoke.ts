@@ -328,6 +328,22 @@ console.log('\nnumeric integrity guard (WS2 group 1)');
   check('helper: an excluded run’s numbers are not allowed; an included one’s are', [checkNumbers('r = .62', { mode: 'model', allowed: mixed.values }).clean, checkNumbers('F(2, 97) = 7.50, p = .002', { mode: 'model', allowed: mixed.values }).clean], [false, true]);
   check('helper: windowed runs can be included explicitly', [checkNumbers('r = .62', { mode: 'model', allowed: allowedFromLegacyResults([windowedRun], { includeWindowed: true }).values }).clean, allowedFromLegacyResults([windowedRun], { includeWindowed: true }).used], [true, [{ id: 'run-2', tier: 'windowed' }]]);
   check('helper: nothing attached allows nothing', [checkNumbers('r = .45', { mode: 'model', allowed: allowedFromLegacyResults([]).values }).clean, allowedFromLegacyResults([]).used], [false, []]);
+
+  /* Section generation (WS2 N1): quarantine the model's section text before it is saved. */
+  const sectionText = [
+    '## 4.2 Results of the first hypothesis',
+    'Table 2 shows the group means. As in Chapter 3, the analysis followed the plan in Section 3.4.',
+    'The groups differed, d = .45, and a further test gave t(40) = 5.67, p = .021.',
+  ].join('\n');
+  const sectionCheck = checkNumbers(sectionText, { mode: 'model', allowed: scoped.values });
+  const sectionGuarded = quarantine(sectionText, sectionCheck, 'en');
+  check('section text: headings, table and chapter labels are left alone', [sectionGuarded.text.includes('## 4.2 Results'), sectionGuarded.text.includes('Table 2'), sectionGuarded.text.includes('Chapter 3'), sectionGuarded.text.includes('Section 3.4')], [true, true, true, true]);
+  check('section text: the traced value stays, the invented ones are replaced', [sectionGuarded.text.includes('d = .45'), /5\.67|\.021/.test(sectionGuarded.text), sectionGuarded.quarantined > 0, sectionGuarded.quarantined], [true, false, true, sectionCheck.findings.length]);
+  check('section text: quarantined text checks clean again', checkNumbers(sectionGuarded.text, { mode: 'model', allowed: scoped.values }).clean, true);
+  check('section text: the instruction\u2019s own number is the researcher\u2019s', checkNumbers('The sample was N = 250.', { mode: 'model', context: ['Say the sample was N = 250.'] }).clean, true);
+  const quarantineNotice = inspectOutput('text', { quarantined: 2 }).notice;
+  check('the notice says how many values were replaced, in both languages', [quarantineNotice?.en.startsWith('2 numbers could not be traced'), quarantineNotice?.en.includes(QUARANTINE_MARKER.en), quarantineNotice?.ar.includes(QUARANTINE_MARKER.ar)], [true, true, true]);
+  check('no replacement and no flag means no notice', inspectOutput('text', { quarantined: 0 }).notice, null);
   check('helper: the result is never labelled verified', Object.keys(mixed).sort(), ['excluded', 'used', 'values']);
   check('guard version bumped for the tracing change', NUMERIC_GUARD_VERSION, 'ws2-2');
 

@@ -62,7 +62,10 @@ import {
 } from '@/agents/registry';
 import { estimateTokens } from '@/ai/provider';
 import { attemptCost } from '@/server/ai/gateway/metering';
-import { inspectOutput, parseJsonOutput } from '@/ai/guardrails';
+import { inspectOutput, numberSpellings, parseJsonOutput } from '@/ai/guardrails';
+import * as statisticsText from '@/lib/statistics-text';
+import { normaliseDigits, untracedNumbers } from '@/lib/statistics-text';
+import { allowedSpellings, checkNumbers, legacyResultTier, NUMERIC_GUARD_VERSION, quarantine, QUARANTINE_MARKER, researchNumbers } from '@/server/integrity/numbers';
 import { sectionI18nKey } from '@/lib/sections';
 import { countWords, slugify, truncate } from '@/lib/text';
 import { assertSafeKey, datasetKey, datasetPrefix, keyBelongsTo } from '@/server/storage/keys';
@@ -136,6 +139,209 @@ check(
     .length,
   0,
 );
+
+console.log('\nnumeric integrity guard (WS2 group 1)');
+{
+  const found = (text: string, allowed: ReadonlySet<string> = new Set(), context?: string[]) => checkNumbers(text, { mode: 'model', allowed, context }).findings.map((f) => f.text);
+  /* Research numbers: each is found, in English and Arabic, digits normalised. */
+  const research: [string, string][] = [
+    ['The sample was N = 250 students.', 'N = 250'],
+    ['An ANOVA gave F(2, 97) = 12 overall.', 'F(2, 97) = 12'],
+    ['The association held, χ²(3) = 45.', 'χ²(3) = 45'],
+    ['The path was β = .31 in the model.', 'β = .31'],
+    ['Scores varied (SD = 1.2).', 'SD = 1.2'],
+    ['The odds were higher (OR = 2.4).', 'OR = 2.4'],
+    ['The effect was moderate, η² = .06.', 'η² = .06'],
+    ['بلغ حجم العينة N = ٢٥٠ طالبًا.', 'N = ٢٥٠'],
+    ['كانت قيمة F(٢، ٩٧) = ١٢ دالة.', '١٢'],
+    ['بلغ معامل الارتباط r = ٠٫٤٥ تقريبًا.', 'r = ٠٫٤٥'],
+    ['the effect was 0,31 on average', '0,31'],
+    ['قيمة الانحراف المعياري SD = 1,2 في العينة', 'SD = 1,2'],
+    ['12% of cases were excluded.', '12%'],
+    ['وبلغت نسبة الاستجابة ٤٥٪ من العينة', '٤٥'],
+  ];
+  for (const [text, expected] of research) {
+    check(`research number found: ${text}`, found(text).some((f) => f.includes(expected)), true);
+  }
+
+  /* Ordinary numbers: never findings in model or person mode. */
+  const ordinary = [
+    'Prior work (Smith, 2019) found a positive association.',
+    'وأشار (الزهراني، 2021) إلى أن النتائج متباينة.',
+    'Chapter 3 describes the method.',
+    'See Table 2 and Figure 4 for the design.',
+    'H1 and H2 are stated below.',
+    'As argued elsewhere (pp. 12–15), the construct is broad.',
+    'Data were collected on 2024-05-01.',
+    'Items used a 5-point Likert scale.',
+    'Participants were assigned to three groups.',
+    'Two groups, 240 students, in 2024.',
+    'Results are summarised in Table 2.1 and Section 3.4.1.',
+    'انظر الجدول 4.2 والفصل الثالث.',
+    '## 1.2 Background\n1.3. Aims of the study',
+    'Version {{value:coef:x}} of the estimate.',
+    'We used SPSS version 26.0 and R 4.3.1.',
+    'حُلّلت البيانات بالإصدار 26.0 من البرنامج.',
+    'وتظهر النتائج بالجدول 4.2 وفي الملحق 1.3.',
+  ];
+  for (const text of ordinary) {
+    check(`ordinary numbers are not findings: ${text.replace(/\n/g, ' ')}`, [found(text), checkNumbers(text, { mode: 'person' }).findings.length], [[], 0]);
+  }
+  check(
+    'numbers the user supplied (instruction, project metadata) are theirs, not findings',
+    [found('Use N = 250 and α = .05 as planned.', new Set(), ['Write the method for N = 250 with α = .05.']), found('Use N = 250.', new Set())],
+    [[], ['N = 250']],
+  );
+
+  /* Hardening: the reported false positives, each decided and pinned (no value is allowed globally). */
+  const criteria: [string, string[]][] = [
+    /* Significance levels as a stated criterion: ordinary. */
+    ['Significance was set at α = .05.', []],
+    ['Effects were tested at the .05 level.', []],
+    ['A significance level of .01 was used.', []],
+    ['p < .05 was considered statistically significant.', []],
+    ['اعتُمد عند مستوى الدلالة α = 0.05 في جميع الاختبارات.', []],
+    ['اختُبرت الفرضيات عند مستوى دلالة (٠٫٠٥).', []],
+    /* … but a result with the same symbols, or an unconventional value, stays a finding. */
+    ['Cronbach’s α = .85 for the scale.', ['α = .85']],
+    ['The effect was significant, p < .05.', ['p < .05']],
+    ['The difference was significant at the .05 level (p = .01).', ['.05', 'p = .01']], /* M1: a significance claim, not a stated criterion */
+    ['Significance was set at α = .07.', ['α = .07']],
+    ['α = .05', ['α = .05']],
+    ['بلغ معامل ألفا كرونباخ α = 0.85 للمقياس.', ['α = 0.85']],
+    /* Thresholds stated as criteria: ordinary; obtained values: findings. */
+    ['Reliability above .70 is acceptable (Nunnally, 1978).', []],
+    ['Loadings of at least .50 are recommended.', []],
+    ['Reliability was .81, above the recommended .70.', ['.81']],
+    ['Cronbach’s alpha was .70.', ['.70']],
+    ['Reliability was above .70.', ['.70']],
+    ['ويُعدّ معامل الثبات مقبولًا إذا زاد على ٠٫٧٠.', []],
+    ['بلغ معامل الثبات ٠٫٧٠ للمقياس.', ['٠٫٧٠']],
+    ['CFI > .95 indicates acceptable fit.', ['CFI > .95']],
+    /* Equation numbers: ordinary when labelled; a bare parenthesised decimal stays a finding. */
+    ['See Equation (3.2) and Eq. (4.1).', []],
+    ['انظر المعادلة (3.2).', []],
+    ['The mean difference was large (3.2).', ['3.2']],
+    /* Money and ranges: context-dependent, so findings unless the user supplied them. */
+    ['Participants were paid $3.50.', ['3.50']],
+    ['حصل كل مشارك على ٣٫٥٠ دولار.', ['٣٫٥٠']],
+    ['GPA ranged from 2.5 to 4.0.', ['2.5', '4.0']],
+  ];
+  for (const [text, expected] of criteria) {
+    check(`criterion or finding: ${text}`, found(text), expected);
+  }
+  /* Review follow-up (PR #36): H1 token bypass, H2 line-start results, H3 spelled chi-square, M1 result wording, M4 shared patterns. */
+  check('H1: a token-shaped string cannot hide an invented number (model and person modes)', [found('The correlation was {{value:r = .45}} overall.'), checkNumbers('We found {{value:β = .31}}.', { mode: 'person' }).findings.map((f) => f.text)], [['r = .45'], ['β = .31']]);
+  check('H1: … nor an invented number that looks like a key', found('Scores rose by {{value:0.45}} points.'), ['0.45']);
+  check('H1: only tokens the caller declares are skipped', [found('b was {{value:coef:x1}} and r = {{value:r = .45}}', new Set()), checkNumbers('b was {{value:coef:x1}}.', { mode: 'model', tokens: new Set(['coef:x1']) }).clean], [['r = .45'], true]);
+  check('H1: strict mode still skips every token (P1-C behaviour, its callers refuse unknown keys)', [checkNumbers('see {{value:r = .45}}', { mode: 'strict' }).clean, untracedNumbers('see {{value:r = .45}}', { strict: true }).length], [true, 0]);
+  check('H1: inspectOutput flags an invented number inside a token (as the legacy guard did)', inspectOutput('The correlation was {{value:r = .45}} overall.', { verifiedNumbers: new Set() }).flags, ['UNTRACED_STATISTIC']);
+  const lineStart: [string, string[]][] = [
+    ['0.45 of the variance was explained by the model.', ['0.45']],
+    ['3.2 points higher in the treatment group.', ['3.2']],
+    ['2.35 times more likely to agree', ['2.35']],
+    ['4.5 Participants reported higher scores than expected.', ['4.5']],
+    ['## 0.45 of the variance', ['0.45']],
+    ['3.2 نقطة أعلى في المجموعة التجريبية.', ['3.2']],
+  ];
+  for (const [text, expected] of lineStart) check(`H2: a result at the start of a line is still found: ${text}`, found(text), expected);
+  const headings = ['1.2 Background', '3.4.1 Methodology', '## 3.1. Aims', '1.3. Aims of the study', 'Section 3.4.1 describes the sample.', '2.1 الإطار النظري', '### 4.2 النتائج'];
+  for (const text of headings) check(`H2: a genuine heading is ordinary: ${text}`, found(text), []);
+  const chiSquare: [string, string][] = [
+    ['chi-square(2) = 5, which was significant', 'chi-square(2) = 5'],
+    ['Chi square(2) = 5 overall', 'Chi square(2) = 5'],
+    ['A Chi-squared test gave chi-squared = 12', 'chi-squared = 12'],
+    ['كانت قيمة مربع كاي (٢) = ٥ دالة', 'مربع كاي (٢) = ٥'],
+    ['بلغت قيمة كاي تربيع = 12', 'كاي تربيع = 12'],
+    ['The model gave F(2, 97) of 12 overall.', 'F(2, 97)'],
+    ['with t(98) reported below', 't(98)'],
+  ];
+  for (const [text, expected] of chiSquare) check(`H3: test statistic found: ${text}`, found(text).some((f) => f.includes(expected)), true);
+  check('H3: the legacy flag is back (FABRICATED_STATISTIC for a spelled-out chi-square)', [inspectOutput('chi-square(2) = 5, which was significant', { expectsNoStatistics: true }).flags, inspectOutput('Chi square(2) = 5', { expectsNoStatistics: true }).flags], [['FABRICATED_STATISTIC'], ['FABRICATED_STATISTIC']]);
+  check('H3: the words alone are not a statistic', [found('A chi-square test of independence was used.'), found('استُخدم اختبار مربع كاي للاستقلال.'), found('The F test and the t test were used.')], [[], [], []]);
+  check('H3: a statistic is reported once (no duplicate with the P1-C assignment)', found('χ²(3) = 45 and t(98) = 2.31'), ['χ²(3) = 45', 't(98) = 2.31']);
+  const levels: [string, string[]][] = [
+    ['The difference was significant at the .001 level.', ['.001']],
+    ['Results were significant at a significance level of .01.', ['.01']],
+    ['The effect reached the .05 level of significance.', ['.05']],
+    ['كانت الفروق دالة عند مستوى الدلالة 0.001 لصالح المجموعة التجريبية.', ['0.001']],
+    ['وجاءت النتيجة دالة إحصائيًا عند مستوى دلالة ٠٫٠١.', ['٠٫٠١']],
+    ['عند مستوى دلالة (٠٫٠٥)', ['٠٫٠٥']],
+    ['Hypotheses were tested at the .05 level.', []],
+    ['A significance level of .05 was used throughout.', []],
+    ['The alpha level was .05 for all tests.', []],
+    ['اعتُمد مستوى الدلالة α = 0.05 لجميع الاختبارات.', []],
+  ];
+  for (const [text, expected] of levels) check(`M1: significance wording decided: ${text}`, found(text), expected);
+  check('M4: the P1-C patterns are no longer shared objects (only their sources are exported)', [typeof statisticsText.ASSIGNMENT_SOURCE, typeof statisticsText.DECIMAL_SOURCE, 'ASSIGNMENT' in statisticsText, 'DECIMAL' in statisticsText], ['string', 'string', false, false]);
+  {
+    const external = new RegExp(statisticsText.ASSIGNMENT_SOURCE, 'gu');
+    external.lastIndex = 5;
+    external.test('β = 1 overall');
+    check('M4: a caller moving its own copy’s lastIndex cannot affect P1-C detection or the guard', [untracedNumbers('β = 1 overall'), found('β = 1 overall'), untracedNumbers('β = 1 overall')], [['β = 1'], ['β = 1'], ['β = 1']]);
+  }
+
+  check(
+    'money and ranges the user supplied (instruction, project metadata) are theirs',
+    [found('Participants were paid $3.50.', new Set(), ['Each participant receives $3.50.']), found('Students with a GPA of 2.5 to 4.0 were eligible.', new Set(), ['Include students with GPA between 2.5 and 4.0.'])],
+    [[], []],
+  );
+  check('a stated criterion is still refused in strict mode (P1-C model text)', checkNumbers('Significance was set at α = .05.', { mode: 'strict' }).findings.map((f) => f.text), ['05.']); /* the P1-C strict pattern, unchanged */
+  check('criteria are decided the same way in a person’s text', checkNumbers('Reliability above .70 is acceptable, and ours was .81.', { mode: 'person' }).findings.map((f) => f.text), ['.81']);
+
+  /* Built on the P1-C detector: every span is one P1-C also finds, and P1-C finds nothing the guard ignores except labels and headings. */
+  /* The two Arabic marks P1-C does not read (the Arabic comma between degrees of freedom, the Arabic percent sign) are the guard's only extension. */
+  const arabicMarks = new Set(['كانت قيمة F(٢، ٩٧) = ١٢ دالة.', 'وبلغت نسبة الاستجابة ٤٥٪ من العينة']);
+  check('the guard also reads the Arabic comma between degrees of freedom and the Arabic percent sign (P1-C misses both)', [...arabicMarks].map((t) => [untracedNumbers(t).length, researchNumbers(t, 'model').length]), [[0, 1], [0, 1]]);
+  check('… but an Arabic comma between two digits is a list mark, not a decimal', found('الفقرات ٣،٤ من المقياس'), []);
+  const parityCorpus = [...research.map(([text]) => text).filter((text) => !arabicMarks.has(text)), 'x predicted y (b = 0.777, p = .013).', 'r = .45', 'see {{value:coef:x}} and p < .05'];
+  check(
+    'detection agrees with the P1-C detector (untracedNumbers)',
+    parityCorpus.every((text) => {
+      const p1c = untracedNumbers(text);
+      const spans = researchNumbers(text, 'model').map((s) => normaliseDigits(s.text)); /* spans are reported as written; P1-C reports normalised text */
+      return spans.every((s) => p1c.some((p) => p.includes(s) || s.includes(p))) && p1c.every((p) => spans.some((s) => s.includes(p) || p.includes(s)));
+    }),
+    true,
+  );
+  check('strict mode matches the P1-C strict detector (any digit outside a token)', ['انظر الجدول ٢', 'see {{value:coef:x}}', 'Table 2, H1, 2024'].map((t) => researchNumbers(t, 'strict').length), ['انظر الجدول ٢', 'see {{value:coef:x}}', 'Table 2, H1, 2024'].map((t) => untracedNumbers(t, { strict: true }).length));
+  check('strict mode ignores the allowed set and the context', checkNumbers('b = 0.31', { mode: 'strict', allowed: new Set(['0.31']), context: ['0.31'] }).clean, false);
+
+  /* Tracing against stored values. */
+  const allowed = allowedSpellings([0.31234, -2.4, 0.0456]);
+  check('a stored value is traced in its usual spellings', [found('β = .312', allowed), found('b = -2.40', allowed), found('p = .046', allowed), found('4.56% of the variance', allowed)], [[], [], [], []]);
+  check('an invented value is a finding', found('β = .777, p = .013', allowed), ['β = .777', 'p = .013']);
+  check('numberSpellings is the canonical implementation', [...numberSpellings([0.5])].join(), [...allowedSpellings([0.5])].join());
+
+  /* Deterministic quarantine of model text; a person's text is never rewritten. */
+  const model = 'The intervention improved scores, t(98) = 2.31, p = .02, with β = .312 on the path.';
+  const first = checkNumbers(model, { mode: 'model', allowed });
+  const second = checkNumbers(model, { mode: 'model', allowed });
+  check('detection is deterministic (same findings, in text order)', [JSON.stringify(first) === JSON.stringify(second), first.findings.map((f) => f.text), first.traced.map((f) => f.text)], [true, ['t(98) = 2.31', 'p = .02'], ['β = .312']]);
+  const q1 = quarantine(model, first);
+  const q2 = quarantine(model, second);
+  check('quarantine is deterministic and visible', [q1.text === q2.text, q1.quarantined, q1.text], [true, 2, `The intervention improved scores, ${QUARANTINE_MARKER.en}, ${QUARANTINE_MARKER.en}, with β = .312 on the path.`]);
+  check('the quarantined text carries no untraced number (the model number never becomes a traced one)', [checkNumbers(q1.text, { mode: 'model', allowed }).clean, /2\.31|\.02/.test(q1.text), checkNumbers(q1.text, { mode: 'model', allowed }).traced.map((f) => f.value)], [true, false, ['0.312']]);
+  check('the Arabic marker is used for Arabic text, and carries no digit', [quarantine('بلغ r = ٠٫٤٥', checkNumbers('بلغ r = ٠٫٤٥', { mode: 'model' }), 'ar').text, /\d/.test(QUARANTINE_MARKER.ar + QUARANTINE_MARKER.en)], [`بلغ ${QUARANTINE_MARKER.ar}`, false]);
+  check('a person’s text is reported, never rewritten', (() => { try { quarantine('r = .45', checkNumbers('r = .45', { mode: 'person' })); return 'rewritten'; } catch { return 'refused'; } })(), 'refused');
+  check('nothing is ever labelled verified: a check reports findings and traced numbers only', Object.keys(first).sort(), ['clean', 'findings', 'guardVersion', 'mode', 'traced']);
+  check('a check records the guard version', first.guardVersion, NUMERIC_GUARD_VERSION);
+
+  /* Legacy result tiers, from what a legacy run recorded (none of them "verified"). */
+  check('legacy result tiers', [
+    legacyResultTier({ datasetVersionId: 'v', datasetContentHash: 'h', engineVersion: '1', spec: { rowsAnalysed: 10 } }),
+    legacyResultTier({ datasetVersionId: 'v', datasetContentHash: 'h', engineVersion: '1', spec: { truncatedTo: 5000 } }),
+    legacyResultTier({ datasetVersionId: null, datasetContentHash: null, engineVersion: null, spec: {} }),
+    legacyResultTier({ datasetVersionId: 'v', datasetContentHash: null, engineVersion: '1', spec: {} }),
+  ], ['pinned', 'windowed', 'unpinned', 'unpinned']);
+
+  /* inspectOutput delegates to the guard; its output shape is unchanged. */
+  const inspected = inspectOutput('An ANOVA gave F(2, 97) = 12 and N = 250.', { expectsNoStatistics: true });
+  check('inspectOutput now catches integer statistics it used to miss', [inspected.flags, inspected.findings.map((f) => f.sample)], [['FABRICATED_STATISTIC'], ['F(2, 97) = 12', 'N = 250']]);
+  check('inspectOutput keeps its output shape', Object.keys(inspected).sort(), ['findings', 'flags', 'notice']);
+  check('inspectOutput honours the user’s context', inspectOutput('We planned N = 250.', { expectsNoStatistics: true, context: ['N = 250'] }).flags, []);
+  check('inspectOutput: an untraced statistic in a results section is flagged, a traced one is not', [inspectOutput('b = .777', { verifiedNumbers: allowed }).flags, inspectOutput('b = .312', { verifiedNumbers: allowed }).flags], [['UNTRACED_STATISTIC'], []]);
+}
 
 console.log('\nprovider output parsing');
 check('parses fenced JSON', parseJsonOutput('```json\n{"a":1}\n```'), { a: 1 });

@@ -29,9 +29,17 @@ export function normaliseDigits(text: string): string {
 const SYMBOL = String.raw`(?:p|r|t|F|b|B|z|d|g|n|N|M|SD|SE|CI|df|OR|RR|HR|R2|R²|η²|ω²|η2|ω2|α|β|γ|δ|λ|ρ|τ|φ|χ²|χ2|chi2?|KMO|CFI|TLI|RMSEA|SRMR|AVE|CR|HTMT|VIF)`;
 const NUMBER = String.raw`[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)`;
 /** "β = 1", "t(234) = 6.1", "p < .05", "χ²(3) = 45" — symbol not preceded by a letter or digit. */
-const ASSIGNMENT = new RegExp(String.raw`(?<![\p{L}\p{N}])${SYMBOL}\s*(?:\(\s*[\d.,\s]+\))?\s*[=<>≤≥]\s*${NUMBER}`, 'gu');
+export const ASSIGNMENT_SOURCE = String.raw`(?<![\p{L}\p{N}])${SYMBOL}\s*(?:\(\s*[\d.,\s]+\))?\s*[=<>≤≥]\s*${NUMBER}`;
 /** Any decimal number (dot or comma), and percentages. */
-const DECIMAL = new RegExp(String.raw`(?<![\p{L}\p{N}])(?:\d+[.,]\d+|[.,]\d+)(?![\p{N}])|\d+(?:[.,]\d+)?\s?%`, 'gu');
+export const DECIMAL_SOURCE = String.raw`(?<![\p{L}\p{N}])(?:\d+[.,]\d+|[.,]\d+)(?![\p{N}])|\d+(?:[.,]\d+)?\s?%`;
+/*
+ * The patterns themselves stay private: a RegExp with the g flag carries
+ * `lastIndex`, which `matchAll` copies, so a shared instance another module
+ * called `.test()` on would make this detector skip text. Other modules
+ * build their own instances from the sources (the numeric-integrity guard).
+ */
+const ASSIGNMENT = new RegExp(ASSIGNMENT_SOURCE, 'gu');
+const DECIMAL = new RegExp(DECIMAL_SOURCE, 'gu');
 
 export function stripTokens(text: string): string {
   return text.replace(VALUE_TOKEN, ' ');

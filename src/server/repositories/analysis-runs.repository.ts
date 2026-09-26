@@ -20,11 +20,14 @@
  * written from the researcher's own numbers instead of a table shell.
  */
 
-import { and, desc, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 
 import type { SectionKey } from '@/config/research';
 import { db } from '@/server/db';
-import { analysisRuns, type AnalysisRun, type NewAnalysisRun } from '@/server/db/schema';
+import { analysisRuns, datasets, type AnalysisRun, type NewAnalysisRun } from '@/server/db/schema';
+
+/** The database, or a transaction on it: the deletion checks run inside the transaction that deletes (WS2 N9). */
+export type Executor = Pick<typeof db, 'select' | 'delete' | 'execute'>;
 
 export async function create(values: NewAnalysisRun): Promise<AnalysisRun> {
   const [row] = await db.insert(analysisRuns).values(values).returning();
@@ -149,4 +152,70 @@ export async function findManyOwned(ids: string[], userId: string): Promise<Anal
     .select()
     .from(analysisRuns)
     .where(and(inArray(analysisRuns.id, ids), eq(analysisRuns.userId, userId)));
+}
+
+/* -------------------------------------------------------------------------- */
+/*                     Deletion protection (WS2 B3, N9)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The runs among `ids` that a recorded section version cites as a source
+ * (`section_versions.integrity.sources`, WS2 B1), in any project — a run can be
+ * attached to a project its owner edits but does not own. Runs listed only
+ * under `excluded` (windowed: their numbers were never used) are not cited.
+ */
+export async function citedRunIds(ids: readonly string[], executor: Executor = db): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = (await executor.execute(sql`
+    select distinct source ->> 'id' as id
+    from section_versions version, jsonb_array_elements(version.integrity -> 'sources') source
+    where version.integrity is not null
+      and jsonb_typeof(version.integrity -> 'sources') = 'array'
+      and source ->> 'id' in (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+  `)) as unknown as { id: string }[];
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
+ * One owned run, locked until the transaction ends: an attach (which updates
+ * this row) waits, so the check and the delete see the same state.
+ */
+export async function lockOwned(executor: Executor, id: string, userId: string): Promise<AnalysisRun | undefined> {
+  const [row] = await executor
+    .select()
+    .from(analysisRuns)
+    .where(and(eq(analysisRuns.id, id), eq(analysisRuns.userId, userId)))
+    .for('update');
+  return row;
+}
+
+/**
+ * Every run of these datasets (whoever ran them: the delete cascades to all of
+ * them), locked until the transaction ends.
+ */
+export async function lockByDatasets(executor: Executor, datasetIds: readonly string[]): Promise<Pick<AnalysisRun, 'id' | 'sectionKey'>[]> {
+  if (datasetIds.length === 0) return [];
+  return executor
+    .select({ id: analysisRuns.id, sectionKey: analysisRuns.sectionKey })
+    .from(analysisRuns)
+    .where(inArray(analysisRuns.datasetId, [...datasetIds]))
+    .for('update');
+}
+
+/** The runs of a dataset and all its cleaned copies (deleted ones included: the cascade removes them too). */
+export async function listByDatasetTree(datasetId: string, executor: Executor = db): Promise<Pick<AnalysisRun, 'id' | 'sectionKey'>[]> {
+  const children = await executor.select({ id: datasets.id }).from(datasets).where(eq(datasets.parentDatasetId, datasetId));
+  return executor
+    .select({ id: analysisRuns.id, sectionKey: analysisRuns.sectionKey })
+    .from(analysisRuns)
+    .where(inArray(analysisRuns.datasetId, [datasetId, ...children.map((child) => child.id)]));
+}
+
+/** Removes a run inside the caller's transaction. */
+export async function removeIn(executor: Executor, id: string, userId: string): Promise<boolean> {
+  const rows = await executor
+    .delete(analysisRuns)
+    .where(and(eq(analysisRuns.id, id), eq(analysisRuns.userId, userId)))
+    .returning({ id: analysisRuns.id });
+  return rows.length > 0;
 }

@@ -184,3 +184,38 @@ export async function totalBytesForUser(userId: string): Promise<number> {
     .where(and(eq(datasets.userId, userId), alive()));
   return Number(row?.value ?? 0);
 }
+
+/* -------------------------------------------------------------------------- */
+/*                     Deletion protection (WS2 B3, N9)                       */
+/* -------------------------------------------------------------------------- */
+
+type Executor = Pick<typeof db, 'select' | 'delete'>;
+
+/**
+ * An owned dataset (deleted ones included) and all its cleaned copies, locked
+ * until the transaction ends. A new analysis on any of them waits (its insert
+ * checks the foreign key), so none can appear between the check and the delete.
+ */
+export async function lockTree(executor: Executor, id: string, userId: string): Promise<{ root: Dataset; childIds: string[] } | null> {
+  const [root] = await executor
+    .select()
+    .from(datasets)
+    .where(and(eq(datasets.id, id), eq(datasets.userId, userId)))
+    .for('update');
+  if (!root) return null;
+  const children = await executor
+    .select({ id: datasets.id })
+    .from(datasets)
+    .where(eq(datasets.parentDatasetId, id))
+    .for('update');
+  return { root, childIds: children.map((child) => child.id) };
+}
+
+/** `hardDelete` inside the caller's transaction. */
+export async function hardDeleteIn(executor: Executor, id: string, userId: string): Promise<boolean> {
+  const rows = await executor
+    .delete(datasets)
+    .where(and(eq(datasets.id, id), eq(datasets.userId, userId)))
+    .returning({ id: datasets.id });
+  return rows.length > 0;
+}

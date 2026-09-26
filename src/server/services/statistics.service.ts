@@ -54,6 +54,7 @@ import {
 } from '@/analysis';
 import { logger } from '@/lib/logger';
 import type { AnalysisRun } from '@/server/db/schema';
+import { db } from '@/server/db';
 import { AppError } from '@/server/http/errors';
 import { legacyResultTier } from '@/server/integrity/numbers';
 import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
@@ -634,9 +635,36 @@ export async function detachRun(runId: string, userId: string): Promise<Analysis
   return run;
 }
 
+/**
+ * Deletes a saved analysis, only when nothing in a manuscript depends on it
+ * (WS2 N9): not while it is attached to a section, and not while a recorded
+ * section version cites it as a source (in any project). Detaching is the way
+ * to stop using a result; a cited one stays, so the numbers written from it
+ * keep their source. The row is locked while it is checked, so an attach
+ * cannot slip in between the check and the delete.
+ */
 export async function deleteRun(runId: string, userId: string): Promise<void> {
-  const removed = await runsRepo.remove(runId, userId);
-  if (!removed) {
-    throw new AppError('NOT_FOUND', 'That analysis was not found.', 'لم يُعثر على التحليل.');
-  }
+  await db.transaction(async (tx) => {
+    const run = await runsRepo.lockOwned(tx, runId, userId);
+    if (!run) {
+      throw new AppError('NOT_FOUND', 'That analysis was not found.', 'لم يُعثر على التحليل.');
+    }
+    if (run.sectionKey) {
+      throw new AppError(
+        'CONFLICT',
+        'This analysis is attached to a section. Detach it before deleting it.',
+        'هذا التحليل مرفق بقسم. افصله قبل حذفه.',
+        { reason: 'run_attached', sectionKey: run.sectionKey },
+      );
+    }
+    if ((await runsRepo.citedRunIds([run.id], tx)).size > 0) {
+      throw new AppError(
+        'CONFLICT',
+        'A saved version of a section cites this analysis, so it cannot be deleted.',
+        'تستند إلى هذا التحليل نسخة محفوظة من أحد الأقسام، فلا يمكن حذفه.',
+        { reason: 'run_cited' },
+      );
+    }
+    await runsRepo.removeIn(tx, run.id, userId);
+  });
 }

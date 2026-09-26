@@ -38,11 +38,12 @@ import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
-import { users, analysisJobs, researchProjects } from '@/server/db/schema';
+import { users, analysisJobs, projectMembers, researchProjects } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { consume, resetRateLimitStore } from '@/server/http/rate-limit';
 import * as adminRepo from '@/server/repositories/admin.repository';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
+import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as agentTasksRepo from '@/server/repositories/agent-tasks.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
@@ -112,6 +113,7 @@ import {
 } from '@/server/services/dataset.service';
 import {
   attachRun,
+  deleteRun,
   detachRun,
   getRun,
   recommend,
@@ -1753,6 +1755,102 @@ async function main() {
       else process.env.OPENAI_API_KEY = previousKey;
       resetEnvCache();
     }
+  }
+
+  {
+    section('deletion protection: runs and datasets in use (WS2 B3, N9)');
+
+    const conflictOf = async (run: () => Promise<unknown>) => {
+      try {
+        await run();
+        return 'allowed';
+      } catch (error) {
+        return error instanceof AppError ? `${error.code}:${(error.details as { reason?: string } | undefined)?.reason ?? ''}` : String(error);
+      }
+    };
+    const exists = async (runId: string, userId: string) => Boolean(await analysisRunsRepo.findOwned(runId, userId));
+    const readable = async (datasetId: string, userId: string) => (await conflictOf(() => loadForAnalysis(datasetId, userId))) === 'allowed';
+
+    const owner = await newUser('n9-owner');
+    const stranger = await newUser('n9-stranger');
+    const project = await createProject(owner, { ...projectInput, language: 'EN' });
+    const upload = (userId: string, name: string) => saveUpload({ userId, file: { name, bytes: new TextEncoder().encode(statsCsv).buffer as ArrayBuffer } });
+    const compare = (datasetId: string, userId: string) => runAnalysis({ datasetId, userId, test: 't.independent', columns: { dependent: 'score', grouping: 'gender' } });
+
+    const file = await upload(owner, 'n9.csv');
+    const runA = (await compare(file.dataset.id, owner)).run;
+    const runB = (await compare(file.dataset.id, owner)).run;
+
+    /* A run attached to a section cannot be deleted; it survives. */
+    await attachRun({ runId: runA.id, userId: owner, projectId: project.id, sectionKey: 'RESULTS' });
+    check('an attached run cannot be deleted (409 run_attached) and survives', [await conflictOf(() => deleteRun(runA.id, owner)), await exists(runA.id, owner)], ['CONFLICT:run_attached', true]);
+
+    /* Cited by a recorded version (a person's edit records the attached runs, WS2 B1): still refused after detaching. */
+    await saveUserEdit({ projectId: project.id, userId: owner, sectionKey: 'RESULTS', content: 'The groups differed, t = 2.22.' });
+    check('the edit recorded the run as a source', (await listVersions(project.id, owner, 'RESULTS'))[0]?.integrity?.sources.map((source) => source.id), [runA.id]);
+    await detachRun(runA.id, owner);
+    check('a detached run still cited by a saved version cannot be deleted (409 run_cited) and survives', [await conflictOf(() => deleteRun(runA.id, owner)), await exists(runA.id, owner)], ['CONFLICT:run_cited', true]);
+
+    /* Detached and uncited: deleted. Another user's request: not found. */
+    check('another user cannot delete a run (NOT_FOUND)', [await conflictOf(() => deleteRun(runB.id, stranger)), await exists(runB.id, owner)], ['NOT_FOUND:', true]);
+    check('a detached, uncited run is deleted', [await conflictOf(() => deleteRun(runB.id, owner)), await exists(runB.id, owner)], ['allowed', false]);
+
+    /* A collaborator's run cited in the owner's project: its owner cannot delete it. */
+    const editor = await newUser('n9-editor');
+    await db.insert(projectMembers).values({ projectId: project.id, userId: editor, role: 'EDITOR' });
+    const editorFile = await upload(editor, 'n9-editor.csv');
+    const runE = (await compare(editorFile.dataset.id, editor)).run;
+    await attachRun({ runId: runE.id, userId: editor, projectId: project.id, sectionKey: 'DISCUSSION' });
+    await detachRun(runE.id, editor);
+    const discussion = await saveSection({ projectId: project.id, userId: owner, sectionKey: 'DISCUSSION', content: 'Discussion text.', origin: 'USER' });
+    await projectsRepo.addVersion({ sectionId: discussion.id, content: 'Discussion text.', origin: 'USER', wordCount: 2, integrity: { mode: 'person', guardVersion: NUMERIC_GUARD_VERSION, quarantined: 0, manual: 0, traced: 1, sources: [{ id: runE.id, tier: 'pinned' }], excluded: [], findings: [] } });
+    check('a collaborator’s run cited in another owner’s project cannot be deleted by its owner', [await conflictOf(() => deleteRun(runE.id, editor)), await exists(runE.id, editor)], ['CONFLICT:run_cited', true]);
+
+    /* A windowed run listed only as excluded (its numbers were never used) does not block. */
+    const runW = await analysisRunsRepo.create({ userId: owner, datasetId: file.dataset.id, testKey: 'correlation.pearson', spec: { truncatedTo: 5000 }, result: { statistic: { name: 'r', value: 0.5 } } });
+    await projectsRepo.addVersion({ sectionId: discussion.id, content: 'Discussion text.', origin: 'USER', wordCount: 2, integrity: { mode: 'person', guardVersion: NUMERIC_GUARD_VERSION, quarantined: 0, manual: 0, traced: 0, sources: [], excluded: [{ id: runW.id, tier: 'windowed' }], findings: [] } });
+    check('a run listed only as excluded (windowed) is not cited: it can be deleted', [await conflictOf(() => deleteRun(runW.id, owner)), await exists(runW.id, owner)], ['allowed', false]);
+
+    /* Delete everything: refused while an analysis is cited (runA), with nothing removed; the impact says why. */
+    const citedImpact = await deletionImpact(file.dataset.id, owner);
+    check('deletionImpact reports attached and cited analyses, and that delete-everything is blocked', [citedImpact.analyses, citedImpact.attachedRuns, citedImpact.citedRuns, citedImpact.blocked], [1, 0, 1, true]);
+    check('delete everything with a cited analysis is refused (409 dataset_runs_in_use)', await conflictOf(() => deleteEverything(file.dataset.id, owner, true)), 'CONFLICT:dataset_runs_in_use');
+    check('… and nothing was deleted: file, row and analysis all remain', [await readable(file.dataset.id, owner), await exists(runA.id, owner)], [true, true]);
+
+    /* Attached (not only cited): refused the same way, nothing removed. */
+    await attachRun({ runId: runA.id, userId: owner, projectId: project.id, sectionKey: 'RESULTS' });
+    check('delete everything with an attached analysis is refused, nothing deleted', [await conflictOf(() => deleteEverything(file.dataset.id, owner, true)), await readable(file.dataset.id, owner), await exists(runA.id, owner), (await deletionImpact(file.dataset.id, owner)).attachedRuns], ['CONFLICT:dataset_runs_in_use', true, true, 1]);
+    check('an unconfirmed delete-everything is still a validation error', await conflictOf(() => deleteEverything(file.dataset.id, owner, false)), 'VALIDATION:');
+
+    /* Delete the file only: unchanged — allowed with an attached and cited analysis, which survives with its citation. */
+    check('delete the file only stays allowed with attached and cited analyses', await conflictOf(() => deleteFileOnly(file.dataset.id, owner)), 'allowed');
+    check('… the analysis and its citation survive; the file cannot be read', [await exists(runA.id, owner), (await listVersions(project.id, owner, 'RESULTS'))[0]?.integrity?.sources.map((source) => source.id), await readable(file.dataset.id, owner)], [true, [runA.id], false]);
+    check('delete everything on the deleted file is still refused while its analysis is in use', await conflictOf(() => deleteEverything(file.dataset.id, owner, true)), 'CONFLICT:dataset_runs_in_use');
+
+    /* Racing an attach against a delete (both locked on the run row): the outcome is always consistent. */
+    for (let round = 0; round < 3; round += 1) {
+      const raced = await analysisRunsRepo.create({ userId: owner, datasetId: file.dataset.id, testKey: 't.independent', spec: {}, result: { pValue: 0.5 } });
+      const [attachOutcome, deleteOutcome] = await Promise.all([
+        conflictOf(() => attachRun({ runId: raced.id, userId: owner, projectId: project.id, sectionKey: 'SIGNIFICANCE' })),
+        conflictOf(() => deleteRun(raced.id, owner)),
+      ]);
+      const survived = await exists(raced.id, owner);
+      const consistent =
+        (deleteOutcome === 'allowed' && attachOutcome === 'NOT_FOUND:' && !survived) ||
+        (deleteOutcome === 'CONFLICT:run_attached' && attachOutcome === 'allowed' && survived);
+      check(`a concurrent attach and delete end consistently (round ${round + 1})`, [consistent, attachOutcome, deleteOutcome, survived], [true, attachOutcome, deleteOutcome, survived]);
+      if (survived) await detachRun(raced.id, owner);
+    }
+
+    /* A cleaned copy's analysis protects the original too; once detached and uncited, the cascade works as before. */
+    const parent = await upload(owner, 'n9-parent.csv');
+    const cleaned = await saveCleanedCopy({ datasetId: parent.dataset.id, userId: owner, actions: parent.proposals.slice(0, 1) });
+    const runC = (await compare(cleaned.dataset.id, owner)).run;
+    const runP = (await compare(parent.dataset.id, owner)).run;
+    await attachRun({ runId: runC.id, userId: owner, projectId: project.id, sectionKey: 'CONCLUSION' });
+    check('an attached analysis of a cleaned copy blocks deleting everything of the original', [await conflictOf(() => deleteEverything(parent.dataset.id, owner, true)), await readable(parent.dataset.id, owner), await exists(runC.id, owner), await exists(runP.id, owner), (await deletionImpact(parent.dataset.id, owner)).attachedRuns], ['CONFLICT:dataset_runs_in_use', true, true, true, 1]);
+    await detachRun(runC.id, owner);
+    check('detached and uncited: delete everything works, and the cascade removes the analyses of the file and its copy', [(await deletionImpact(parent.dataset.id, owner)).blocked, await conflictOf(() => deleteEverything(parent.dataset.id, owner, true)), await exists(runC.id, owner), await exists(runP.id, owner)], [false, 'allowed', false, false]);
   }
 
   /* ------------------------------------------------------ PLS-SEM as a job */

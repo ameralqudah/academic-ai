@@ -77,10 +77,16 @@ test.describe('research graph API', () => {
     const typed = await create('result_value', { stat: 'beta', value: 0.3 });
     expect((await (await api.get(`${base}/nodes/${typed.id}`)).json()).data.provenance).toBe('manual');
     expect((await api.post(`${base}/nodes`, { data: { type: 'analysis_run', data: {} } })).status()).toBe(403);
-    const claim = await create('claim', { text: 'β = .30' });
-    expect((await api.post(`${base}/edges`, { data: { srcId: claim.id, rel: 'reports', dstId: typed.id } })).status()).toBe(201);
-    const currency = (await (await api.get(`${base}/nodes/${claim.id}/currency`)).json()).data;
-    expect(currency.verification).toBe('manual');
+    // WS3-A: a claim with research numbers, and the values text reports, are written only through the strict claim path.
+    const handMade = await api.post(`${base}/nodes`, { data: { type: 'claim', data: { text: 'β = .30' } } });
+    expect(handMade.status()).toBe(403);
+    expect((await handMade.json()).error.details.reason).toBe('strict_claim_path');
+    // A literature claim, with no research number, may be written by hand.
+    const literature = await api.post(`${base}/nodes`, { data: { type: 'claim', data: { text: 'Gefen et al. (2003) found that trust predicts adoption.' } } });
+    expect(literature.status()).toBe(201);
+    const reported = await api.post(`${base}/edges`, { data: { srcId: block.id, rel: 'reports', dstId: typed.id } });
+    expect(reported.status()).toBe(403);
+    expect((await reported.json()).error.details.reason).toBe('strict_claim_path');
 
     const trace = (await (await api.get(`${base}/nodes/${block.id}/trace?direction=up`)).json()).data;
     expect(trace.nodes.map((node: { id: string }) => node.id)).toContain(construct.id);

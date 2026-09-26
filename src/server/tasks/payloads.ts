@@ -18,6 +18,7 @@
 
 import type { Reference } from '@/server/quality/sources';
 import type { QualityReport } from '@/server/quality/engine';
+import type { LegacyProvenance } from '@/server/stats/legacy-provenance';
 
 /** `sources.v1` — retrieved sources, from any search capability. */
 export interface SourcesPayload {
@@ -88,6 +89,8 @@ export interface AnalysisPayload {
   /** The engine's own result, preserved rather than flattened. */
   result: unknown;
   n: number;
+  /** The data and engine behind the result (WS2 N10), when recorded. */
+  provenance?: LegacyProvenance;
 }
 
 /**
@@ -114,6 +117,8 @@ export interface PlsResultsPayload {
   n: number;
   /** The model that produced them, so results are never orphaned from theory. */
   model: PlsModelPayload;
+  /** The data and engine behind the figures (WS2 N10); absent on older outputs. */
+  provenance?: LegacyProvenance;
 }
 
 /** `prose.v1` — written text for a document or a chapter. */

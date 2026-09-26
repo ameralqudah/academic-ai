@@ -799,6 +799,8 @@ export function registerAllHandlers(): void {
             ),
             n: analysis.n,
           },
+          /* The data and engine behind these figures (WS2 N10): legacy, never "verified". */
+          provenance: analysis.provenance,
         },
         { metadata: { datasetId, converged: true } },
       ),
@@ -843,6 +845,8 @@ export function registerAllHandlers(): void {
             standardised: loading.standardised,
           })),
           n: result.n,
+          /* The data and engine behind the fit (WS2 N10): legacy, never "verified". */
+          provenance: result.provenance,
         },
         { metadata: { datasetId, verdict: result.fit.verdict } },
       ),

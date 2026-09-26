@@ -58,7 +58,7 @@ import { AppError } from '@/server/http/errors';
 import { legacyResultTier } from '@/server/integrity/numbers';
 import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
 import { ensureInitialVersion } from '@/server/stats/versions';
-import { ENGINE } from '@/analysis/engine/types';
+import { LEGACY_ENGINE, LEGACY_ENGINE_STAMP } from '@/server/stats/legacy-provenance';
 import * as runsRepo from '@/server/repositories/analysis-runs.repository';
 import { loadForAnalysis } from '@/server/services/dataset.service';
 
@@ -182,7 +182,11 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisOut
     }
   }
 
-  /* Pinned to the exact data (P1-C): the dataset version, its content hash, and the engine version. */
+  /*
+   * Pinned to the exact data (P1-C): the dataset version and its content hash,
+   * and stamped with the legacy engine that computed it (WS2 B2), not the
+   * P1-C engine, so a legacy result is never read as a P1-C one.
+   */
   const version = await ensureInitialVersion(loaded.row).catch((error: unknown) => {
     logger.warn('analysis.run.versionUnavailable', { datasetId: request.datasetId, error: String(error).slice(0, 200) });
     return null;
@@ -191,7 +195,7 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisOut
   const run = await runsRepo.create({
     datasetVersionId: version?.id ?? null,
     datasetContentHash: version?.contentHash ?? null,
-    engineVersion: ENGINE.version,
+    engineVersion: LEGACY_ENGINE_STAMP,
     userId: request.userId,
     datasetId: request.datasetId,
     projectId: request.projectId ?? null,
@@ -202,6 +206,7 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisOut
       options: request.options ?? {},
       rowsAnalysed: loaded.data.rows.length,
       ...(loaded.truncatedTo ? { truncatedTo: loaded.truncatedTo } : {}),
+      engine: { ...LEGACY_ENGINE },
     },
     result: result as unknown as Record<string, unknown>,
   });

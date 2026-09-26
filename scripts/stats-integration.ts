@@ -309,7 +309,8 @@ async function main() {
   check('a legacy analysis cannot be filed under someone else’s project', await outcome(() => runAnalysis({ datasetId, userId: owner, test: 't.oneSample', columns: { dependent: 'x' }, projectId: other.id })), 'NOT_FOUND');
   const legacy = await runAnalysis({ datasetId, userId: owner, test: 't.oneSample', columns: { dependent: 'x' }, options: { mu: 50 } });
   const legacyResult = legacy.result as { rowsSupplied: number; rowsDropped: number; n: number };
-  check('a legacy run is pinned to the dataset version, its content hash and the engine version', [legacy.run.datasetVersionId === v1.id, legacy.run.datasetContentHash === v1.contentHash, legacy.run.engineVersion], [true, true, '1.0.0']);
+  /* WS2 B2: stamped with the legacy engine, never P1-C's `academic-ai-ts-core` (whose own runs above keep 1.0.0). */
+  check('a legacy run is pinned to the dataset version, its content hash and the legacy engine', [legacy.run.datasetVersionId === v1.id, legacy.run.datasetContentHash === v1.contentHash, legacy.run.engineVersion, (legacy.run.spec as { engine?: unknown }).engine], [true, true, 'academic-ai-legacy-analysis@1', { id: 'academic-ai-legacy-analysis', version: '1' }]);
   check('rows the service drops before the test are counted (was always 0)', [legacyResult.rowsSupplied, legacyResult.rowsDropped, legacyResult.n], [240, 3, 237]);
   const cleanedCopy = await saveCleanedCopy({ datasetId, userId: owner, actions: [{ kind: 'drop-rows-missing', columns: ['m'], reasonKey: 'x', recommended: true, destructive: true }] });
   const [copyV1] = await db.select().from(datasetVersions).where(eq(datasetVersions.datasetId, cleanedCopy.dataset.id));

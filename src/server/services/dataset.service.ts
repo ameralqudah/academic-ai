@@ -50,7 +50,9 @@ import { AppError } from '@/server/http/errors';
 import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
 import { ensureInitialVersion, recordLegacyClean, verifiedRunCount, versionObjectKeys } from '@/server/stats/versions';
 import { resolveReason } from '@/server/http/reasons';
+import { db } from '@/server/db';
 import * as datasetsRepo from '@/server/repositories/datasets.repository';
+import * as runsRepo from '@/server/repositories/analysis-runs.repository';
 import {
   checksumOf,
   datasetKey,
@@ -480,13 +482,35 @@ export interface DeletionImpact {
   cleanedCopies: number;
   /** Verified statistics runs (P1-C) whose data would no longer be re-runnable. Their records stay. */
   verifiedRuns?: number;
+  /** Analyses of this file or its cleaned copies attached to a section (WS2 N9). */
+  attachedRuns?: number;
+  /** Analyses of this file or its cleaned copies cited by a recorded section version (WS2 N9). */
+  citedRuns?: number;
+  /** Whether "delete everything" is refused because of them. "Delete the file" is never refused. */
+  blocked?: boolean;
 }
 
-/** What "delete everything" would destroy, so the confirmation can say it. */
+/** Attached and cited analyses among a set of runs (WS2 N9). */
+async function inUse(
+  runs: { id: string; sectionKey: string | null }[],
+  executor?: runsRepo.Executor,
+): Promise<{ attachedRuns: number; citedRuns: number; blocked: boolean }> {
+  const attachedRuns = runs.filter((run) => run.sectionKey !== null).length;
+  const citedRuns = (await runsRepo.citedRunIds(runs.map((run) => run.id), executor)).size;
+  return { attachedRuns, citedRuns, blocked: attachedRuns > 0 || citedRuns > 0 };
+}
+
+/** What "delete everything" would destroy, so the confirmation can say it — and whether it is refused. */
 export async function deletionImpact(datasetId: string, userId: string): Promise<DeletionImpact> {
   const row = await requireOwned(datasetId, userId);
   const counts = await datasetsRepo.countDependents(datasetId, userId);
-  return { datasetId, name: row.originalName, ...counts, verifiedRuns: await verifiedRunCount(datasetId) };
+  return {
+    datasetId,
+    name: row.originalName,
+    ...counts,
+    verifiedRuns: await verifiedRunCount(datasetId),
+    ...(await inUse(await runsRepo.listByDatasetTree(datasetId))),
+  };
 }
 
 /**
@@ -541,62 +565,81 @@ export async function deleteEverything(
     );
   }
 
-  // Includes soft-deleted rows: a user who deleted the file and now wants the
-  // analyses gone too must still be able to finish the job.
-  const row = await datasetsRepo.findOwnedIncludingDeleted(datasetId, userId);
-  if (!row) {
-    throw new AppError('NOT_FOUND', 'That file was not found.', 'لم يُعثر على الملف.');
-  }
-
-  const counts = await datasetsRepo.countDependents(datasetId, userId);
-  const children = await datasetsRepo.listChildren(datasetId, userId);
-
   /*
-   * Objects first, then the row. The database cascade removes the child rows
-   * and the analyses, so their storage keys have to be collected while they
-   * still exist — after the delete there is nothing left to tell us what to
-   * remove from disk.
-   *
-   * Each dataset has its own folder, so a child's folder has to be removed as
-   * well as its object. Deleting the file alone leaves an empty directory
-   * behind, which is harmless until there are thousands of them.
+   * One transaction, checked before anything is removed (WS2 N9). The file,
+   * its cleaned copies and all their analyses are locked; if any analysis is
+   * attached to a section or cited by a recorded section version, nothing is
+   * deleted — not a row, not a stored object. Soft-deleted files are included:
+   * a user who deleted the file and now wants the analyses gone too must still
+   * be able to finish the job, once nothing depends on them.
    */
-  const provider = storageProvider();
-  const isLocal = provider instanceof LocalStorageProvider;
+  return db.transaction(async (tx) => {
+    const tree = await datasetsRepo.lockTree(tx, datasetId, userId);
+    if (!tree) {
+      throw new AppError('NOT_FOUND', 'That file was not found.', 'لم يُعثر على الملف.');
+    }
+    const row = tree.root;
 
-  for (const child of children) {
-    await provider.delete(child.storageKey).catch(() => undefined);
+    const usage = await inUse(await runsRepo.lockByDatasets(tx, [datasetId, ...tree.childIds]), tx);
+    if (usage.blocked) {
+      throw new AppError(
+        'CONFLICT',
+        'Analyses of this file are attached to a section or cited by a saved version, so everything cannot be deleted. Detach them first, or delete only the file.',
+        'تحليلات هذا الملف مرفقة بقسم أو تستند إليها نسخة محفوظة، فلا يمكن حذف كل شيء. افصلها أولًا، أو احذف الملف وحده.',
+        { reason: 'dataset_runs_in_use', attachedRuns: usage.attachedRuns, citedRuns: usage.citedRuns },
+      );
+    }
+
+    const counts = await datasetsRepo.countDependents(datasetId, userId);
+    const children = await datasetsRepo.listChildren(datasetId, userId);
+
+    /*
+     * Objects first, then the row. The database cascade removes the child rows
+     * and the analyses, so their storage keys have to be collected while they
+     * still exist — after the delete there is nothing left to tell us what to
+     * remove from disk.
+     *
+     * Each dataset has its own folder, so a child's folder has to be removed as
+     * well as its object. Deleting the file alone leaves an empty directory
+     * behind, which is harmless until there are thousands of them.
+     */
+    const provider = storageProvider();
+    const isLocal = provider instanceof LocalStorageProvider;
+
+    for (const child of children) {
+      await provider.delete(child.storageKey).catch(() => undefined);
+      if (isLocal) {
+        await (provider as LocalStorageProvider)
+          .deletePrefix(`datasets/${userId}/${child.id}/`)
+          .catch(() => undefined);
+      }
+    }
+
+    await provider.delete(row.storageKey).catch(() => undefined);
+    for (const key of await versionObjectKeys([datasetId, ...children.map((child) => child.id)], [row.storageKey, ...children.map((child) => child.storageKey)])) {
+      await provider.delete(key).catch(() => undefined);
+    }
+
+    /*
+     * A local provider can remove the whole dataset folder, which also sweeps up
+     * anything a partially-failed earlier write may have left behind.
+     */
     if (isLocal) {
       await (provider as LocalStorageProvider)
-        .deletePrefix(`datasets/${userId}/${child.id}/`)
+        .deletePrefix(`datasets/${userId}/${datasetId}/`)
         .catch(() => undefined);
     }
-  }
 
-  await provider.delete(row.storageKey).catch(() => undefined);
-  for (const key of await versionObjectKeys([datasetId, ...children.map((child) => child.id)], [row.storageKey, ...children.map((child) => child.storageKey)])) {
-    await provider.delete(key).catch(() => undefined);
-  }
+    await datasetsRepo.hardDeleteIn(tx, datasetId, userId);
 
-  /*
-   * A local provider can remove the whole dataset folder, which also sweeps up
-   * anything a partially-failed earlier write may have left behind.
-   */
-  if (isLocal) {
-    await (provider as LocalStorageProvider)
-      .deletePrefix(`datasets/${userId}/${datasetId}/`)
-      .catch(() => undefined);
-  }
+    logger.info('dataset.purged', {
+      datasetId,
+      analysesDeleted: counts.analyses,
+      copiesDeleted: counts.cleanedCopies,
+    });
 
-  await datasetsRepo.hardDelete(datasetId, userId);
-
-  logger.info('dataset.purged', {
-    datasetId,
-    analysesDeleted: counts.analyses,
-    copiesDeleted: counts.cleanedCopies,
+    return { datasetId, name: row.originalName, ...counts };
   });
-
-  return { datasetId, name: row.originalName, ...counts };
 }
 
 /* -------------------------------------------------------------------------- */

@@ -32,7 +32,7 @@ import { eq, like } from 'drizzle-orm';
 
 import type { AgentEvent } from '@/agents/events';
 import { buildResultsContext } from '@/ai/context/results';
-import { allowedFromLegacyResults, checkNumbers, NUMERIC_GUARD_VERSION, QUARANTINE_MARKER } from '@/server/integrity/numbers';
+import { allowedFromLegacyResults, checkNumbers, legacyResultTier, NUMERIC_GUARD_VERSION, QUARANTINE_MARKER } from '@/server/integrity/numbers';
 import { clearIntentStubForTests, setIntentStubForTests } from '@/agents/intent';
 import { runAgent } from '@/agents/orchestrator';
 import { PROPOSAL_SECTIONS, WIZARD_STEPS } from '@/config/research';
@@ -130,7 +130,9 @@ import {
   startConversation,
   switchToBranch,
 } from '@/server/services/chat.service';
-import { cancelJob, getJob, runPls, startBootstrap } from '@/server/services/pls.service';
+import { cancelJob, getJob, runCbSem, runPls, startBootstrap } from '@/server/services/pls.service';
+import { asLegacyResult, LEGACY_ENGINE, LEGACY_ENGINE_STAMP, readProvenance } from '@/server/stats/legacy-provenance';
+import { modelHash } from '@/server/tasks/model-confirmation';
 import { clearUnselectedTitles, deleteTitle, generateSection, listTitles, selectTitle, streamChat } from '@/server/services/ai.service';
 import { chatAllowedValues, checkChatReply, inspectChatReply } from '@/server/services/chat-integrity';
 import { resolvePlanForUser } from '@/server/services/subscription.service';
@@ -1434,6 +1436,7 @@ async function main() {
   /* Legacy results are labelled computed, with their tier, never "verified" (WS2 N2). */
   assertTrue('the chapter block is labelled computed, not verified', chapterContext.startsWith('## COMPUTED ANALYSIS RESULTS (legacy engine, not independently verified)') && !chapterContext.includes('VERIFIED'));
   assertTrue('a run pinned to its data version shows the pinned tier', chapterContext.includes('Tier: pinned:'));
+  check('WS2 B2: a legacy run is stamped with the legacy engine, not P1-C’s', [chapterRun.run.engineVersion, (chapterRun.run.spec as { engine?: unknown }).engine, chapterContext.includes('(academic-ai-legacy-analysis@1)')], [LEGACY_ENGINE_STAMP, { ...LEGACY_ENGINE }, true]);
 
   /*
    * Detaching restores the original behaviour exactly. This is what makes the
@@ -1878,6 +1881,104 @@ async function main() {
    */
   const nullPath = bootstrapped?.paths.find((path) => path.key === 'A→C');
   check('a path that is really zero stays non-significant', nullPath?.significant, false);
+
+  {
+    section('PLS-SEM and CB-SEM carry their provenance (WS2 B2, N10)');
+    const untraced = (flags: readonly string[]) => flags.includes('UNTRACED_STATISTIC');
+
+    /* The estimate records the data version, its hash, the legacy engine and the rows read. */
+    const pinned = analysis.provenance;
+    check(
+      'a PLS estimate records its dataset version, content hash and the legacy engine (never P1-C)',
+      [pinned.datasetId, Boolean(pinned.datasetVersionId), pinned.datasetContentHash?.length, pinned.engine, pinned.engineVersion, pinned.truncatedTo, pinned.rowsAnalysed],
+      [plsFile.dataset.id, true, 64, { ...LEGACY_ENGINE }, 'academic-ai-legacy-analysis@1', undefined, 200],
+    );
+    check('the legacy stamp is not the P1-C engine', [LEGACY_ENGINE_STAMP === 'academic-ai-legacy-analysis@1', pinned.engine.id !== 'academic-ai-ts-core'], [true, true]);
+
+    /* The bootstrap job: provenance in its specification, and the data actually read in its result. */
+    const [jobRow] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, job.id));
+    const jobSpec = (jobRow?.spec as { provenance?: typeof pinned }).provenance;
+    const jobRun = (jobRow?.result as { provenance?: typeof pinned } | null)?.provenance;
+    check('the bootstrap job specification records the provenance', [jobSpec?.datasetVersionId, jobSpec?.engineVersion, jobSpec?.truncatedTo], [pinned.datasetVersionId, LEGACY_ENGINE_STAMP, undefined]);
+    check('… and its result records the data read when it ran', [jobRun?.datasetVersionId, jobRun?.rowsAnalysed], [pinned.datasetVersionId, 200]);
+
+    /* Stored in a conversation: the provenance travels with the result, and chat tiers it. */
+    const plsThread = await startConversation({ userId: plsOwner, firstMessage: 'PLS' });
+    const withThread = await runPls({ datasetId: plsFile.dataset.id, userId: plsOwner, model: plsModelSpec, conversationId: plsThread.id });
+    const cbsem = await runCbSem({ datasetId: plsFile.dataset.id, userId: plsOwner, model: { ...plsModelSpec, paths: [] }, conversationId: plsThread.id });
+    const stored = (await chatRepo.activeThread(plsThread.id)).flatMap((message) => ((message.payload as { results?: { kind: string; provenance?: typeof pinned }[] } | null)?.results ?? []));
+    check(
+      'PLS and CB-SEM results stored in chat carry their provenance',
+      stored.map((item) => [item.kind, item.provenance?.datasetVersionId, item.provenance?.engineVersion]),
+      [['pls', pinned.datasetVersionId, LEGACY_ENGINE_STAMP], ['cbsem', pinned.datasetVersionId, LEGACY_ENGINE_STAMP]],
+    );
+    check('CB-SEM returns its provenance too', [cbsem.provenance.datasetVersionId, cbsem.provenance.engineVersion], [pinned.datasetVersionId, LEGACY_ENGINE_STAMP]);
+    const pinnedAllowed = await chatAllowedValues({ userId: plsOwner, conversationId: plsThread.id });
+    const pinnedPath = withThread.structural.paths.find((path) => path.from === 'A' && path.to === 'B')!.coefficient.toFixed(3);
+    check('chat: a pinned PLS result’s coefficient is traced', untraced(inspectChatReply(`The path from A to B was β = ${pinnedPath}.`, { allowed: pinnedAllowed, message: '' }).flags), false);
+
+    /* A file over the interactive window: the estimate is marked windowed, and chat allows none of its numbers (D3). */
+    const bigRows: string[] = ['a1,a2,a3,b1,b2,b3,c1,c2,c3'];
+    for (let i = 0; i < 5_050; i += 1) {
+      const A = plsNormal();
+      const B = 0.4 * A + Math.sqrt(1 - 0.16) * plsNormal();
+      const C = 0.45 * B + 0.7 * plsNormal();
+      const cells: number[] = [];
+      for (const latent of [A, B, C]) for (let j = 0; j < 3; j += 1) cells.push(0.85 * latent + 0.5 * plsNormal());
+      bigRows.push(cells.map((value) => value.toFixed(4)).join(','));
+    }
+    const bigFile = await saveUpload({ userId: plsOwner, file: { name: 'big-survey.csv', bytes: new TextEncoder().encode(`${bigRows.join('\n')}\n`).buffer as ArrayBuffer } });
+    const windowThread = await startConversation({ userId: plsOwner, firstMessage: 'PLS on a large file' });
+    const windowed = await runPls({ datasetId: bigFile.dataset.id, userId: plsOwner, model: plsModelSpec, conversationId: windowThread.id });
+    check('a PLS estimate on the first rows only records its window', [windowed.provenance.truncatedTo, windowed.provenance.rowsAnalysed, Boolean(windowed.provenance.datasetVersionId)], [5_000, 5_000, true]);
+    const windowAllowed = await chatAllowedValues({ userId: plsOwner, conversationId: windowThread.id });
+    const windowPath = windowed.structural.paths.find((path) => path.from === 'A' && path.to === 'B')!.coefficient.toFixed(3);
+    check('chat: a windowed PLS result contributes no allowed numbers (flagged)', [untraced(inspectChatReply(`The path from A to B was β = ${windowPath}.`, { allowed: windowAllowed, message: '' }).flags), [...windowAllowed.estimate].length, [...windowAllowed.p].length], [true, 0, 0]);
+
+    /* Task outputs (pls-results.v1, CB-SEM analysis.v1) carry the provenance too, for the steps that read them. */
+    const cbsemModel = { ...plsModelSpec, paths: [] };
+    const statsTask = await tasksRepo.create({
+      userId: plsOwner,
+      request: 'run PLS and CB-SEM',
+      locale: 'en',
+      status: 'QUEUED',
+      context: { datasetId: plsFile.dataset.id, confirmedModels: [modelHash(plsModelSpec), modelHash(cbsemModel)] },
+      budget: DEFAULT_BUDGET as unknown as Record<string, number>,
+      spent: { modelCalls: 0, retries: 0 },
+    });
+    await tasksRepo.addSteps([
+      { taskId: statsTask.id, ordinal: 0, capability: 'statistics.pls', label: 'pls', status: 'PENDING', dependsOn: [], input: { datasetId: plsFile.dataset.id, model: plsModelSpec } },
+      { taskId: statsTask.id, ordinal: 1, capability: 'statistics.cbsem', label: 'cbsem', status: 'PENDING', dependsOn: [], input: { datasetId: plsFile.dataset.id, model: cbsemModel } },
+    ]);
+    registerAllHandlers();
+    await runTask(statsTask.id);
+    const statsSteps = await tasksRepo.stepsOf(statsTask.id);
+    const outputOf = (capability: string) => JSON.stringify(statsSteps.find((step) => step.capability === capability)?.output ?? null);
+    check(
+      'task outputs pls-results.v1 and CB-SEM analysis.v1 carry the provenance',
+      [statsSteps.map((step) => step.status + (step.errorReasonKey ? `:${step.errorReasonKey}` : '')), ['statistics.pls', 'statistics.cbsem'].map((capability) => outputOf(capability).includes(`"engineVersion":"${LEGACY_ENGINE_STAMP}"`) && outputOf(capability).includes(`"datasetVersionId":"${pinned.datasetVersionId}"`))],
+      [['COMPLETED', 'COMPLETED'], [true, true]],
+    );
+
+    /* The tiers provenance gives, through the same `legacyResultTier` as every legacy run (never "verified"). */
+    const base = { datasetId: 'd', engine: { ...LEGACY_ENGINE }, engineVersion: LEGACY_ENGINE_STAMP, rowsAnalysed: 10 };
+    check(
+      'provenance tiers: pinned with version and hash, windowed with a window, unpinned without a version, none when absent',
+      [
+        legacyResultTier(asLegacyResult({}, { ...base, datasetVersionId: 'v', datasetContentHash: 'h' })),
+        legacyResultTier(asLegacyResult({}, { ...base, datasetVersionId: 'v', datasetContentHash: 'h', truncatedTo: 5000 })),
+        legacyResultTier(asLegacyResult({}, { ...base, datasetVersionId: null, datasetContentHash: null })),
+        readProvenance(undefined),
+        readProvenance({ unexpected: true }),
+      ],
+      ['pinned', 'windowed', 'unpinned', null, null],
+    );
+
+    /* An older stored result without provenance keeps its unpinned behaviour (WS2 A5). */
+    const legacyThread = await startConversation({ userId: plsOwner, firstMessage: 'old result' });
+    await chatRepo.addMessage({ conversationId: legacyThread.id, role: 'ASSISTANT', content: '', payload: { results: [{ kind: 'pls', payload: { estimates: { paths: [{ from: 'A', to: 'B', coefficient: 0.4321 }] } } }] } });
+    check('chat: a stored result without provenance is still allowed as unpinned', untraced(inspectChatReply('The path was β = .432.', { allowed: await chatAllowedValues({ userId: plsOwner, conversationId: legacyThread.id }), message: '' }).flags), false);
+  }
 
   const realPath = bootstrapped?.paths.find((path) => path.key === 'A→B');
   check('and a real one is significant', realPath?.significant, true);

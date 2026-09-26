@@ -58,6 +58,7 @@ import { assertConversationLink, assertProjectLink } from '@/server/services/own
 import { resolveReason } from '@/server/http/reasons';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { loadForAnalysis } from '@/server/services/dataset.service';
+import { legacyProvenance, type LegacyProvenance } from '@/server/stats/legacy-provenance';
 
 /** More than this in flight and a user is queueing work nobody will read. */
 const MAX_CONCURRENT_JOBS = 2;
@@ -87,7 +88,12 @@ export interface PlsAnalysis {
   rowsDropped: number;
   iterations: number;
   converged: boolean;
+  /** The data and engine behind these numbers (WS2 N10): a legacy result, never "verified". */
+  provenance: LegacyProvenance;
 }
+
+/** A CB-SEM result with the data and engine behind it (WS2 N10). */
+export type CbSemAnalysis = CbSemResult & { provenance: LegacyProvenance };
 
 /* -------------------------------------------------------------------------- */
 /*                              Estimation                                    */
@@ -181,6 +187,9 @@ export async function runPls(input: {
       converged: estimate.converged,
     });
 
+    /* The dataset version, content hash, legacy engine and row window behind these numbers (WS2 N10). */
+    const provenance = await legacyProvenance(loaded);
+
     /*
      * Recorded in the conversation, so a model someone spent ten minutes
      * specifying survives a refresh.
@@ -200,6 +209,7 @@ export async function runPls(input: {
             {
               kind: 'pls',
               datasetId: input.datasetId,
+              provenance,
               payload: {
                 report,
                 /*
@@ -271,6 +281,7 @@ export async function runPls(input: {
       rowsDropped: estimate.rowsDropped,
       iterations: estimate.iterations,
       converged: estimate.converged,
+      provenance,
     };
   } catch (error) {
     throw asAppError(error);
@@ -294,14 +305,16 @@ export async function runCbSem(input: {
   userId: string;
   model: PlsModel;
   conversationId?: string | null;
-}): Promise<CbSemResult> {
+}): Promise<CbSemAnalysis> {
   await assertConversationLink(input.userId, input.conversationId);
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
 
   const columns = numericColumns(loaded.data);
 
   try {
-    const result = confirmatoryFactorAnalysis(input.model, columns);
+    const fitted = confirmatoryFactorAnalysis(input.model, columns);
+    /* The data and engine behind the fit (WS2 N10), stored and returned with it. */
+    const result: CbSemAnalysis = { ...fitted, provenance: await legacyProvenance(loaded) };
 
     if (input.conversationId) {
       await recordTurn({
@@ -310,7 +323,7 @@ export async function runCbSem(input: {
         userMessage: `CB-SEM: ${input.model.constructs.map((c) => c.name).join(', ')}`,
         assistantMessage: '',
         payload: {
-          results: [{ kind: 'cbsem', payload: result as unknown as Record<string, unknown> }],
+          results: [{ kind: 'cbsem', datasetId: input.datasetId, provenance: result.provenance, payload: result as unknown as Record<string, unknown> }],
         },
       }).catch((error: unknown) => {
         logger.error('cbsem.persistFailed', {
@@ -425,6 +438,8 @@ export async function startBootstrap(input: {
       resamples,
       confidenceLevel: input.confidenceLevel ?? 0.95,
       seed: input.seed ?? 20260101,
+      /* The data and engine the job is specified against (WS2 N10). */
+      provenance: (await legacyProvenance(loaded)) as unknown as Record<string, unknown>,
     },
   });
 
@@ -535,6 +550,8 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
       {
         bootstrap: result as unknown as Record<string, unknown>,
         report: report as unknown as Record<string, unknown>,
+        /* The data actually read when the job ran, including its row window (WS2 N10). */
+        provenance: (await legacyProvenance(loaded)) as unknown as Record<string, unknown>,
       },
       Date.now() - startedAt,
     );

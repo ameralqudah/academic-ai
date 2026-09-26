@@ -13,8 +13,9 @@
  *   through `allowedFromLegacyResults`, so windowed runs contribute nothing
  *   (WS2 D3);
  * - result payloads the conversation stored with no run row behind them
- *   (a profile, a PLS estimate shown in chat) count as unpinned results,
- *   never as verified ones;
+ *   (a profile, a PLS estimate shown in chat) are tiered by the provenance
+ *   stored with them (WS2 N10: a windowed one contributes nothing), or count
+ *   as unpinned when stored without it; never as verified ones;
  * - only the current message is the researcher's. An earlier turn is not: a
  *   number the assistant wrote before, and the user did not restate, is not
  *   made legitimate by having been said.
@@ -25,6 +26,7 @@ import { logger } from '@/lib/logger';
 import { allowedFromLegacyResults, emptyScopedValues, type LegacyResultLike, type ScopedValues } from '@/server/integrity/numbers';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
+import { asLegacyResult, readProvenance } from '@/server/stats/legacy-provenance';
 
 export interface ChatScope {
   userId: string;
@@ -33,9 +35,9 @@ export interface ChatScope {
 }
 
 /** Result payloads stored on the conversation's messages (`payload.results`). */
-function storedResults(payload: unknown): { runId?: unknown; payload?: unknown }[] {
+function storedResults(payload: unknown): { runId?: unknown; payload?: unknown; provenance?: unknown }[] {
   const results = (payload as { results?: unknown } | null)?.results;
-  return Array.isArray(results) ? (results.filter((item) => item && typeof item === 'object') as { runId?: unknown; payload?: unknown }[]) : [];
+  return Array.isArray(results) ? (results.filter((item) => item && typeof item === 'object') as { runId?: unknown; payload?: unknown; provenance?: unknown }[]) : [];
 }
 
 /** The values a chat reply may repeat in this scope, by class. */
@@ -61,8 +63,15 @@ export async function chatAllowedValues(scope: ChatScope): Promise<ScopedValues>
           continue;
         }
       }
-      /* No run row: a computed payload, counted as unpinned (never verified). */
-      if (item.payload && typeof item.payload === 'object') unpinned.push({ result: item.payload });
+      if (!item.payload || typeof item.payload !== 'object') continue;
+      /*
+       * No run row. A result stored with its provenance (PLS, CB-SEM: WS2 N10)
+       * is tiered by it, so a windowed one contributes nothing; one stored
+       * without provenance (older results) is counted as unpinned. Neither is
+       * ever verified.
+       */
+      const provenance = readProvenance(item.provenance);
+      unpinned.push(provenance ? asLegacyResult(item.payload, provenance) : { result: item.payload });
     }
   }
 

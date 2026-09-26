@@ -24,15 +24,15 @@ import { WORKER_ID } from '@/server/jobs/leases';
 import { AppError } from '@/server/http/errors';
 
 import { inputHash, stepIdempotencyKey } from './approvals';
-import { withRunScope } from './db-scope';
+import { isTransientDbError, withRunScope } from './db-scope';
 import { activeElapsedMs, bytesOf, limitsFor, type RunLimits, type Tier } from './limits';
 import { createLeaseKeeper, type LeaseKeeper } from './lease';
 import { planRun, resolveReferences } from './planner';
-import { decide, productionPolicyDeps, storedDecision, type PolicyDecision } from './policy';
+import { decide, planPreflight, productionPolicyDeps, storedDecision, type PolicyDecision } from './policy';
 import { toolByName } from './registry';
 import * as store from './store';
 import type { StopReason } from './state';
-import type { ProjectRole, ToolDef } from './types';
+import type { ToolDef } from './types';
 
 const HEARTBEAT_MS = 30_000;
 const CANCEL_POLL_MS = 2_000;
@@ -41,6 +41,13 @@ let heartbeatMs = HEARTBEAT_MS;
 /** For tests: a shorter heartbeat, to exercise lease loss quickly. `null` restores the default. */
 export function setRunHeartbeatForTests(ms: number | null): void {
   heartbeatMs = ms ?? HEARTBEAT_MS;
+}
+
+/** A test-only fault, raised at a named point of the loop (a database error, say). Never set outside tests. */
+type RunFault = (point: 'drive' | 'plan') => void | Promise<void>;
+let runFault: RunFault | null = null;
+export function setRunFaultForTests(fault: RunFault | null): void {
+  runFault = fault;
 }
 
 /** The lease of the run this runner is advancing (lost ⇒ stop, write nothing more). */
@@ -136,6 +143,16 @@ async function advanceHeld(userId: string, runId: string, projectId: string, lea
       await failRlsUnavailable(runId, error);
       return 'ran';
     }
+    /*
+     * The connection or the server failed, not the run (WS3-B, R6): record no
+     * stop. The lease is released (or lapses) and the reaper dispatches the run
+     * again; a step left RUNNING is retried with its idempotency key. Repeated
+     * failures without progress are bounded by MAX_RUN_CLAIMS.
+     */
+    if (isTransientDbError(error)) {
+      logger.warn('runs.advance.transientDb', { runId, error: String(error).slice(0, 200) });
+      return 'unavailable';
+    }
     logger.error('runs.advance.crashed', { runId, error: String(error).slice(0, 300) });
     await stopRun(userId, runId, 'worker_lost', { message: String(error).slice(0, 300) }).catch(() => undefined);
     return 'ran';
@@ -163,6 +180,7 @@ async function drive(userId: string, runId: string): Promise<void> {
   for (let guard = 0; guard < 200; guard += 1) {
     if (leaseLost()) return;
     const run = await store.readRun(userId, runId);
+    await runFault?.('drive');
     if (!run || ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(run.status)) return;
     if (run.cancelRequestedAt) {
       await cancelRemaining(userId, run);
@@ -224,23 +242,97 @@ async function settleWaiting(userId: string, run: ResearchRun): Promise<'continu
 
 async function plan(userId: string, run: ResearchRun, limits: Readonly<RunLimits>): Promise<boolean> {
   if (run.status === 'QUEUED' && !(await store.transitionRun(userId, run.id, ['QUEUED'], 'PLANNING', { startedAt: new Date() }))) return false;
-  const role = await productionPolicyDeps.role(run.projectId, userId);
-  if (!role || role === 'VIEWER') {
-    await stopRun(userId, run.id, 'policy_denied', { message: 'The run’s owner can no longer edit this project.' });
+  /*
+   * Before the planner's model call (WS3-B, R7): the run's cancel read fresh,
+   * the flags, the owner's role and the budgets. A refusal is recorded; the
+   * planner is never called.
+   */
+  const current = await store.readRun(userId, run.id);
+  if (!current) return false;
+  const preflight = await planPreflight({ userId, projectId: run.projectId, run: { id: run.id, cancelRequested: Boolean(current.cancelRequestedAt) } });
+  if (!preflight.ok) {
+    if (preflight.stopReason === 'cancelled') {
+      await cancelRemaining(userId, current);
+      return false;
+    }
+    const failed = preflight.rules.find((rule) => !rule.ok);
+    await stopRun(userId, run.id, preflight.stopReason!, {
+      rule: failed?.rule ?? null,
+      message: failed?.rule === 'auth.project' ? 'The run’s owner can no longer edit this project.' : (failed?.detail ?? null),
+    });
     return false;
   }
+  /* The planner's model call stops with the run: cancel, or a lost lease (WS3-B, R5). */
+  const watch = watchRun(userId, run.id);
   let result: Awaited<ReturnType<typeof planRun>>;
   try {
-    result = await planRun({ userId, projectId: run.projectId, intent: run.intent, context: run.context, role: role as ProjectRole, tier: run.tier as Tier, limits });
+    await runFault?.('plan');
+    result = await planRun({ userId, projectId: run.projectId, intent: run.intent, context: run.context, role: preflight.role!, tier: run.tier as Tier, limits, signal: watch.signal });
   } catch (error) {
+    if (leaseLost() || watch.reason === 'lease_lost') return false;
+    if (watch.reason === 'cancelled') {
+      await cancelRemaining(userId, current);
+      return false;
+    }
+    /* The database, not the planner (WS3-B, R6): left to advanceRun, which records no stop (and keeps infra vs RLS apart). */
+    if (isTransientDbError(error) || isInfraUnavailable(error) || isRlsUnavailable(error)) throw error;
     await stopRun(userId, run.id, 'planner_failed', { message: error instanceof AppError ? error.message : 'The plan could not be made.' });
     return false;
+  } finally {
+    watch.dispose();
   }
   if (!result.ok) {
     await stopRun(userId, run.id, 'plan_invalid', { errors: result.errors });
     return false;
   }
   return store.recordPlan(userId, run.id, { summary: result.plan.summary, steps: result.plan.steps.map(({ seq, tool, label, dependsOn }) => ({ seq, tool, label, dependsOn })) }, result.plan.steps, result.meta);
+}
+
+type WatchReason = 'timeout' | 'cancelled' | 'lease_lost';
+
+/**
+ * Aborts work in progress when the run's cancel is recorded (polled) or its
+ * lease is lost, or when `stop` is called (a timeout). `stopped` resolves with
+ * the first reason; the signal reaches the tool and its model calls.
+ */
+function watchRun(userId: string, runId: string) {
+  const controller = new AbortController();
+  let reason: WatchReason | null = null;
+  let settle: (why: WatchReason) => void = () => undefined;
+  const stopped = new Promise<WatchReason>((resolve) => {
+    settle = resolve;
+  });
+  const stop = (why: WatchReason) => {
+    if (reason) return;
+    reason = why;
+    controller.abort();
+    settle(why);
+  };
+  const keeper = keeperScope.getStore();
+  const onLeaseLost = () => stop('lease_lost');
+  if (keeper?.lost) onLeaseLost();
+  else keeper?.signal.addEventListener('abort', onLeaseLost, { once: true });
+  const poll = setInterval(() => {
+    void store
+      .readRun(userId, runId)
+      .then((current) => {
+        if (current?.cancelRequestedAt) stop('cancelled');
+      })
+      .catch(() => undefined);
+  }, CANCEL_POLL_MS);
+  poll.unref?.();
+  return {
+    signal: controller.signal,
+    stopped,
+    stop,
+    get reason() {
+      return reason;
+    },
+    dispose() {
+      clearInterval(poll);
+      keeper?.signal.removeEventListener('abort', onLeaseLost);
+    },
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -447,7 +539,9 @@ async function runStep(userId: string, run: ResearchRun, step: RunStep, steps: R
     const permanent = error instanceof AppError && PERMANENT.has(error.code);
     const message = error instanceof AppError ? error.message : error instanceof StepTimedOut ? 'The step took longer than its limit.' : 'The tool failed.';
     if (!(error instanceof AppError)) logger.error('runs.step.threw', { runId: run.id, stepId: step.id, tool: tool.name, error: String(error).slice(0, 300) });
-    await failAttempt(userId, run, { ...step, attempts, claimToken: token, status: 'RUNNING' }, { code, message: message.slice(0, 300) }, !permanent && tool.sideEffect !== 'destructive', limits, token);
+    /* The record a failed tool left behind (a statistics run that failed, say) stays named on the step (WS3-B, R4). */
+    const statRunId = error instanceof AppError ? (error.details as { statRunId?: unknown } | undefined)?.statRunId : undefined;
+    await failAttempt(userId, run, { ...step, attempts, claimToken: token, status: 'RUNNING' }, { code, message: message.slice(0, 300), ...(typeof statRunId === 'string' ? { statRunId } : {}) }, !permanent && tool.sideEffect !== 'destructive', limits, token);
     return 'continue';
   }
 }
@@ -461,35 +555,8 @@ async function executeTool(
   decision: PolicyDecision,
   limits: Readonly<RunLimits>,
 ) {
-  const controller = new AbortController();
-  let stop: ((reason: 'timeout' | 'cancelled' | 'lease_lost') => void) | undefined;
-  const stopped = new Promise<'timeout' | 'cancelled' | 'lease_lost'>((resolve) => {
-    stop = resolve;
-  });
-  /* The lease was lost: abort the tool and stop waiting for it (no settle; see advanceRun). */
-  const keeper = keeperScope.getStore();
-  const onLeaseLost = () => {
-    controller.abort();
-    stop?.('lease_lost');
-  };
-  if (keeper?.lost) onLeaseLost();
-  else keeper?.signal.addEventListener('abort', onLeaseLost, { once: true });
-  const timeout = setTimeout(() => {
-    controller.abort();
-    stop?.('timeout');
-  }, Math.min(tool.timeoutMs, limits.maxStepMs));
-  const watch = setInterval(() => {
-    void store
-      .readRun(userId, run.id)
-      .then((current) => {
-        if (current?.cancelRequestedAt) {
-          controller.abort();
-          stop?.('cancelled');
-        }
-      })
-      .catch(() => undefined);
-  }, CANCEL_POLL_MS);
-  watch.unref?.();
+  const watch = watchRun(userId, run.id);
+  const timeout = setTimeout(() => watch.stop('timeout'), Math.min(tool.timeoutMs, limits.maxStepMs));
   try {
     const running = withCallIds({ projectId: run.projectId, runId: run.id, stepId: step.id }, () =>
       tool.execute(input as never, {
@@ -500,20 +567,19 @@ async function executeTool(
         runId: run.id,
         stepId: step.id,
         idempotencyKey: step.idempotencyKey!,
-        signal: controller.signal,
+        signal: watch.signal,
         approvedImpactHash: decision.approval?.need.impactHash ?? null,
       }),
     );
     running.catch(() => undefined);
-    const raced = await Promise.race([running.then((result) => ({ result })), stopped]);
+    const raced = await Promise.race([running.then((result) => ({ result })), watch.stopped]);
     if (raced === 'lease_lost') throw new StepLeaseLost();
     if (raced === 'cancelled') throw new StepCancelled();
     if (raced === 'timeout') throw new StepTimedOut();
     return raced.result;
   } finally {
     clearTimeout(timeout);
-    clearInterval(watch);
-    keeper?.signal.removeEventListener('abort', onLeaseLost);
+    watch.dispose();
   }
 }
 
@@ -522,7 +588,7 @@ async function failAttempt(
   userId: string,
   run: ResearchRun,
   step: RunStep,
-  error: { code: string; message: string },
+  error: { code: string; message: string; statRunId?: string },
   retryable: boolean,
   limits: Readonly<RunLimits>,
   claimToken?: string,

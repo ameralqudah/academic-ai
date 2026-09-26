@@ -26,6 +26,8 @@ import { db } from '@/server/db';
 import { analysisJobs, datasets, datasetVersions, graphNodes, statEstimates, statFigures, statRuns, statSpecs, statTables, type StatRun } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 
+import { stepsByIdempotencyKeys } from '@/server/runs/store';
+
 import { authorise, hashOf, sameProject, type StatsActor } from './access';
 import { lineageOf, loadVersion, requireVersion } from './versions';
 
@@ -513,6 +515,18 @@ export async function listRuns(actor: StatsActor, projectId: string) {
 export async function getProvenance(actor: StatsActor, runId: string, projectId?: string | null) {
   const { run, spec, estimates, supersededBy } = await getRun(actor, runId, projectId);
   const lineage = await lineageOf(run.datasetVersionId);
+  /*
+   * Which research run and step wrote each record (WS3-B, R11): the step whose
+   * idempotency key the record carries, of the tool that writes that kind of
+   * record, acting for the record's owner. Anything else — a person, the
+   * statistics assistant — is null.
+   */
+  const steps = run.projectId ? await stepsByIdempotencyKeys(actor.userId, run.projectId, [spec.idempotencyKey, run.idempotencyKey, ...lineage.map(({ transformation }) => transformation?.idempotencyKey)]) : new Map();
+  const createdByRun = (key: string | null | undefined, tool: string, ownerId: string) => {
+    const step = key ? steps.get(key) : undefined;
+    return step && step.tool === tool && step.ownerId === ownerId ? { runId: step.runId, stepId: step.stepId } : null;
+  };
+  const specCreatedByRun = createdByRun(spec.idempotencyKey, 'createAnalysisSpec', spec.userId);
   return {
     run: {
       id: run.id,
@@ -531,8 +545,18 @@ export async function getProvenance(actor: StatsActor, runId: string, projectId?
       supersedes: run.supersedesRunId,
       supersededBy,
       graphRunNodeId: run.graphRunNodeId,
+      createdByRun: createdByRun(run.idempotencyKey, 'runAnalysis', run.userId),
     },
-    specification: { id: spec.id, hash: spec.specHash, origin: spec.origin, spec: spec.spec, hypothesisIds: spec.hypothesisIds, graphNodeId: spec.graphNodeId },
+    specification: {
+      id: spec.id,
+      hash: spec.specHash,
+      /* A spec a research run wrote is stored as 'assistant' (the column's check allows user | assistant) and reported as 'run'. */
+      origin: specCreatedByRun ? 'run' : spec.origin,
+      spec: spec.spec,
+      hypothesisIds: spec.hypothesisIds,
+      graphNodeId: spec.graphNodeId,
+      createdByRun: specCreatedByRun,
+    },
     dataset: lineage.map(({ version, transformation }) => ({
       versionId: version.id,
       versionNo: version.versionNo,
@@ -542,7 +566,9 @@ export async function getProvenance(actor: StatsActor, runId: string, projectId?
       rows: version.rowCount,
       columns: version.columnCount,
       graphNodeId: version.graphNodeId,
-      transformation: transformation ? { id: transformation.id, operation: transformation.operation, parameters: transformation.parameters, report: transformation.report, engineVersion: transformation.engineVersion, at: transformation.createdAt } : null,
+      transformation: transformation
+        ? { id: transformation.id, operation: transformation.operation, parameters: transformation.parameters, report: transformation.report, engineVersion: transformation.engineVersion, at: transformation.createdAt, createdByRun: createdByRun(transformation.idempotencyKey, 'createDatasetVersion', transformation.userId) }
+        : null,
     })),
     estimates: estimates.map((e) => ({ key: e.key, graphNodeId: e.graphNodeId })),
     reproducible: { from: ['dataset version content hash', 'specification hash', 'engine version', 'seed'], resultHash: run.resultHash },

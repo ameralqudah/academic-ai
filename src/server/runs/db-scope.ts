@@ -89,13 +89,22 @@ function errorCode(error: unknown): string | null {
   return null;
 }
 
+/**
+ * Whether a database error may succeed on a retry: the connection or the
+ * server failed, not the statement. Used for the RLS probe and, mid-run, to
+ * leave a run for the reaper instead of failing it (WS3-B, R6). An error with
+ * no recognised code is never transient.
+ */
+export function isTransientDbError(error: unknown): boolean {
+  const code = errorCode(error);
+  if (!code) return false;
+  if (TRANSIENT_CODES.has(code)) return true;
+  return /^[0-9A-Z]{5}$/.test(code) && TRANSIENT_SQLSTATE_CLASSES.includes(code.slice(0, 2));
+}
+
 /** Whether a probe that threw may succeed on a retry (`transient`), or proves RLS cannot be enforced (`definitive`). */
 export function rlsProbeFailure(error: unknown): 'transient' | 'definitive' {
-  const code = errorCode(error);
-  if (!code) return 'definitive';
-  if (TRANSIENT_CODES.has(code)) return 'transient';
-  if (/^[0-9A-Z]{5}$/.test(code) && TRANSIENT_SQLSTATE_CLASSES.includes(code.slice(0, 2))) return 'transient';
-  return 'definitive';
+  return isTransientDbError(error) ? 'transient' : 'definitive';
 }
 
 /** Probe attempts before a transient failure is reported, and the waits between them. */

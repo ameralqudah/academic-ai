@@ -286,16 +286,56 @@ export interface NewStep {
   maxAttempts: number;
 }
 
-/** Records the plan and its steps, and moves the run PLANNING → RUNNING, in one transaction. */
+/** Rolls back a plan whose run could not be moved to RUNNING (WS3-B, R3). */
+class PlanNotRecorded extends Error {}
+
+/**
+ * Records the plan and its steps, and moves the run PLANNING → RUNNING, in one
+ * transaction. The move is fenced on the lease: when it does not apply (another
+ * runner holds the run now, or its state changed) the steps are rolled back
+ * with it, so a stale runner never leaves steps behind (WS3-B, R3).
+ */
 export async function recordPlan(userId: string, runId: string, plan: Record<string, unknown>, steps: NewStep[], planner: Record<string, unknown>): Promise<boolean> {
   return withRunScope(userId, async (tx) => {
-    const [run] = await tx.select().from(researchRuns).where(eq(researchRuns.id, runId)).limit(1);
+    const [run] = await tx.select().from(researchRuns).where(eq(researchRuns.id, runId)).limit(1).for('update');
     if (!run || run.status !== 'PLANNING' || run.plan) return false;
     if (steps.length) {
       await tx.insert(runSteps).values(steps.map((step) => ({ runId, seq: step.seq, tool: step.tool, toolVersion: step.toolVersion, label: step.label.slice(0, 200), dependsOn: step.dependsOn, input: step.input, maxAttempts: step.maxAttempts })));
     }
-    return transitionRun(userId, runId, ['PLANNING'], 'RUNNING', { plan, planner }, { type: 'run.planned', data: { steps: steps.length, tools: steps.map((step) => step.tool) } }, tx);
+    if (!(await transitionRun(userId, runId, ['PLANNING'], 'RUNNING', { plan, planner }, { type: 'run.planned', data: { steps: steps.length, tools: steps.map((step) => step.tool) } }, tx))) throw new PlanNotRecorded();
+    return true;
+  }).catch((error: unknown) => {
+    if (error instanceof PlanNotRecorded) return false;
+    throw error;
   });
+}
+
+/** A research-run step, found by its idempotency key: the run and step that wrote a record (WS3-B, R11). */
+export interface StepByKey {
+  runId: string;
+  stepId: string;
+  tool: string;
+  /** The run's owner, the user the step acted for. */
+  ownerId: string;
+}
+
+/**
+ * The steps of this project's runs whose idempotency keys are among `keys`,
+ * read as `userId` (row-level security decides what is visible). Keys are
+ * unique across all steps, so each key names at most one step. Only keys that
+ * have the shape of a step key are looked up.
+ */
+export async function stepsByIdempotencyKeys(userId: string, projectId: string, keys: readonly (string | null | undefined)[]): Promise<Map<string, StepByKey>> {
+  const wanted = [...new Set(keys.filter((key): key is string => typeof key === 'string' && /^[0-9a-f]{64}$/.test(key)))];
+  if (wanted.length === 0) return new Map();
+  const rows = await withRunScope(userId, (tx) =>
+    tx
+      .select({ key: runSteps.idempotencyKey, runId: runSteps.runId, stepId: runSteps.id, tool: runSteps.tool, ownerId: researchRuns.userId })
+      .from(runSteps)
+      .innerJoin(researchRuns, eq(researchRuns.id, runSteps.runId))
+      .where(and(inArray(runSteps.idempotencyKey, wanted), eq(researchRuns.projectId, projectId))),
+  );
+  return new Map(rows.filter((row) => row.key).map((row) => [row.key!, { runId: row.runId, stepId: row.stepId, tool: row.tool, ownerId: row.ownerId }]));
 }
 
 export async function readSteps(userId: string, runId: string): Promise<RunStep[]> {

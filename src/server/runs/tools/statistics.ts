@@ -45,6 +45,7 @@ export const createAnalysisSpec = defineRunTool({
       spec: input.spec,
       label: input.label ?? null,
       hypothesisIds: input.hypothesisIds ?? [],
+      /* Stored as 'assistant' (the column allows user | assistant); a run's spec is reported as origin 'run' by getProvenance, through its step key (WS3-B, R11). */
       origin: 'assistant',
       idempotencyKey: ctx.idempotencyKey,
     });
@@ -127,6 +128,16 @@ export const runAnalysis = defineRunTool({
       status = row?.status ?? status;
     }
     if (status === 'queued' || status === 'running') throw new AppError('CONFLICT', 'The analysis is still running.', 'التحليل لا يزال قيد التشغيل.', { reason: 'still_running' });
+    /*
+     * In a research run, only a succeeded analysis is a succeeded step (WS3-B,
+     * R4): a failed, refused or cancelled one fails the step, permanently (a
+     * retry with the same key returns the same statistics run), naming it. The
+     * statistics assistant keeps reading the status as before.
+     */
+    if (ctx.execution === 'run' && status !== 'succeeded') {
+      const outcome = status === 'refused' || status === 'cancelled' ? status : 'failed';
+      throw new AppError('VALIDATION', `The analysis ${outcome === 'failed' ? 'failed' : `was ${outcome}`}; nothing was computed that a later step could use.`, 'لم ينجح التحليل؛ لا نتائج تستخدمها الخطوات اللاحقة.', { reason: `analysis_${outcome}`, statRunId: run.id });
+    }
     return { output: { runId: run.id, status, queuedAsJob: Boolean(run.jobId) }, ref: { kind: 'stat_run', id: run.id } };
   },
 });

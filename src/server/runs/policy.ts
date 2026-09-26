@@ -246,6 +246,54 @@ export async function decide(request: PolicyRequest, deps: PolicyDeps = producti
   return { outcome: 'REQUIRE_APPROVAL', reason: 'approval', rules, tool: tool.name, tier, role, evaluatedAt, approval: { need, actionHash: hash } };
 }
 
+export interface PlanPreflight {
+  ok: boolean;
+  /** When refused: the stop reason to record (`cancelled` means cancel the run). */
+  stopReason?: 'cancelled' | 'policy_denied' | 'limit_tokens' | 'limit_cost' | 'limit_daily_cost';
+  role?: ProjectRole;
+  rules: RuleResult[];
+}
+
+/**
+ * The checks before a run's planner calls a model (WS3-B, R7): the same
+ * rules as `decide`, for the one model call planning makes, with the same
+ * dependencies. First refusal wins: cancelled, the feature switched off, the
+ * owner no longer an editor, then the run's and the user's budgets, each with
+ * room for one model call. Never throws for a refusal.
+ */
+export async function planPreflight(request: { userId: string; projectId: string; run: { id: string; cancelRequested: boolean } }, deps: PolicyDeps = productionPolicyDeps): Promise<PlanPreflight> {
+  const rules: RuleResult[] = [];
+  const refuse = (rule: string, detail: string, stopReason: NonNullable<PlanPreflight['stopReason']>, role?: ProjectRole): PlanPreflight => {
+    rules.push({ rule, ok: false, detail });
+    return { ok: false, stopReason, rules, ...(role ? { role } : {}) };
+  };
+  const pass = (rule: string, detail?: string) => rules.push({ rule, ok: true, ...(detail ? { detail } : {}) });
+
+  if (request.run.cancelRequested) return refuse('run.state', 'cancel requested', 'cancelled');
+  pass('run.state');
+
+  const flags = deps.flags();
+  if (!flags.graph || !flags.runs) return refuse('flag', !flags.graph ? 'FF_GRAPH off' : 'FF_RUNS off', 'policy_denied');
+  pass('flag');
+
+  const role = await deps.role(request.projectId, request.userId);
+  if (!role || RANK[role] < RANK.EDITOR) return refuse('auth.project', role ? `${role} < EDITOR` : 'not a member of this project', 'policy_denied', role ?? undefined);
+  pass('auth.project', role);
+
+  const tier = await deps.tier(request.userId);
+  const limits = deps.limits(tier);
+  const usage = await deps.runUsage(request.run.id);
+  if (usage.tokens + MODEL_CALL_ESTIMATE.tokens > limits.maxRunTokens) return refuse('limits.run', 'limit_tokens', 'limit_tokens', role);
+  if (usage.costMicroUsd + MODEL_CALL_ESTIMATE.costMicroUsd > limits.maxCostMicroUsd) return refuse('limits.run', 'limit_cost', 'limit_cost', role);
+  pass('limits.run', `tokens ${usage.tokens}, cost ${usage.costMicroUsd}`);
+
+  const daily = await deps.dailyCost(request.userId);
+  if (daily + MODEL_CALL_ESTIMATE.costMicroUsd > limits.maxDailyCostMicroUsd) return refuse('limits.user', 'limit_daily_cost', 'limit_daily_cost', role);
+  pass('limits.user', `daily cost ${daily}`);
+
+  return { ok: true, role, rules };
+}
+
 /** The policy decision as stored on a step (bounded, no inputs or secrets). */
 export function storedDecision(decision: PolicyDecision): Record<string, unknown> {
   return {

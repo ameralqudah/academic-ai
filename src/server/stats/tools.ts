@@ -57,7 +57,7 @@ export async function runAssistant(actor: StatsActor, projectId: string, dataset
  * server renders the numbers. Free-typed statistics get one correction round,
  * then the explanation is refused rather than shown.
  */
-export async function explainRun(actor: StatsActor, projectId: string, runId: string, locale: 'en' | 'ar' = 'en') {
+export async function explainRun(actor: StatsActor, projectId: string, runId: string, locale: 'en' | 'ar' = 'en', options: { signal?: AbortSignal } = {}) {
   const { run, estimates, verified } = await getRun(actor, runId, projectId);
   if (run.status !== 'succeeded') throw new AppError('CONFLICT', 'Only a succeeded run can be explained.', 'يمكن شرح تشغيل ناجح فقط.');
   const byKey = new Map(estimates.map((e) => [e.key, e]));
@@ -72,7 +72,8 @@ export async function explainRun(actor: StatsActor, projectId: string, runId: st
 
   return withCallIds({ projectId }, async () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await gateway().generate({ purpose: 'stats.explain', system, messages, maxOutputTokens: 1500, temperature: 0.2, countsAsRequest: attempt === 0, continuation: attempt > 0 });
+      /* A research run's step passes its signal: cancel, timeout or a lost lease stops the call (WS3-B, R5). */
+      const response = await gateway().generate({ purpose: 'stats.explain', system, messages, maxOutputTokens: 1500, temperature: 0.2, countsAsRequest: attempt === 0, continuation: attempt > 0 }, options.signal ? { signal: options.signal } : {});
       const text = response.text.trim();
       const untraced = untracedStatistics(text, { strict: true });
       const unknown = tokensIn(text).filter((key) => !byKey.has(key));

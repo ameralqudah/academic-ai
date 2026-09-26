@@ -109,7 +109,7 @@ export const extractEvidence = defineRunTool({
   estimatedModelCalls: 1,
   resources: () => [],
   approval: async () => null,
-  async execute(input) {
+  async execute(input, ctx) {
     const response = await gateway().generateStructured(
       {
         purpose: 'runs.extractEvidence',
@@ -120,6 +120,8 @@ export const extractEvidence = defineRunTool({
         countsAsRequest: false,
       },
       EVIDENCE,
+      /* Cancel, timeout or a lost lease stops the model call too (WS3-B, R5). */
+      { signal: ctx.signal },
     );
     const source = normalise(input.text);
     const kept = response.data.evidence.filter((item) => source.includes(normalise(item.quote)));

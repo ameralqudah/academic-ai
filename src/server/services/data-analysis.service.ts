@@ -27,6 +27,7 @@ import { asksForCharts, asksForEverything, columnsNamedIn } from './data-request
 import { loadForAnalysis } from './dataset.service';
 import { runCbSem, runPls } from './pls.service';
 import { runAnalysis } from './statistics.service';
+import { legacyProvenance, type LegacyProvenance } from '@/server/stats/legacy-provenance';
 
 export type DisplayKind =
   | 'profile'
@@ -47,7 +48,19 @@ export interface AnalysisDisplay {
 }
 
 export type DataAnalysisOutcome =
-  | { status: 'done'; displays: AnalysisDisplay[]; roles?: RoleAssignment[]; test?: string }
+  | {
+      status: 'done';
+      displays: AnalysisDisplay[];
+      roles?: RoleAssignment[];
+      test?: string;
+      /**
+       * The data this request read: dataset version, content hash, legacy
+       * engine and row window (WS2 B4). The descriptive tables and the profile
+       * have no run of their own; this is what tiers them, so a table computed
+       * on the first rows of a file is never a source of allowed numbers.
+       */
+      provenance?: LegacyProvenance;
+    }
   | { status: 'question'; question: string; displays: AnalysisDisplay[] };
 
 export { columnsNamedIn, isDataIntent } from './data-requests';
@@ -138,6 +151,8 @@ export async function analyseDataRequest(input: {
 
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
   const profile = loaded.profile;
+  /* Recorded on every finished outcome read from this load; never blocks it (see `legacyProvenance`). */
+  const read = () => legacyProvenance(loaded);
   const profileDisplay: AnalysisDisplay = { kind: 'profile', payload: profile as unknown as Record<string, unknown> };
 
   if (input.intent === 'data.inspect' || input.intent === 'data.describe') {
@@ -156,8 +171,8 @@ export async function analyseDataRequest(input: {
         ]
       : [];
 
-    if (!asksForEverything(input.message)) return { status: 'done', displays: [tables, ...figures] };
-    return { status: 'done', displays: [tables, ...figures, ...(await everythingElse(input, profile))] };
+    if (!asksForEverything(input.message)) return { status: 'done', displays: [tables, ...figures], provenance: await read() };
+    return { status: 'done', displays: [tables, ...figures, ...(await everythingElse(input, profile))], provenance: await read() };
   }
 
   if (input.intent === 'stats.cbSem' || input.intent === 'stats.plsSem') {
@@ -168,6 +183,7 @@ export async function analyseDataRequest(input: {
     return {
       status: 'done',
       displays: [profileDisplay, { kind: 'cleaning', payload: { proposals: planCleaning(profile) } }],
+      provenance: await read(),
     };
   }
 
@@ -204,6 +220,7 @@ export async function analyseDataRequest(input: {
       roles: inferred.roles,
       test: 'reliability.cronbachAlpha',
       displays: [{ kind: 'reliability', payload: outcome.result as Record<string, unknown>, runId: outcome.run.id }],
+      provenance: await read(),
     };
   }
 
@@ -242,6 +259,7 @@ export async function analyseDataRequest(input: {
       recommendationDisplay,
       { kind: 'analysis', payload: outcome.result as Record<string, unknown>, runId: outcome.run.id },
     ],
+    provenance: await read(),
   };
 }
 

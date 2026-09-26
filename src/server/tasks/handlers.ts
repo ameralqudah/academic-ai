@@ -62,6 +62,16 @@ import { broaden, topicOf } from './query';
 import { instructionFrom } from './step-instruction';
 import { sourcesAsMaterial } from './found-sources';
 import { noDataRule } from '@/server/tasks/no-data-rule';
+import {
+  collectTaskResults,
+  exportTables,
+  guardTaskProse,
+  LONG_HEADERS,
+  longRows,
+  PROVENANCE_HEADERS,
+  provenanceRows,
+  researcherText,
+} from '@/server/tasks/task-integrity';
 import { latestEarlierWork } from '@/server/agent/earlier-work';
 import { extractDiagramSpec } from '@/server/diagrams/extract';
 import { layoutDiagram } from '@/server/diagrams/layout';
@@ -895,12 +905,17 @@ export function registerAllHandlers(): void {
      * This filtered dependency keys starting with `statistics.`, which meant
      * adding a statistical capability required remembering to name it
      * consistently or the writing step would silently ignore its results.
+     *
+     * Tiered like every legacy result (WS2 B4): computed, never "verified",
+     * and a windowed one (the first rows of a file only) is not given to the
+     * model at all — its numbers are not the study's (D3).
      */
-    const analysisBlock = [
-      ...readAllOutputs<Record<string, unknown>>(context.available, 'pls-results.v1'),
-      ...readAllOutputs<Record<string, unknown>>(context.available, 'analysis.v1'),
-    ]
-      .map((result) => `\n\nAnalysis results: ${boundedJson(result, 4000)}`)
+    const computed = await collectTaskResults(context.available, context.userId);
+    const analysisBlock = context.available
+      .filter((output) => (output.type === 'pls-results.v1' || output.type === 'analysis.v1') && !computed.excludedOutputs.has(output.id))
+      .map((output) => output.data)
+      .filter((data): data is Record<string, unknown> => Boolean(data) && typeof data === 'object')
+      .map((result) => `\n\nAnalysis results (computed by the legacy analysis engine, not independently verified): ${boundedJson(result, 4000)}`)
       .join('');
 
     /*
@@ -955,18 +970,48 @@ export function registerAllHandlers(): void {
       locale: language,
     });
 
-    const text = generated.text;
-    if (text.trim().length < 40) {
+    if (generated.text.trim().length < 40) {
       return failed([
         {
           code: 'write.empty',
           severity: 'error',
           message: `The model returned no usable text for "${section}".`,
           reference: section,
-          metadata: { returned: text.length },
+          metadata: { returned: generated.text.length },
         },
       ]);
     }
+
+    /*
+     * Quarantined before it becomes an output (WS2 B4, the A4 rule). A
+     * research number stays only if it traces to an eligible analysis result
+     * (windowed ones contribute nothing), within its class, or was written in
+     * the researcher's own request or answers. The planner's step input and
+     * earlier prose authorize nothing. Finished and unfinished text alike, so
+     * a continuation starts from the guarded text.
+     */
+    const guarded = guardTaskProse(generated.text, {
+      allowed: computed.allowed,
+      stated: researcherText(context.context),
+      language,
+    });
+    const text = guarded.text;
+    const quarantineWarnings: Finding[] =
+      guarded.quarantined > 0
+        ? [
+            {
+              code: 'write.quarantined',
+              severity: 'warning',
+              message: `${guarded.quarantined} number(s) in "${section}" traced to no analysis result or to the researcher's request, and were replaced with a marker.`,
+              reference: section,
+              metadata: { quarantined: guarded.quarantined, guardVersion: guarded.check.guardVersion },
+            },
+          ]
+        : [];
+    if (guarded.quarantined > 0) {
+      logger.info('task.write.quarantined', { taskId: context.taskId, quarantined: guarded.quarantined, guardVersion: guarded.check.guardVersion });
+    }
+
     const notice = incompleteNotice(generated, language);
     const body = notice ? `${text}\n\n${notice}` : text;
 
@@ -978,6 +1023,7 @@ export function registerAllHandlers(): void {
             references,
             heading: section,
             complete: false,
+            integrity: guarded.integrity,
           }),
         ],
         [language === 'ar' ? 'بقيّة النصّ' : 'the rest of the text'],
@@ -989,6 +1035,7 @@ export function registerAllHandlers(): void {
               message: `Generation stopped early (${generated.incompleteReason ?? 'unknown'}) after ${generated.rounds} rounds.`,
               reference: section,
             },
+            ...quarantineWarnings,
           ],
           confidence: 0.5,
           recommendedNextActions: [
@@ -1007,26 +1054,28 @@ export function registerAllHandlers(): void {
           text,
           references,
           heading: section,
+          integrity: guarded.integrity,
         }),
       ],
       {
         modelCalls: 2,
-        /*
-         * Reported when writing had no sources. Not an error — a methodology
-         * section legitimately cites nothing — but the replanner should know
-         * the section rests on no evidence.
-         */
-        ...(references.length === 0
-          ? {
-              warnings: [
+        warnings: [
+          /*
+           * Reported when writing had no sources. Not an error — a methodology
+           * section legitimately cites nothing — but the replanner should know
+           * the section rests on no evidence.
+           */
+          ...(references.length === 0
+            ? [
                 {
                   code: 'write.noSources',
                   severity: 'info' as const,
                   message: `"${section}" was written without sources`,
                 },
-              ],
-            }
-          : {}),
+              ]
+            : []),
+          ...quarantineWarnings,
+        ],
       },
     );
   });
@@ -1259,6 +1308,8 @@ export function registerAllHandlers(): void {
     };
 
     let bytes: Uint8Array;
+    /* Said about a data export: results left out of it (WS2 B4). */
+    const exportWarnings: Finding[] = [];
 
     if (kind === 'docx') {
       /*
@@ -1314,47 +1365,65 @@ export function registerAllHandlers(): void {
         })),
         { rtl: context.locale === 'ar' },
       );
-    } else if (kind === 'xlsx') {
+    } else if (kind === 'xlsx' || kind === 'csv') {
       /*
-       * Tables from the steps that produced them. A spreadsheet request follows
-       * an analysis, and the analysis output is where the numbers are — asking
-       * the planner to restate them in the step input would mean the figures
-       * exist twice and can disagree.
+       * Computed results only (WS2 B4, D5). The tables come from the analyses
+       * earlier steps produced, tiered like every legacy result: windowed
+       * ones (the first rows of a file) are left out, and nothing is labelled
+       * verified. The planner's `input.table` is never read — a table a
+       * language model wrote into a step input is not a computed result — so
+       * with no eligible analysis there is no file, only a plain failure.
        */
-      /*
-       * Tables read by type, from whichever step produced them. The analysis
-       * output is where the numbers are — asking the planner to restate them in
-       * the step input would mean the figures exist twice and can disagree.
-       *
-       * `analysis.v1` and `pls-results.v1` both carry tables, and reading both
-       * means a spreadsheet request works after either kind of analysis.
-       */
-      const sheets: { name: string; headers: string[]; rows: never[] }[] = [];
+      const exported = await collectTaskResults(context.available, context.userId);
+      const tables = exportTables(exported.eligible);
+      /* The provenance of what is in the file: a result with no table of its own (a profile) is not listed. */
+      const sources = exported.eligible.filter((result) => tables.some((table) => table.source === result.source));
 
-      for (const type of ['analysis.v1', 'pls-results.v1'] as const) {
-        for (const found of readAllOutputs<{
-          table?: { headers: string[]; rows: unknown[][] };
-          label?: string;
-        }>(context.available, type)) {
-          if (!found.table) continue;
-
-          sheets.push({
-            name: found.label ?? type.replace('.v1', ''),
-            headers: found.table.headers,
-            rows: found.table.rows as never,
-          });
-        }
+      if (tables.length === 0) {
+        const windowedOnly = exported.results.length > 0 && exported.eligible.length === 0;
+        return failed([
+          windowedOnly
+            ? {
+                code: 'export.windowedOnly',
+                severity: 'error',
+                message: say(
+                  context,
+                  'No file was produced: every analysis here was computed on only the first rows of a file, so its figures are not the study\'s. Run the analysis on the whole file, then ask again.',
+                  'لم يُنتَج ملف: كل تحليل هنا حُسب على الصفوف الأولى من الملف فقط، فأرقامه لا تمثّل الدراسة. شغّل التحليل على الملف كاملًا ثم أعد الطلب.',
+                ),
+                metadata: { format: kind, windowed: exported.results.length },
+              }
+            : {
+                code: 'export.noAnalysis',
+                severity: 'error',
+                message: say(
+                  context,
+                  'No file was produced: there is no computed analysis result to export. Run an analysis first, then ask for the file.',
+                  'لم يُنتَج ملف: لا توجد نتائج تحليل محسوبة لتصديرها. شغّل التحليل أولًا ثم اطلب الملف.',
+                ),
+                metadata: { format: kind },
+              },
+        ]);
       }
 
-      const own = context.input.table as { headers: string[]; rows: unknown[][] } | undefined;
-      if (own) sheets.push({ name: 'Data', headers: own.headers, rows: own.rows as never });
+      if (exported.results.length > exported.eligible.length) {
+        exportWarnings.push({
+          code: 'export.windowedExcluded',
+          severity: 'warning',
+          message: `${exported.results.length - exported.eligible.length} analysis result(s) computed on only the first rows of a file were left out.`,
+          metadata: { excluded: exported.results.length - exported.eligible.length },
+        });
+      }
 
-      bytes = await generateXlsx(sheets);
+      bytes =
+        kind === 'xlsx'
+          ? await generateXlsx([
+              ...tables.map((table) => ({ name: `${table.source} ${table.name}`, headers: table.headers, rows: table.rows })),
+              { name: 'Provenance', headers: PROVENANCE_HEADERS, rows: provenanceRows(sources) },
+            ])
+          : generateCsv(LONG_HEADERS, longRows(tables, sources));
     } else if (kind === 'txt') {
       bytes = generateTxt(content);
-    } else if (kind === 'csv') {
-      const table = context.input.table as { headers: string[]; rows: unknown[][] } | undefined;
-      bytes = generateCsv(table?.headers ?? [], (table?.rows ?? []) as never);
     } else if (kind === 'bib') {
       bytes = new TextEncoder().encode(toBibTeX(references));
     } else if (kind === 'ris') {
@@ -1481,7 +1550,7 @@ export function registerAllHandlers(): void {
             validationStatus: artifact.validationStatus,
           },
         ],
-        warnings: substitution,
+        warnings: [...substitution, ...exportWarnings],
       },
     );
   });
@@ -1900,6 +1969,8 @@ export function registerAllHandlers(): void {
           display,
           ...(outcome.test ? { test: outcome.test } : {}),
           ...(outcome.roles ? { roles: outcome.roles } : {}),
+          /* The data read (WS2 B4): what tiers the tables with no run of their own. */
+          ...(outcome.provenance ? { provenance: outcome.provenance } : {}),
         }),
       ),
       {

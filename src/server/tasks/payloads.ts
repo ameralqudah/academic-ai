@@ -19,6 +19,7 @@
 import type { Reference } from '@/server/quality/sources';
 import type { QualityReport } from '@/server/quality/engine';
 import type { LegacyProvenance } from '@/server/stats/legacy-provenance';
+import type { SectionIntegrity } from '@/server/integrity/section';
 
 /** `sources.v1` — retrieved sources, from any search capability. */
 export interface SourcesPayload {
@@ -129,6 +130,12 @@ export interface ProsePayload {
   references: Reference[];
   /** Which section of a document this is, when it is one. */
   section?: string;
+  /**
+   * What the numeric guard found in model-written prose (WS2 B4): untraced
+   * research numbers were replaced by the quarantine marker before the
+   * output existed. Absent on outputs written before it.
+   */
+  integrity?: SectionIntegrity;
 }
 
 /** `citations.v1` — references with their verification status. */

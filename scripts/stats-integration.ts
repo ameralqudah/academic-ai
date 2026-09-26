@@ -204,6 +204,22 @@ async function main() {
   check('the claim citing the old run is no longer current', (await graph.assess(P, me, claim.claim.id)).effective !== 'current', true);
   check('citing the replaced run is refused', await outcome(() => insertClaim(me, P, run.id, { keys: ['coef:x'] })), 'CONFLICT');
 
+  /* WS3-A (N6): a claim's text and evidence never change; the stale claim is replaced through the strict path. */
+  const claimRows = async () => (await db.select().from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'claim')))).length;
+  const beforeReplace = await claimRows();
+  check('a replacement still refuses typed numbers, and writes nothing', [await outcome(() => insertClaim(me, P, replacement.id, { keys: ['coef:x'], text: 'X predicted Y (b = 0.31).', supersedes: claim.claim.id })), await claimRows()], ['VALIDATION', beforeReplace]);
+  const corrected = await insertClaim(me, P, replacement.id, { keys: ['coef:x'], text: 'X predicted Y ({{value:coef:x}}).', supersedes: claim.claim.id });
+  const [oldClaimNode] = await db.select().from(graphNodes).where(eq(graphNodes.id, claim.claim.id));
+  const supersedesEdge = await db.select().from(graphEdges).where(and(eq(graphEdges.srcId, corrected.claim.id), eq(graphEdges.rel, 'supersedes')));
+  check(
+    'the stale claim is replaced from the new run: new claim current, old claim superseded and unchanged, supersedes recorded',
+    [(await graph.assess(P, me, corrected.claim.id)).effective, oldClaimNode?.status, (oldClaimNode?.data as { text?: string }).text === claim.text, supersedesEdge[0]?.dstId, await claimRows()],
+    ['current', 'superseded', true, claim.claim.id, beforeReplace + 1],
+  );
+  check('a claim is replaced only once', [await outcome(() => insertClaim(me, P, replacement.id, { keys: ['coef:x'], supersedes: claim.claim.id })), await claimRows()], ['CONFLICT', beforeReplace + 1]);
+  check('an unknown claim cannot be replaced', [await outcome(() => insertClaim(me, P, replacement.id, { keys: ['coef:x'], supersedes: crypto.randomUUID() })), await claimRows()], ['NOT_FOUND', beforeReplace + 1]);
+  check('claim text cannot be edited in the graph', await outcome(async () => { const [node] = await db.select().from(graphNodes).where(eq(graphNodes.id, corrected.claim.id)); await graph.updateNode(P, me, corrected.claim.id, { data: { ...(node!.data as object), text: 'X predicted Y (b = 9.99).' }, expectedVersion: node!.currentVersion }); }), 'CONFLICT');
+
   /* ------------------------------------------------------------------ */
   section('Replacing the data: every run on the old version becomes stale');
   const freshClaim = await insertClaim(me, P, replacement.id, { keys: ['coef:x'] });

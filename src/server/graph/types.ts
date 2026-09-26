@@ -302,6 +302,8 @@ const FIELD_CLASSES: Partial<Record<NodeType, { cosmetic?: string[]; structural?
  */
 export const IMMUTABLE_FIELDS: Partial<Record<NodeType, readonly string[]>> = {
   dataset_version: ['contentHash', 'rows', 'storageKey'],
+  /* A claim's wording is what its evidence was checked against (WS3-A, N6): a correction is a new claim that supersedes it. */
+  claim: ['text'],
 };
 
 /** The immutable fields a proposed payload would change. */

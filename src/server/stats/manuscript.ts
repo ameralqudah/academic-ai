@@ -76,6 +76,14 @@ export interface InsertClaimInput {
    * its run and step as provenance). Must be the same user as `actor`.
    */
   actor?: graph.Actor;
+  /**
+   * WS3-A (N6): a claim's text and evidence never change, so a correction is
+   * a new claim that supersedes the old one, in one transaction. When the old
+   * claim has dependents, the first attempt is refused with its Impact Report
+   * and nothing is written; resend with that report's hash.
+   */
+  supersedes?: string;
+  impactAcknowledged?: string;
 }
 
 export async function insertClaim(actor: StatsActor, projectId: string, runId: string, input: InsertClaimInput) {
@@ -110,6 +118,7 @@ export async function insertClaim(actor: StatsActor, projectId: string, runId: s
     label: text.slice(0, 200),
     reportIds: keys.map((key) => byKey.get(key)!.graphNodeId!),
     blockId: input.blockId ?? null,
+    ...(input.supersedes ? { supersedes: input.supersedes, impactAcknowledged: input.impactAcknowledged } : {}),
   });
   return { claim, text, keys };
 }

@@ -191,10 +191,10 @@ async function main() {
     await node('EV', 'evidence', { text: 'β = .35 in a US sample' });
     await node('SEC', 'section', { key: 'results', text: '' });
     await node('B1', 'block', { text: 'H1 was supported (β = .42, p < .001).' });
-    await node('CL', 'claim', { text: 'β = .42, p < .001' });
     await node('B2', 'block', { text: 'Trust is defined as…' });
     await node('B3', 'block', { text: 'As Gefen et al. (2003) show, trust predicts adoption.' });
-    await node('CL2', 'claim', { text: 'trust predicts adoption' });
+    /* A literature claim reports no research number, so it may be written by hand (WS3-A). */
+    await node('CL2', 'claim', { text: 'As Gefen et al. (2003) show, trust predicts adoption.' });
     await node('B4', 'block', { text: 'We hypothesise that trust…' });
     await node('B5', 'block', { text: 'Item TR1 asked…' });
     await node('ABS', 'block', { text: 'Abstract…' });
@@ -265,10 +265,11 @@ async function main() {
     remember('V', recorded.outputs.V!.id);
     remember('TBL', recorded.outputs.TBL!.id);
 
+    /* The numeric claim, through the strict claim path (WS3-A): the claim, its report of V and B1's assertion, in one transaction. */
+    remember('CL', (await graph.createClaim(P, me, { text: 'β = .42, p < .001', label: 'CL', reportIds: [ids.V!], blockId: ids.B1! })).id);
+
     const manuscript: [string, string, string][] = [
       ['SEC', 'has_block', 'B1'],
-      ['B1', 'asserts', 'CL'],
-      ['CL', 'reports', 'V'],
       ['B2', 'describes', 'C'],
       ['B3', 'asserts', 'CL2'],
       ['CL2', 'cites', 'CI'],
@@ -501,35 +502,41 @@ async function main() {
     check('its value is unchanged and still traceable to it', [(await f.get('V')).data.value, (await graph.trace(f.P, me, f.ids.V!, 'up', 1)).nodes.some((n) => n.id === f.ids.R)], [0.42, true]);
     check('the new run is current, pinned to the new spec, and verified', [(await f.currency('R2')).effective, (await f.edgeOf('R2', 'executes', 'A')).dstVersion, (await f.currency('V2')).verification], ['current', 2, 'verified']);
     check('the old run’s record cannot be removed', await outcome(async () => graph.unlink(f.P, me, (await f.edgeOf('V', 'produced_by', 'R')).id)), 'CONFLICT:engine_record');
-    check('the old value cannot be newly cited as current', await outcome(async () => { await f.node('B6', 'block', { text: 'β = .42' }); await f.link('B6', 'reports', 'V'); }), 'CONFLICT:stale_target');
-    await f.link('B6', 'reports', 'V', { allowStaleTarget: true });
-    check('… and when cited on purpose, the citing text is out of date at once (F-3)', [await f.status('B6'), (await f.currency('B6')).verification], ['stale', 'not_current']);
+    /* Text cannot report a value by hand at all (WS3-A); a cross-reference to an old value still behaves as before. */
+    check('text cannot report a value by hand, current or not (WS3-A)', await outcome(async () => { await f.node('B6', 'block', { text: 'β = .42' }); await f.link('B6', 'reports', 'V'); }), 'FORBIDDEN:strict_claim_path');
+    check('the old value cannot be newly referred to as current', await outcome(() => f.link('B6', 'refers_to', 'V')), 'CONFLICT:stale_target');
+    await f.link('B6', 'refers_to', 'V', { allowStaleTarget: true });
+    check('… and when referred to on purpose, the text is out of date at once (F-3)', [await f.status('B6'), (await f.currency('B6')).effective], ['stale', 'superseded_input']);
 
-    // Re-pointing the manuscript to the new run.
-    const oldReport = await f.edgeOf('CL', 'reports', 'V');
-    await acknowledged((ack) => graph.unlink(f.P, me, oldReport.id, ack));
-    await f.link('CL', 'reports', 'V2');
-    await f.update('CL', { text: 'β = .40, p = .001' });
-    await f.resolve('CL', 'regenerated');
+    // Re-pointing the manuscript to the new run: a replacement claim through the strict path (WS3-A, N6).
+    const claimCount = async () => (await db.select().from(graphNodes).where(and(eq(graphNodes.projectId, f.P), eq(graphNodes.type, 'claim')))).length;
+    const before = await claimCount();
+    check(
+      'a replacement citing the old, replaced value is refused, and nothing is written (rollback)',
+      [await outcome(() => acknowledged((ack) => graph.createClaim(f.P, me, { text: 'β = .42', reportIds: [f.ids.V!], blockId: f.ids.B1!, supersedes: f.ids.CL!, impactAcknowledged: ack }))), await claimCount(), await f.status('CL')],
+      ['CONFLICT:stale_target', before, 'stale'],
+    );
+    const replacement = await acknowledged((ack) => graph.createClaim(f.P, me, { text: 'β = .40, p = .001', label: 'CL3', reportIds: [f.ids.V2!], blockId: f.ids.B1!, supersedes: f.ids.CL!, impactAcknowledged: ack }));
+    f.remember('CL3', replacement.id);
+    /* The replacement names B1, so B1's assertion moved to the new claim in the same transaction (WS3-A). */
+    check('the block now asserts the replacement, not the replaced claim', [(await f.edgeOf('B1', 'asserts', 'CL3')).srcId, (await f.edgeOf('B1', 'asserts', 'CL')) ?? null], [f.ids.B1!, null]);
     for (const key of ['B1', 'SEC']) await f.resolve(key, 'accepted');
-    check('re-pointed and rewritten, the claim is current and verified again', [(await f.currency('CL')).effective, (await f.currency('CL')).verification, (await f.currency('B1')).verification], ['current', 'verified', 'verified']);
+    check(
+      'replaced through the strict path: the new claim is current and verified, the old one superseded and kept, the text verified again',
+      [(await f.currency('CL3')).effective, (await f.currency('CL3')).verification, await f.status('CL'), (await f.get('CL')).data.text, (await f.edgeOf('CL3', 'supersedes', 'CL')).rel, (await f.currency('B1')).verification],
+      ['current', 'verified', 'superseded', 'β = .42, p < .001', 'supersedes', 'verified'],
+    );
+    check('the old claim cannot be replaced twice, and nothing is written', [await outcome(() => acknowledged((ack) => graph.createClaim(f.P, me, { text: 'β = .40', reportIds: [f.ids.V2!], supersedes: f.ids.CL!, impactAcknowledged: ack }))), await claimCount()], ['CONFLICT:already_superseded', before + 1]);
   }
 
   console.log('\nD. Result provenance removed');
   {
     const f = await fixture();
     const edge = await f.edgeOf('CL', 'reports', 'V');
-    const refusal = await graph.unlink(f.P, me, edge.id).catch((error: unknown) => error);
-    check('removing the link behind a reported number needs acknowledgement', refusal instanceof AppError && refusal.code, 'IMPACT_ACK_REQUIRED');
-    const report = ((refusal as AppError).details as { report: graph.ImpactReport }).report;
-    check('the claim is marked untraced, and the text around it flagged', [report.items[0]?.kind, f.name(report.items[0]!.nodeId), report.items.some((i) => i.nodeId === f.ids.B1)], ['untraced', 'CL', true]);
-    await graph.unlink(f.P, me, edge.id, report.hash);
-    check('the claim can no longer read as verified or current', [(await f.currency('CL')).effective, (await f.currency('CL')).verification, (await f.currency('B1')).verification], ['untraced', 'untraced', 'untraced']);
-    check('it cannot be accepted without its evidence', await outcome(() => f.resolve('CL', 'accepted')), 'CONFLICT:provenance_required');
-    check('nor marked regenerated without being redone', await outcome(() => f.resolve('CL', 'regenerated')), 'CONFLICT:not_regenerated');
-    await f.link('CL', 'reports', 'V');
-    await f.resolve('CL', 'regenerated');
-    check('re-linked to its value, it is traced again', (await f.currency('CL')).verification, 'verified');
+    /* A claim's evidence is part of the claim (WS3-A, N6): it is never removed, with or without acknowledgement. */
+    check('removing the link behind a claim’s reported number is refused', [await outcome(() => graph.unlink(f.P, me, edge.id)), await outcome(() => acknowledged((ack) => graph.unlink(f.P, me, edge.id, ack)))], ['CONFLICT:claim_record', 'CONFLICT:claim_record']);
+    check('the claim and the text asserting it stay current and verified', [(await f.currency('CL')).effective, (await f.currency('CL')).verification, (await f.currency('B1')).verification], ['current', 'verified', 'verified']);
+    check('the evidence link is still there, unchanged', [(await f.edgeOf('CL', 'reports', 'V')).id, (await f.edgeOf('CL', 'reports', 'V')).dstVersion], [edge.id, edge.dstVersion]);
   }
 
   console.log('\nE. Moderation / mediation / measurement changes');
@@ -583,9 +590,9 @@ async function main() {
     check('a typed-in value is classified manual', manual.provenance, 'manual');
     check('it cannot be attached to a run', await outcome(() => graph.link(f.P, me, { srcId: manual.id, rel: 'produced_by', dstId: f.ids.R! })), 'FORBIDDEN:engine_only');
     await f.node('B7', 'block', { text: 'β = .51 (from the pilot)' });
-    await f.link('B7', 'reports', 'MV');
-    check('text reporting it is shown as manual, never verified', (await f.currency('B7')).verification, 'manual');
-    check('a value mixing manual and computed evidence is manual', await (async () => { await f.link('B7', 'reports', 'V'); return (await f.currency('B7')).verification; })(), 'manual');
+    /* WS3-A (D-A1): no hand-made `reports` link to any result, typed-in or computed. */
+    check('text cannot report a typed-in value by hand (WS3-A)', await outcome(() => f.link('B7', 'reports', 'MV')), 'FORBIDDEN:strict_claim_path');
+    check('nor a computed one', await outcome(() => f.link('B7', 'reports', 'V')), 'FORBIDDEN:strict_claim_path');
     check('a manual value can be corrected and stays manual', [await outcome(() => f.update('MV', { value: 0.52 })), (await f.get('MV')).provenance], ['ok', 'manual']);
     check('a computed result cannot gain new dependencies', await outcome(() => graph.link(f.P, me, { srcId: f.ids.TBL!, rel: 'contains_value', dstId: manual.id })), 'CONFLICT:immutable_node');
     check('but a verdict can still be attached to it', await outcome(async () => { await f.node('H2', 'hypothesis', { statement: 'Trust reduces anxiety' }); await graph.link(f.P, me, { srcId: f.ids.V!, rel: 'tests', dstId: f.ids.H2! }); }), 'ok');
@@ -677,6 +684,174 @@ async function main() {
       { dependentsOf: async (ids) => cycle.filter((edge) => ids.includes(edge.dstId)), dependenciesOf: async () => [] },
     );
     check('a cycle terminates and never flags the changed node', cyclic.items.map((i) => i.nodeId), ['y']);
+  }
+
+  console.log('\nWS3-A: claims only through the strict claim path (N5, N6)');
+  {
+    const f = await fixture();
+    const agent: graph.Actor = { userId: owner, origin: 'agent' };
+    const claimsIn = async (projectId: string) => (await db.select().from(graphNodes).where(and(eq(graphNodes.projectId, projectId), eq(graphNodes.type, 'claim')))).length;
+    const reportsIn = async (projectId: string) => (await db.select().from(graphEdges).where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'reports')))).length;
+    const supersedesIn = async (projectId: string) => (await db.select().from(graphEdges).where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'supersedes')))).length;
+    const claims0 = await claimsIn(f.P);
+    const reports0 = await reportsIn(f.P);
+
+    /* N5: no claim that reports a research number through createNode, by any actor. */
+    check(
+      'createNode refuses a numeric claim for a person, an agent and the engine, and writes nothing',
+      [
+        await outcome(() => graph.createNode(f.P, me, { type: 'claim', data: { text: 'β = .42' } })),
+        await outcome(() => graph.createNode(f.P, agent, { type: 'claim', data: { text: 'Trust predicted adoption, p < .001.' } })),
+        await outcome(() => graph.createNode(f.P, engine, { type: 'claim', data: { text: 'β = .42' } })),
+        await claimsIn(f.P),
+      ],
+      ['FORBIDDEN:strict_claim_path', 'FORBIDDEN:strict_claim_path', 'FORBIDDEN:strict_claim_path', claims0],
+    );
+    const handWritten = (text: string) => outcome(() => graph.createNode(f.P, me, { type: 'claim', data: { text } }));
+    check(
+      'every form of research number is refused: statistic, sample size, decimal, percentage, test with df, Arabic digits, a value reference',
+      [
+        await handWritten('N = 250 participants took part.'),
+        await handWritten('The correlation was 0.42.'),
+        await handWritten('35% of students adopted the system.'),
+        await handWritten('t(98) = 2.31 for the difference.'),
+        await handWritten('بلغ معامل الارتباط ر = ٠٫٤٢'),
+        await handWritten('Trust predicts adoption ({{value:beta_trust}}).'),
+        await claimsIn(f.P),
+      ],
+      [...Array(6).fill('FORBIDDEN:strict_claim_path'), claims0],
+    );
+    const refused = await graph.createNode(f.P, me, { type: 'claim', data: { text: 'Trust predicted adoption (β = .42, p < .001).' } }).catch((error: unknown) => error);
+    check('the refusal names the numbers it found', ((refused as AppError).details as { spans: string[] }).spans, ['β = .42', 'p < .001']);
+    const literature = await graph.createNode(f.P, me, { type: 'claim', label: 'LIT', data: { text: 'Gefen et al. (2003) found that trust predicts the adoption of online services among 240 students.' } });
+    check(
+      'a claim with no research number (a literature claim: citation year, a count in prose) is written by hand, with no reported value',
+      [literature.type, (await db.select().from(graphEdges).where(and(eq(graphEdges.srcId, literature.id), eq(graphEdges.rel, 'reports')))).length, await claimsIn(f.P)],
+      ['claim', 0, claims0 + 1],
+    );
+    check(
+      'it can never gain a number: its text is immutable and it cannot report a value',
+      [
+        await outcome(() => graph.updateNode(f.P, me, literature.id, { data: { text: 'Trust predicts adoption (β = .42).' }, expectedVersion: literature.currentVersion })),
+        await outcome(() => graph.link(f.P, me, { srcId: literature.id, rel: 'reports', dstId: f.ids.V! })),
+      ],
+      ['CONFLICT:immutable_field', 'FORBIDDEN:strict_claim_path'],
+    );
+
+    /* N5 / D-A1: no `reports` edge except the ones createClaim writes. */
+    const typed = await graph.createNode(f.P, me, { type: 'result_value', label: 'typed', data: { stat: 'beta', value: 0.3 } });
+    const block = await graph.createNode(f.P, me, { type: 'block', data: { text: 'β = .42' } });
+    const tryReport = (actor: graph.Actor, srcId: string, dstId: string) => outcome(() => graph.link(f.P, actor, { srcId, rel: 'reports', dstId }));
+    check(
+      'no reports link by hand: block → computed, block → typed-in, claim → computed, claim → table, by any actor; nothing written',
+      [
+        await tryReport(me, block.id, f.ids.V!),
+        await tryReport(me, block.id, typed.id),
+        await tryReport(me, f.ids.CL!, f.ids.V!),
+        await tryReport(me, f.ids.CL2!, f.ids.TBL!),
+        await tryReport(agent, block.id, f.ids.V!),
+        await tryReport(engine, block.id, f.ids.V!),
+        await reportsIn(f.P),
+      ],
+      [...Array(6).fill('FORBIDDEN:strict_claim_path'), reports0],
+    );
+    check('every reports edge in the project was written with its claim by createClaim', (await db.select().from(graphEdges).where(and(eq(graphEdges.projectId, f.P), eq(graphEdges.rel, 'reports')))).map((edge) => edge.srcId), [f.ids.CL!]);
+    check('a typed-in value keeps its manual provenance', typed.provenance, 'manual');
+
+    /* N6: claim text immutable; label and span still editable. */
+    const cl = await f.get('CL');
+    check(
+      'claim text cannot be edited (immutable_field); nothing changes',
+      [await outcome(() => graph.updateNode(f.P, me, f.ids.CL!, { data: { ...cl.data, text: 'β = .99, p < .001' }, expectedVersion: cl.currentVersion })), (await f.get('CL')).data.text, (await f.get('CL')).currentVersion],
+      ['CONFLICT:immutable_field', 'β = .42, p < .001', cl.currentVersion],
+    );
+    check(
+      'its label and span can still change',
+      [
+        await outcome(() => graph.updateNode(f.P, me, f.ids.CL!, { label: 'H1 result', expectedVersion: cl.currentVersion })),
+        await outcome(async () => { const now = await f.get('CL'); await graph.updateNode(f.P, me, f.ids.CL!, { data: { ...now.data, span: [0, 12] }, expectedVersion: now.currentVersion }); }),
+        (await f.get('CL')).data.text,
+      ],
+      ['ok', 'ok', 'β = .42, p < .001'],
+    );
+    check('a claim keeps its evidence: its reports edge cannot be removed (claim_record)', await outcome(async () => graph.unlink(f.P, me, (await f.edgeOf('CL', 'reports', 'V')).id)), 'CONFLICT:claim_record');
+
+    /* N6: replacement through the strict path, with the usual acknowledgement. */
+    /* A second block also makes the claim: the replacement names only B1, so B2 is what the Impact Report is about. */
+    await f.link('B2', 'asserts', 'CL');
+    const claims1 = await claimsIn(f.P);
+    const replace = (supersedes: string, ack?: string, projectId = f.P) =>
+      graph.createClaim(projectId, me, { text: 'β = .42 (corrected wording)', label: 'CLR', reportIds: [f.ids.V!], blockId: f.ids.B1!, supersedes, impactAcknowledged: ack });
+    const first = await replace(f.ids.CL!).catch((error: unknown) => error);
+    check(
+      'a replacement with dependents first returns its Impact Report, and writes nothing',
+      [first instanceof AppError && first.code, await claimsIn(f.P), await supersedesIn(f.P), await f.status('CL'), (await f.edgeOf('B1', 'asserts', 'CL'))?.srcId],
+      ['IMPACT_ACK_REQUIRED', claims1, 0, 'active', f.ids.B1!],
+    );
+    const hash = ((first as AppError).details as { report: graph.ImpactReport }).report.hash;
+    check('a wrong acknowledgement is refused, nothing written', [await outcome(() => replace(f.ids.CL!, '0'.repeat(64))), await claimsIn(f.P)], ['IMPACT_ACK_REQUIRED', claims1]);
+    const made = await replace(f.ids.CL!, hash);
+    f.remember('CLR', made.id);
+    check(
+      'with the first attempt’s hash the replacement is written: new claim verified and reporting V, old claim superseded, supersedes recorded',
+      [(await f.currency('CLR')).verification, (await f.edgeOf('CLR', 'reports', 'V')).dstId, await f.status('CL'), (await f.edgeOf('CLR', 'supersedes', 'CL')).srcId, await claimsIn(f.P), (await f.edgeOf('B1', 'asserts', 'CLR')).srcId],
+      ['verified', f.ids.V!, 'superseded', made.id, claims1 + 1, f.ids.B1!],
+    );
+    const assertsFromB1 = async () => (await db.select().from(graphEdges).where(and(eq(graphEdges.srcId, f.ids.B1!), eq(graphEdges.rel, 'asserts')))).map((edge) => edge.dstId);
+    check(
+      'the block named by the replacement asserts only the new claim, and is not flagged for the replaced one',
+      [
+        await assertsFromB1(),
+        (await db.select().from(staleMarks).where(and(eq(staleMarks.nodeId, f.ids.B1!), eq(staleMarks.causeNodeId, f.ids.CL!)))).length,
+        (await f.currency('B1')).effective,
+      ],
+      [[made.id], 0, 'current'],
+    );
+    check(
+      'a block the replacement does not name keeps asserting the replaced claim, and is flagged as the acknowledged report said',
+      [
+        (await f.edgeOf('B2', 'asserts', 'CL'))?.srcId,
+        (await db.select().from(staleMarks).where(and(eq(staleMarks.nodeId, f.ids.B2!), eq(staleMarks.causeNodeId, f.ids.CL!)))).length > 0,
+        ((first as AppError).details as { report: graph.ImpactReport }).report.items.map((item) => item.nodeId).includes(f.ids.B1!),
+      ],
+      [f.ids.B2!, true, false],
+    );
+    check('the replaced claim is kept unchanged, as a record, with its evidence', [(await f.get('CL')).data.text, (await f.edgeOf('CL', 'reports', 'V')).dstId], ['β = .42, p < .001', f.ids.V!]);
+    check('a claim is replaced once: a retried replacement is refused, nothing written, the block still asserts the replacement only', [await outcome(() => acknowledged((ack) => replace(f.ids.CL!, ack))), await claimsIn(f.P), await assertsFromB1()], ['CONFLICT:already_superseded', claims1 + 1, [made.id]]);
+    check('the replacement is itself immutable', await outcome(async () => { const now = await f.get('CLR'); await graph.updateNode(f.P, me, f.ids.CLR!, { data: { ...now.data, text: 'β = .10' }, expectedVersion: now.currentVersion }); }), 'CONFLICT:immutable_field');
+    check('only a claim can be replaced by a claim (a block id is refused), nothing written', [await outcome(() => acknowledged((ack) => replace(f.ids.B2!, ack))), await claimsIn(f.P)], ['VALIDATION', claims1 + 1]);
+
+    /* Another project: its claim is not found from here, and nothing is written in either project. */
+    const other = await fixture();
+    const otherClaims = await claimsIn(other.P);
+    check(
+      'a claim from another project cannot be replaced from this one; nothing written in either',
+      [await outcome(() => acknowledged((ack) => replace(other.ids.CL!, ack))), await claimsIn(f.P), await claimsIn(other.P), await other.status('CL')],
+      ['NOT_FOUND', claims1 + 1, otherClaims, 'active'],
+    );
+    check('a viewer cannot replace a claim', await outcome(async () => {
+      const viewerProject = f.P;
+      await db.insert(projectMembers).values({ projectId: viewerProject, userId: editor, role: 'VIEWER' }).onConflictDoNothing();
+      await graph.createClaim(viewerProject, { userId: editor }, { text: 'x', reportIds: [f.ids.V!], supersedes: f.ids.CLR! });
+    }), 'FORBIDDEN');
+
+    /* When the named block is the only thing that makes the old claim, nothing else is affected: no acknowledgement is asked for. */
+    const h = await fixture();
+    const direct = await graph.createClaim(h.P, me, { text: 'β = .42 (corrected wording)', reportIds: [h.ids.V!], blockId: h.ids.B1!, supersedes: h.ids.CL! });
+    check(
+      'a replacement whose only dependent is the block it names is written at once, the assertion moved',
+      [await h.status('CL'), (await h.edgeOf('B1', 'asserts', 'CL')) ?? null, (await db.select().from(graphEdges).where(and(eq(graphEdges.srcId, h.ids.B1!), eq(graphEdges.rel, 'asserts')))).map((edge) => edge.dstId)],
+      ['superseded', null, [direct.id]],
+    );
+
+    /* A replacement that names no block moves no assertion: the block keeps the old claim and is flagged for it. */
+    const g = await fixture();
+    await acknowledged((ack) => graph.createClaim(g.P, me, { text: 'β = .42 (corrected wording)', reportIds: [g.ids.V!], supersedes: g.ids.CL!, impactAcknowledged: ack }));
+    check(
+      'without a blockId the block still asserts the replaced claim, and is flagged for it',
+      [(await g.edgeOf('B1', 'asserts', 'CL'))?.srcId, (await db.select().from(staleMarks).where(and(eq(staleMarks.nodeId, g.ids.B1!), eq(staleMarks.causeNodeId, g.ids.CL!)))).length > 0],
+      [g.ids.B1!, true],
+    );
   }
 
   console.log('\nCascade');

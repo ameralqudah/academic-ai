@@ -10,6 +10,9 @@ const schema = z
     keys: z.array(z.string().min(1).max(300)).max(50).default([]),
     text: z.string().max(5000).optional(),
     blockId: z.string().max(64).optional(),
+    /* WS3-A (N6): replace this claim; `impactAcknowledged` is the hash of the Impact Report a first attempt returned. */
+    supersedes: z.string().min(1).max(64).optional(),
+    impactAcknowledged: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   })
   .strict();
 type Params = { projectId: string; runId: string };

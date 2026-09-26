@@ -62,5 +62,18 @@ test.describe('analysis workbench', () => {
     const typed = await api.post(`/api/v1/projects/${projectId}/analyses/runs/${runs[0]!.id}/claims`, { data: { keys: ['coef:x'], text: 'x predicts y (b = 0.99).' } });
     expect(typed.status()).toBe(422);
     expect((await typed.json()).error.details.reason).toBe('untraced_statistics');
+
+    /* WS3-A: a claim's text never changes; a correction replaces it through the strict route, once. */
+    const claimsUrl = `/api/v1/projects/${projectId}/analyses/runs/${runs[0]!.id}/claims`;
+    const original = (await (await api.post(claimsUrl, { data: { keys: ['coef:x'] } })).json()).data.claim as { id: string; currentVersion: number; data: Record<string, unknown> };
+    const edit = await api.patch(`/api/v1/projects/${projectId}/nodes/${original.id}`, { data: { data: { ...original.data, text: 'x predicts y (b = 0.99).' }, expectedVersion: original.currentVersion } });
+    expect(edit.status()).toBe(409);
+    expect((await edit.json()).error.details.reason).toBe('immutable_field');
+    const replaced = await api.post(claimsUrl, { data: { keys: ['coef:x'], text: 'x predicts y ({{value:coef:x}}).', supersedes: original.id } });
+    expect(replaced.status()).toBe(201);
+    const again = await api.post(claimsUrl, { data: { keys: ['coef:x'], supersedes: original.id } });
+    expect(again.status()).toBe(409);
+    expect((await again.json()).error.details.reason).toBe('already_superseded');
+    expect((await api.post(claimsUrl, { data: { keys: ['coef:x'], supersedes: original.id, impactAcknowledged: 'not-a-hash' } })).status()).toBe(422);
   });
 });

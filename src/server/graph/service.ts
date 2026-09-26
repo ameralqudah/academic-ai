@@ -37,6 +37,7 @@ import {
   type GraphNode,
 } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { researchNumbers } from '@/server/integrity/numbers';
 
 import { NOT_CURRENT, assessCurrency, isResultType, type CurrencyLoader, type CurrencyReport } from './currency';
 import {
@@ -344,6 +345,16 @@ export async function createNode(
     );
   }
   const payload = parsePayload(type, input.data);
+  /*
+   * A claim that reports a research number exists only with its evidence
+   * (WS3-A, N5): it is written by the strict claim path (`insertClaim` →
+   * `createClaim`), which renders its numbers from recorded values and links
+   * them in the same transaction. Typed here it would look as traced as one
+   * that is. A claim with no research number (from the literature, say) may
+   * be written here; its text never changes afterwards (N6), so it cannot
+   * gain one later.
+   */
+  if (type === 'claim') assertNoResearchNumbers((payload as { text: string }).text);
   return db.transaction((tx) =>
     insertNode(tx, projectId, actor, {
       type,
@@ -740,6 +751,34 @@ async function linkImpact(tx: Tx, projectId: string, edge: { srcId: string; rel:
   return { report, version: target.currentVersion };
 }
 
+/** The refusal for a `reports` link made outside the strict claim path (WS3-A, N5). */
+function strictClaimPath(): AppError {
+  return new AppError(
+    'FORBIDDEN',
+    'The values a claim reports are linked only through the strict claim path (POST …/analyses/runs/:runId/claims).',
+    'لا تُربط القيم التي يوردها الادعاء إلا عبر مسار الادعاء الصارم.',
+    { reason: 'strict_claim_path' },
+  );
+}
+
+/**
+ * A hand-written claim carries no research number (WS3-A, N5): no statistic,
+ * decimal or percentage as the numeric guard reads a person's text, and no
+ * `{{value:…}}` reference, which only the strict claim path can render.
+ * Years, counts in prose and labels are ordinary text and pass.
+ */
+function assertNoResearchNumbers(text: string) {
+  const spans = researchNumbers(text, 'person').map((found) => found.text);
+  if (spans.length > 0 || /\{\{value:/.test(text)) {
+    throw new AppError(
+      'FORBIDDEN',
+      'A claim that reports research numbers is written only through the strict claim path (POST …/analyses/runs/:runId/claims).',
+      'لا يُكتب الادعاء الذي يورد أرقامًا بحثية إلا عبر مسار الادعاء الصارم.',
+      { reason: 'strict_claim_path', spans: spans.slice(0, 10) },
+    );
+  }
+}
+
 /** Frozen data and engine outputs keep the links they were recorded with. */
 function assertLinksEditable(src: GraphNode, rule: NonNullable<ReturnType<typeof ruleFor>>, actor: Actor) {
   if (rule.annotation || isEngine(actor)) return;
@@ -774,6 +813,13 @@ export async function link(
   const rule = ruleFor(input.rel);
   if (!rule) throw AppError.validation({ rel: `Unknown relation "${input.rel}".` });
   if (rule.managed) throw AppError.validation({ rel: `"${input.rel}" is set by its own operation.` });
+  /*
+   * Text reports a result only through the strict claim path (WS3-A, N5):
+   * no hand-made `reports` link, to a computed result or to a typed-in one,
+   * from a block or a claim, by any actor. `createClaim` writes its own
+   * edges and never comes through here.
+   */
+  if (input.rel === 'reports') throw strictClaimPath();
   if (rule.engineOnly && !isEngine(actor)) {
     throw new AppError(
       'FORBIDDEN',
@@ -893,6 +939,10 @@ export async function unlink(
     }
     if (rule?.managed) throw AppError.validation({ rel: `"${edge.rel}" is set by its own operation.` });
     const src = await loadNode(tx, projectId, edge.srcId, 'update');
+    /* A claim's evidence is part of the claim (WS3-A, N6): changed only by replacing the claim. */
+    if (edge.rel === 'reports' && src.type === 'claim') {
+      throw refuse('claim_record', 'A claim keeps the values it reports. Replace the claim to change them.', 'يحتفظ الادعاء بالقيم التي يوردها. استبدل الادعاء لتغييرها.');
+    }
     if (rule) assertLinksEditable(src, rule, actor);
 
     let impact: { report: ImpactReport; version: number } | null;
@@ -1111,7 +1161,19 @@ export async function recordRun(projectId: string, actor: Actor, input: RecordRu
 export async function createClaim(
   projectId: string,
   actor: Actor,
-  input: { text: string; label?: string | null; reportIds: string[]; blockId?: string | null },
+  input: {
+    text: string;
+    label?: string | null;
+    reportIds: string[];
+    blockId?: string | null;
+    /**
+     * WS3-A (N6): the claim this one replaces. Its text and evidence cannot
+     * change, so a correction is a new claim that `supersedes` it, written in
+     * this same transaction with the usual Impact Report acknowledgement.
+     */
+    supersedes?: string | null;
+    impactAcknowledged?: string;
+  },
 ): Promise<GraphNode> {
   await authorize(projectId, actor, 'EDITOR');
   if (input.reportIds.length === 0) throw AppError.validation({ reportIds: 'A claim reports at least one value.' });
@@ -1137,6 +1199,28 @@ export async function createClaim(
       tx.insert(graphEdges).values({ projectId, srcId, rel, dstId, dstVersion, dependency: true, createdByUserId: actor.userId, createdByRunId: actor.runId ?? null, createdByStepId: actor.stepId ?? null, origin: actor.origin ?? 'user' });
     for (const value of values) await edge(claim.id, 'reports', value.id, value.currentVersion);
     if (block) await edge(block.id, 'asserts', claim.id, claim.currentVersion);
+    if (input.supersedes && block) {
+      /*
+       * The replacement names its block, so the block now makes the new claim
+       * instead of the old one: its assertion moves, in this transaction,
+       * before the Impact Report is measured, so the block is not flagged for
+       * asserting a claim it no longer asserts. The old claim keeps its
+       * evidence and is linked from its replacement by `supersedes`.
+       */
+      await tx
+        .delete(graphEdges)
+        .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.srcId, block.id), eq(graphEdges.rel, 'asserts'), eq(graphEdges.dstId, input.supersedes)));
+    }
+    if (input.supersedes) {
+      /*
+       * The proposal names the old claim and the new claim's content, never
+       * the new claim's id (a fresh one on every attempt), so the report a
+       * refused first attempt returns is the one the second must acknowledge.
+       * Anything refused rolls the whole replacement back.
+       */
+      const proposal = `claim-replace:${input.supersedes}:${payloadHash({ text: input.text, reportIds: [...input.reportIds].sort(), blockId: input.blockId ?? null })}`;
+      await supersedeInTx(tx, projectId, actor, input.supersedes, claim.id, input.impactAcknowledged, proposal, [claim.id]);
+    }
     return claim;
   });
 }

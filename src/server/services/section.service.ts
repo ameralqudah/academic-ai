@@ -89,14 +89,7 @@ export async function saveUserEdit(input: UserEditInput): Promise<ResearchSectio
     if (existing.content === input.content && sameHeading) return existing;
   }
   const revoked = existing?.status === 'APPROVED';
-  /*
-   * A person's numbers are recorded, never changed (WS2 D2): the text is
-   * scanned in person mode against the analyses attached to this section
-   * (windowed runs excluded, D3), and the numbers that trace to none are
-   * counted as manual. Nothing here blocks the save or a later approval.
-   */
-  const legacy = allowedFromLegacyResults(await analysisRunsRepo.listForSection(input.projectId, input.userId, input.sectionKey));
-  const check = checkNumbers(input.content, { mode: 'person', allowed: legacy.values });
+  const integrity = await personIntegrity(input.projectId, input.userId, input.sectionKey, input.content);
   return saveSection({
     projectId: input.projectId,
     userId: input.userId,
@@ -106,8 +99,21 @@ export async function saveUserEdit(input: UserEditInput): Promise<ResearchSectio
     status: input.status ?? (input.content.trim() ? 'USER_EDITED' : 'DRAFT'),
     origin: 'USER',
     ...(revoked ? { note: 'Edited after approval: approval revoked' } : {}),
-    integrity: sectionIntegrity({ mode: 'person', check, legacy }),
+    integrity,
   });
+}
+
+/**
+ * A person's text, scanned in person mode (WS2 D2): against the analyses
+ * attached to this section (windowed runs excluded, D3), the numbers that
+ * trace to none counted as manual. Nothing is changed, stored or blocked
+ * here; a person's edit stores the result with its version, and a Word
+ * export uses it for a section with no stored record (WS2 B5).
+ */
+export async function personIntegrity(projectId: string, userId: string, sectionKey: SectionKey, content: string): Promise<SectionIntegrity> {
+  const legacy = allowedFromLegacyResults(await analysisRunsRepo.listForSection(projectId, userId, sectionKey));
+  const check = checkNumbers(content, { mode: 'person', allowed: legacy.values });
+  return sectionIntegrity({ mode: 'person', check, legacy });
 }
 
 export async function approveSection(

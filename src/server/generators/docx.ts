@@ -31,7 +31,7 @@ import {
   WidthType,
 } from 'docx';
 
-import type { DocumentContent } from './documents';
+import type { DocumentContent, DocumentSection } from './documents';
 
 /** Any Arabic letter means the document should be laid out right to left. */
 function hasArabic(text: string): boolean {
@@ -78,7 +78,15 @@ function runsFrom(text: string, rtl: boolean): TextRun[] {
   return runs.length > 0 ? runs : [new TextRun({ text: '', rightToLeft: rtl })];
 }
 
-export async function generateDocx(content: DocumentContent): Promise<Uint8Array> {
+/**
+ * `options.appendix`: sections placed at the very end, after the references,
+ * starting on a new page (a task's Integrity and Provenance Appendix, WS2 B5).
+ * It does not count towards the text direction, which follows the content.
+ */
+export async function generateDocx(
+  content: DocumentContent,
+  options: { appendix?: DocumentSection[] } = {},
+): Promise<Uint8Array> {
   /*
    * Direction decided from the content, not from a setting.
    *
@@ -134,7 +142,7 @@ export async function generateDocx(content: DocumentContent): Promise<Uint8Array
 
   children.push(new Paragraph({ text: '', pageBreakBefore: true }));
 
-  for (const section of content.sections) {
+  const pushSection = (section: DocumentSection, pageBreakBefore = false) => {
     if (section.heading) {
       children.push(
         new Paragraph({
@@ -142,6 +150,7 @@ export async function generateDocx(content: DocumentContent): Promise<Uint8Array
           heading: section.level === 1 ? HeadingLevel.HEADING_1 : HeadingLevel.HEADING_2,
           alignment,
           bidirectional: rtl,
+          ...(pageBreakBefore ? { pageBreakBefore: true } : {}),
           spacing: { before: 360, after: 180 },
         }),
       );
@@ -208,7 +217,9 @@ export async function generateDocx(content: DocumentContent): Promise<Uint8Array
 
       children.push(new Paragraph({ text: '', spacing: { after: 240 } }));
     }
-  }
+  };
+
+  for (const section of content.sections) pushSection(section);
 
   if (content.references && content.references.length > 0) {
     children.push(
@@ -235,6 +246,8 @@ export async function generateDocx(content: DocumentContent): Promise<Uint8Array
       );
     }
   }
+
+  (options.appendix ?? []).forEach((section, index) => pushSection(section, index === 0));
 
   const document = new Document({
     sections: [

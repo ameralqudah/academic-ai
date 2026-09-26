@@ -46,6 +46,7 @@ import {
   partial,
   readAllOutputs,
   readOutput,
+  resolveRequirement,
   succeeded,
   type Finding,
   type Observation,
@@ -62,6 +63,9 @@ import { broaden, topicOf } from './query';
 import { instructionFrom } from './step-instruction';
 import { sourcesAsMaterial } from './found-sources';
 import { noDataRule } from '@/server/tasks/no-data-rule';
+import { integrityAppendix, type AppendixSection } from '@/server/integrity/appendix';
+import { NUMERIC_GUARD_VERSION } from '@/server/integrity/numbers';
+import type { SectionIntegrity } from '@/server/integrity/section';
 import {
   collectTaskResults,
   exportTables,
@@ -1157,6 +1161,8 @@ export function registerAllHandlers(): void {
     /* The paper's own title, when the carried text opens with one. */
     let carriedTitle: string | null = null;
     const carriedReferences: Reference[] = [];
+    /* What the numeric guard recorded for each carried text, for a Word file's appendix (WS2 B5). */
+    const carriedChecks: { label: string; integrity?: SectionIntegrity }[] = [];
 
     /*
      * A conversion of something that already exists.
@@ -1190,13 +1196,14 @@ export function registerAllHandlers(): void {
 
             for (const output of outputs) {
               if (output.type.startsWith('prose') || output.type.startsWith('literature')) {
-                const data = output.data as { text?: string; heading?: string } | null;
+                const data = output.data as { text?: string; heading?: string; integrity?: SectionIntegrity } | null;
 
                 if (data?.text) {
                   carried.push({
                     heading: data.heading ?? '',
                     paragraphs: data.text.split(/\n{2,}/).filter(Boolean),
                   });
+                  carriedChecks.push({ label: data.heading || `${carried.length}`, ...(output.type.startsWith('prose') && data.integrity ? { integrity: data.integrity } : {}) });
                 }
               }
 
@@ -1225,9 +1232,10 @@ export function registerAllHandlers(): void {
 
         for (const output of outputs) {
           if (output.id === referenced.id) {
-            const data = output.data as { text?: string; heading?: string } | null;
+            const data = output.data as { text?: string; heading?: string; integrity?: SectionIntegrity } | null;
 
             if (data?.text) {
+              carriedChecks.push({ label: data.heading || namedTitle || say(context, 'Text', 'النص'), ...(output.type.startsWith('prose') && data.integrity ? { integrity: data.integrity } : {}) });
               /* Divided at its own headings, or Word shows "## Abstract" as a line of text. */
               const divided = sectionsFromMarkdown(data.text, data.heading ?? '');
               carried.push(...divided.sections.map((section) => ({
@@ -1261,11 +1269,19 @@ export function registerAllHandlers(): void {
      * about tables the file did not contain. These are the computed results
      * themselves, laid out as the chat draws them.
      */
+    /*
+     * For a Word file, the results tiered first (WS2 B5, D3): a table computed
+     * on only the first rows of a file is left out of the document and listed
+     * in its appendix as excluded. Other formats are unchanged.
+     */
+    const outputLanguage = (context.context.userLanguage as 'ar' | 'en' | undefined) ?? context.locale;
+    const tiered = kind === 'docx' ? await collectTaskResults(context.available, context.userId) : null;
     const computed = analysisSections(
-      readAllOutputs<{ display?: { kind?: string; payload?: unknown } }>(context.available, 'analysis.v1')
-        .map((output) => output.display)
+      resolveRequirement({ type: 'analysis.v1', required: false }, context.available)
+        .filter((output) => !tiered?.excludedOutputs.has(output.id))
+        .map((output) => (output.data as { display?: { kind?: string; payload?: unknown } } | undefined)?.display)
         .filter((display): display is { kind: string; payload: unknown } => Boolean(display?.kind)),
-      (context.context.userLanguage as 'ar' | 'en' | undefined) ?? context.locale,
+      outputLanguage,
     );
 
     const sections = [
@@ -1322,7 +1338,48 @@ export function registerAllHandlers(): void {
        * nothing shipped — where PDF needs an embedded font file this does not
        * carry.
        */
-      bytes = await generateDocx(content);
+      /*
+       * The Integrity and Provenance Appendix, always (WS2 B5, N7): how each
+       * text's numbers were checked, which text no guard checked, and the
+       * analyses behind the tables with their tiers. The text above it is
+       * exactly what the writing steps produced.
+       */
+      const checked: AppendixSection[] = [];
+      const notChecked: string[] = [];
+      for (const entry of carriedChecks) {
+        if (entry.integrity) checked.push({ label: entry.label, origin: 'AI', approved: null, record: 'stored', integrity: entry.integrity });
+        else notChecked.push(entry.label);
+      }
+      let position = 0;
+      for (const type of ['literature.v1', 'prose.v1'] as const) {
+        for (const output of resolveRequirement({ type, required: false }, context.available)) {
+          const data = output.data as { text?: string; heading?: string; integrity?: SectionIntegrity } | undefined;
+          if (typeof data?.text !== 'string' || !data.text.trim()) continue;
+          position += 1;
+          const label = data.heading || `${position}`;
+          if (type === 'prose.v1' && data.integrity) checked.push({ label, origin: 'AI', approved: null, record: 'stored', integrity: data.integrity });
+          else notChecked.push(label);
+        }
+      }
+      const appendix = integrityAppendix({
+        language: outputLanguage,
+        guardVersion: NUMERIC_GUARD_VERSION,
+        sections: checked,
+        analyses: (tiered?.results ?? []).map((result) => ({
+          reference: result.runId ? `${result.source} (run:${result.runId.slice(0, 8)})` : result.source,
+          analysis: result.test ? `${result.kind}: ${result.test}` : result.kind,
+          section: null,
+          tier: result.tier,
+          engine: result.engineVersion,
+          datasetVersion: result.datasetVersionId,
+          contentHash: result.datasetContentHash,
+          status: result.tier === 'windowed' ? 'excluded' : 'used',
+        })),
+        notChecked,
+      });
+
+      /* At the very end, after the references, on a new page. */
+      bytes = await generateDocx(content, { appendix });
     } else if (kind === 'pdf') {
       const pdf = await generatePdf(content);
 

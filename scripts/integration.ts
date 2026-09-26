@@ -2299,6 +2299,195 @@ async function main() {
         resetEnv();
       }
     }
+
+    {
+      section('Word exports carry an Integrity and Provenance Appendix (WS2 B5, N7)');
+
+      /* The scripted-model setup of the N1 block, restored afterwards. */
+      const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+      const { createGateway } = await import('@/server/ai/gateway/gateway');
+      const { productionDeps, setGatewayForTests } = await import('@/server/ai/gateway');
+      const { resetEnvCache: resetEnv } = await import('@/config/env');
+      const { runForUser } = await import('@/server/ai/request-scope');
+      const { SECTION_LABELS_EN } = await import('@/ai/context/labels');
+      const fake = new FakeAdapter('openai');
+      setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: fake }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+      const previousKey = process.env.OPENAI_API_KEY;
+      process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+      resetEnv();
+
+      /* The text of word/document.xml, one entry per paragraph (table cells included). */
+      const paragraphsOf = async (bytes: Uint8Array | Buffer) => {
+        const zip = await JSZip.loadAsync(bytes);
+        const xml = (await zip.file('word/document.xml')?.async('string')) ?? '';
+        const decode = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+        return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((match) => decode([...match[0].matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((text) => text[1]).join('')));
+      };
+      /* The n cells of a table row, found by its first cell after a marker paragraph. */
+      const rowOf = (paragraphs: string[], after: string, first: string, cells: number) => {
+        const start = paragraphs.indexOf(after);
+        const index = paragraphs.findIndex((text, position) => position > start && text === first);
+        return start < 0 || index < 0 ? [] : paragraphs.slice(index, index + cells);
+      };
+      const saysVerified = (paragraphs: string[]) => paragraphs.some((text) => /(?<!un)verified/i.test(text));
+      const TITLE_EN = 'Integrity and provenance appendix';
+      const exportAs = (userId: string, projectId: string) => exportProjectDocx({ projectId, userId, sectionLabels: {}, referencesLabel: 'References', unverifiedLabel: 'unverified' });
+
+      try {
+        /* --- the thesis export (Path A), a Pro researcher's English paper --- */
+        const owner = await newUser('b5-owner');
+        await startCheckout({ userId: owner, planCode: 'PRO', locale: 'en' });
+        const paper = await createProject(owner, { ...projectInput, language: 'EN' });
+        const upload = await saveUpload({ userId: owner, file: { name: 'b5-scores.csv', bytes: new TextEncoder().encode(statsCsv).buffer as ArrayBuffer } });
+        const pinnedRun = await runAnalysis({ datasetId: upload.dataset.id, userId: owner, test: 't.independent', columns: { dependent: 'score', grouping: 'gender' } });
+        await attachRun({ runId: pinnedRun.run.id, userId: owner, projectId: paper.id, sectionKey: 'RESULTS' });
+        const windowedRun = await analysisRunsRepo.create({
+          userId: owner,
+          datasetId: upload.dataset.id,
+          testKey: 'correlation.pearson',
+          spec: { columns: { x: 'score', y: 'score' }, truncatedTo: 5000 },
+          result: { statistic: { name: 'r', value: 0.8123 }, pValue: 0.0042, n: 5000 },
+        });
+        await analysisRunsRepo.attachToSection(windowedRun.id, owner, paper.id, 'RESULTS');
+        const tValue = (pinnedRun.result as { statistic: { value: number } }).statistic.value.toFixed(3);
+
+        /* RESULTS: AI text through the real section writer (A4 quarantine, B1 record). */
+        fake.push({ reply: { text: `The groups differed, t = ${tValue}. A further test found t = 9.137, p = .0271.` } });
+        const generated = await runForUser(owner, () => generateSection(owner, paper.id, 'RESULTS'));
+        /* DISCUSSION: a researcher's own words, one traced and one manual number; then approved. */
+        await saveUserEdit({ projectId: paper.id, userId: owner, sectionKey: 'DISCUSSION', content: `The difference (t = ${tValue}) matches r = .4417 from our pilot.` });
+        await approveSection(paper.id, owner, 'DISCUSSION');
+        /* PROBLEM: text with no stored record, as a section saved before the records existed. */
+        await saveSection({ projectId: paper.id, userId: owner, sectionKey: 'PROBLEM', content: 'An earlier survey of N = 77 teachers raised the question.', origin: 'USER' });
+        /* OBJECTIVES: a stored record citing a run that no longer exists. */
+        const goneRun = crypto.randomUUID();
+        await saveSection({
+          projectId: paper.id,
+          userId: owner,
+          sectionKey: 'OBJECTIVES',
+          content: 'The aims are described in general terms.',
+          origin: 'USER',
+          integrity: { mode: 'person', guardVersion: NUMERIC_GUARD_VERSION, quarantined: 0, manual: 0, traced: 0, sources: [{ id: goneRun, tier: 'pinned' }], excluded: [], findings: [] },
+        });
+
+        const before = await Promise.all((['RESULTS', 'DISCUSSION', 'PROBLEM', 'OBJECTIVES'] as const).map(async (key) => [(await getSection(paper.id, owner, key)).content, (await getSection(paper.id, owner, key)).status, (await listVersions(paper.id, owner, key)).length]));
+        const first = await exportAs(owner, paper.id);
+        const second = await exportAs(owner, paper.id);
+        const text = await paragraphsOf(first.buffer);
+        const zip = await JSZip.loadAsync(first.buffer);
+        check('Path A: a valid Word file', [first.buffer.subarray(0, 2).toString('latin1'), zip.file('word/document.xml') !== null], ['PK', true]);
+        check('Path A: the same project gives the same document.xml text', await paragraphsOf(second.buffer), text);
+        assertTrue('Path A: the appendix is present, with its statement and marker legend', text.includes(TITLE_EN) && text.some((line) => line.includes('numeric guard (version ws2-2)')) && text.some((line) => line.includes(QUARANTINE_MARKER.en) && line.includes(QUARANTINE_MARKER.ar)));
+        assertTrue('Path A: the AI section keeps its marker in the text', text.some((line) => line.includes(QUARANTINE_MARKER.en)) && generated.integrity.quarantined >= 2);
+        check(
+          'Path A: the AI section row: AI, model check, replaced count, stored record',
+          rowOf(text, 'Sections', SECTION_LABELS_EN.RESULTS, 8),
+          [SECTION_LABELS_EN.RESULTS, 'AI', 'No', 'Untraced numbers replaced', String((await listVersions(paper.id, owner, 'RESULTS'))[0]?.integrity?.traced), String(generated.integrity.quarantined), '0', 'stored with the section'],
+        );
+        check(
+          /* No analysis is attached to DISCUSSION, so both of its numbers are the researcher's own (manual). */
+          'Path A: the approved researcher section: approved, both numbers manual (none attached), stored record',
+          rowOf(text, 'Sections', SECTION_LABELS_EN.DISCUSSION, 8),
+          [SECTION_LABELS_EN.DISCUSSION, 'Researcher', 'Yes', 'Listed, not changed', '0', '0', '2', 'stored with the section'],
+        );
+        check('Path A: a section without a stored record is checked at export', rowOf(text, 'Sections', SECTION_LABELS_EN.PROBLEM, 8).slice(-2), ['1', 'checked at export']);
+        assertTrue('Path A: the untraced numbers a researcher wrote are listed as written', text.some((line) => line.includes('.4417')) && text.some((line) => line.startsWith('•') && line.includes('77')));
+        assertTrue('Path A: a quarantined value is never repeated in the appendix', !text.some((line) => line.includes('9.137') || line.includes('.0271')));
+        check(
+          'Path A: analyses: pinned used, windowed excluded, a cited run no longer available',
+          [rowOf(text, 'Analyses', `run:${pinnedRun.run.id.slice(0, 8)}`, 8), rowOf(text, 'Analyses', `run:${windowedRun.id.slice(0, 8)}`, 8).slice(3), rowOf(text, 'Analyses', `run:${goneRun.slice(0, 8)}`, 8).slice(-1)],
+          [
+            [`run:${pinnedRun.run.id.slice(0, 8)}`, 't.independent', SECTION_LABELS_EN.RESULTS, 'pinned', LEGACY_ENGINE_STAMP, pinnedRun.run.datasetVersionId ?? '—', (pinnedRun.run.datasetContentHash ?? '').slice(0, 12), 'used'],
+            ['windowed', '—', '—', '—', 'excluded (windowed)'],
+            ['no longer available'],
+          ],
+        );
+        assertTrue('Path A: nothing is labelled "verified"', !saysVerified(text));
+        const after = await Promise.all((['RESULTS', 'DISCUSSION', 'PROBLEM', 'OBJECTIVES'] as const).map(async (key) => [(await getSection(paper.id, owner, key)).content, (await getSection(paper.id, owner, key)).status, (await listVersions(paper.id, owner, key)).length]));
+        check('Path A: exporting changes no text, approval or version (the export-time scan is not stored)', after, before);
+        check('Path A: the section with no record still has none', (await listVersions(paper.id, owner, 'PROBLEM'))[0]?.integrity ?? null, null);
+
+        /* An Arabic project: the appendix in Arabic, always present, even with no analyses. */
+        const arabic = await createProject(owner, { ...projectInput, language: 'AR' });
+        await saveUserEdit({ projectId: arabic.id, userId: owner, sectionKey: 'PROBLEM', content: 'تناولت دراسات سابقة المشكلة بوصف عام.' });
+        const arabicText = await paragraphsOf((await exportAs(owner, arabic.id)).buffer);
+        assertTrue(
+          'Path A (Arabic): Arabic appendix, stored record, no findings, no analyses',
+          arabicText.includes('ملحق سلامة الأرقام ومصدرها') && arabicText.includes('محفوظ مع القسم') && arabicText.includes('لم يُعثر على أرقام غير منسوبة في النص المحفوظ كما كُتب.') && arabicText.includes('لا توجد تحليلات مرفقة بهذا المستند.') && !saysVerified(arabicText),
+        );
+
+        /* The free plan still cannot export. */
+        const freeUser = await newUser('b5-free');
+        const freeProject = await createProject(freeUser, projectInput);
+        await expectAppError('Path A: a free user still cannot export', 'PLAN_LIMIT', () => exportAs(freeUser, freeProject.id));
+
+        /* --- a task's Word file (Path B) --- */
+        registerAllHandlers();
+        const write = handlerFor('document.write')!;
+        const generate = handlerFor('document.generate')!;
+        const analyse = handlerFor('data.analyse')!;
+        type Obs = { status: string; outputs: OutputReference[]; artifacts: { id: string }[] };
+        const step = (input: Record<string, unknown>, available: OutputReference[], context: Record<string, unknown> = {}) => ({
+          taskId: statsTask.id, stepId: crypto.randomUUID(), userId: plsOwner, projectId: null, locale: 'en' as const, input, available, dependencies: {}, context, signal: new AbortController().signal,
+        });
+        const run = async (handler: typeof write, ...rest: [Record<string, unknown>, OutputReference[], Record<string, unknown>?]) => (await runForUser(plsOwner, () => handler(step(...rest)))) as unknown as Obs;
+        const whole = await run(analyse, { intent: 'data.describe' }, [], { datasetId: plsFile.dataset.id, request: 'describe the data' });
+        const firstRows = await run(analyse, { intent: 'data.describe' }, [], { datasetId: bigFile.dataset.id, request: 'describe the data' });
+        fake.push({ reply: { text: 'The sample was described in the tables that follow, and t = 9.137 was reported elsewhere.' } });
+        const prose = await run(write, { section: 'Sample description' }, [...whole.outputs], { request: 'Describe the sample.' });
+        const literature = makeOutput({ taskId: statsTask.id, stepId: crypto.randomUUID(), capability: 'literature.review', projectId: null }, 'literature.v1', { text: 'Earlier studies reported mixed findings across settings.', references: [], heading: 'Earlier studies' });
+        /* A cited source, so the file has a References section for the appendix to follow. */
+        const sources = makeOutput({ taskId: statsTask.id, stepId: crypto.randomUUID(), capability: 'academic.search', projectId: null }, 'sources.v1', {
+          references: [{ id: 'b5-ref', title: 'Hybrid learning outcomes', authors: ['Smith, J.'], year: 2024, container: 'Journal of Education', provenance: 'retrieved' }],
+          query: 'hybrid learning',
+          found: 1,
+          offTopic: false,
+          discarded: 0,
+        });
+        const available = [...whole.outputs, ...firstRows.outputs, ...prose.outputs, literature, sources];
+        const taskDocx = async () => {
+          const made = await run(generate, { format: 'docx', title: 'Sample report' }, available);
+          const bytes = (await readArtifact(made.artifacts[0]!.id, plsOwner)).bytes;
+          return { made, text: await paragraphsOf(bytes), xml: (await (await JSZip.loadAsync(bytes)).file('word/document.xml')?.async('string')) ?? '' };
+        };
+        const firstDocx = await taskDocx();
+        const secondDocx = await taskDocx();
+        const taskText = firstDocx.text;
+        check('Path B: the Word file is produced', [firstDocx.made.status, firstDocx.made.artifacts.length], ['success', 1]);
+        check('Path B: the same outputs give the same document.xml text', secondDocx.text, taskText);
+        check('Path B: the windowed descriptive table is left out; the whole-file one stays', taskText.filter((line) => line === 'Descriptive Statistics').length, 1);
+        assertTrue('Path B: the appendix is present, and the quarantined value is not repeated', taskText.includes(TITLE_EN) && !taskText.some((line) => line.includes('9.137')));
+        /* The appendix is the very end of the file: after the body and the References, starting on a new page. */
+        const referencesAt = taskText.indexOf('References');
+        const referenceEntryAt = taskText.findIndex((line) => line.includes('Hybrid learning outcomes'));
+        const appendixAt = taskText.indexOf(TITLE_EN);
+        check(
+          'Path B: in document.xml the body comes first, then the References, then the appendix',
+          [taskText.indexOf('Descriptive Statistics') < referencesAt, referencesAt >= 0, referencesAt < referenceEntryAt, referenceEntryAt < appendixAt],
+          [true, true, true, true],
+        );
+        const appendixParagraph = [...firstDocx.xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((match) => match[0]).find((xml) => xml.includes(TITLE_EN)) ?? '';
+        assertTrue('Path B: the appendix starts on a new page', appendixParagraph.includes('<w:pageBreakBefore'));
+        check(
+          'Path B: nothing but the appendix follows the References',
+          taskText.slice(referenceEntryAt + 1, appendixAt).filter((line) => line.trim()),
+          [],
+        );
+        check('Path B: the guarded prose row: AI, no approval, stored record', rowOf(taskText, 'Sections', 'Sample description', 8).filter((_, index) => [1, 2, 7].includes(index)), ['AI', '—', 'stored with the section']);
+        assertTrue('Path B: text no guard checked is listed as such', taskText.includes('Text not checked by the numeric guard') && taskText.includes('• Earlier studies'));
+        check(
+          'Path B: analyses: whole file pinned and used, first rows windowed and excluded',
+          [rowOf(taskText, 'Analyses', 'S1', 8).slice(1).filter((_, index) => [0, 2, 3, 6].includes(index)), rowOf(taskText, 'Analyses', 'S2', 8).slice(-1)],
+          [['descriptives', 'pinned', LEGACY_ENGINE_STAMP, 'used'], ['excluded (windowed)']],
+        );
+        assertTrue('Path B: nothing is labelled "verified"', !saysVerified(taskText));
+      } finally {
+        setGatewayForTests(null);
+        if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = previousKey;
+        resetEnv();
+      }
+    }
   }
 
   const realPath = bootstrapped?.paths.find((path) => path.key === 'A→B');

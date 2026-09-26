@@ -62,6 +62,14 @@ These are summarised from `P1C_PLAN.md` §1, which has the full tables.
 | N-10 | `projectId` / `conversationId` not verified on upload, analyze, PLS and attach | `assertProjectLink` (EDITOR) / `assertConversationLink` on every such path. |
 | N-11 | Job status changes unconditional, so a late finish could overwrite a cancel | `markRunning` / `complete` / `fail` are conditional and return whether they applied. |
 
+> **WS2 note (2026-09-26).** The table above is kept as written at P1-C. The legacy-path rows were changed by WS2 (`WS2_REPORT.md`). WS2's findings N1–N11 are a separate audit's numbering.
+> - **N-2, N-3.** PLS and CB-SEM record their provenance (WS2 B2), and the descriptive tables of task analyses record the provenance of the data read (B4).
+> - **N-4.** Generated sections are quarantined before saving (A4), with a stored record (B1).
+> - **N-6, N-7.** The section edit endpoint accepts only DRAFT/USER_EDITED and records the origin as USER (A2). Planner-written tables are no longer an export source (B4, WS2-D5).
+> - **N-8.** Task XLSX/CSV are built from eligible results only (B4). Word exports carry an Integrity and Provenance Appendix (B5).
+>
+> None of these paths is labelled verified.
+
 **Adversarial review (before this report).** A four-part review of the finished branch found 3 high, 7 medium and several low findings. It found no errors in the engine methods and no cross-project access path. All were fixed in `93d46ea`:
 
 | Sev. | Finding | Fix |
@@ -319,6 +327,16 @@ See the PR head. The last implementation commit is `93d46ea`; this report is com
 9. **Deleting a dataset** removes its files, but the version rows and verified runs stay (with `dataset_id` null). This keeps results that a manuscript may cite. `deletionImpact.verifiedRuns` tells the user how many.
 10. **Graph-only for projects.** A run without a project, or with `FF_GRAPH` off, is stored and immutable but has no graph node.
 11. **Browser UI is minimal.** It has no transformation editor and no version-replacement screen; those actions are available through the API. No new user-facing surface is enabled without the flag.
+
+> **WS2 note (2026-09-26).** Limitations 4 and 5 above are kept as written at P1-C. WS2 (`WS2_REPORT.md`) changed the legacy paths they describe, and they are still outside the verified chain and never labelled verified:
+> - **Limitation 4.** Legacy text now uses the canonical guard (`src/server/integrity/numbers.ts`, version `ws2-2`) on the P1-C detector.
+> - **Limitation 5.**
+>   - Generated sections are quarantined (A4), and a person's edits are recorded (A2, B1).
+>   - Chat replies are flagged (A5).
+>   - PLS, CB-SEM and the bootstrap record provenance (B2).
+>   - Planner tables are dropped from exports, and task writing and XLSX/CSV are guarded (B4).
+>   - Word exports carry an appendix (B5).
+>   - Section text written before these checks is never rewritten. Its numbers are checked at export and listed, not changed.
 
 ## 21. Recommended next phase (not started)
 

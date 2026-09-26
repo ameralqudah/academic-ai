@@ -181,6 +181,11 @@ export function hasHandler(capability: string): boolean {
   return handlers.has(capability);
 }
 
+/** The registered handler, for tests that run one step directly. */
+export function handlerFor(capability: string): StepHandler | undefined {
+  return handlers.get(capability);
+}
+
 /**
  * What a step observed that may warrant more work.
  *

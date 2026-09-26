@@ -49,7 +49,7 @@ import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import * as titlesRepo from '@/server/repositories/titles.repository';
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
-import { generateMarkdown } from '@/server/generators/documents';
+import { generateCsv, generateMarkdown } from '@/server/generators/documents';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { namedFormat, resolveReference } from '@/server/agent/continuity';
 import { detectReference } from '@/server/agent/routing-rules';
@@ -72,7 +72,7 @@ import {
   DEFAULT_BUDGET,
   type TaskBudget,
 } from '@/server/tasks/capabilities';
-import { hasHandler, registerHandler, runTask, type ReplanTrigger } from '@/server/tasks/executor';
+import { handlerFor, hasHandler, registerHandler, runTask, type ReplanTrigger } from '@/server/tasks/executor';
 import { registerAllHandlers } from '@/server/tasks/handlers';
 import { allCapabilities } from '@/server/tasks/capabilities';
 import {
@@ -2076,6 +2076,229 @@ async function main() {
     const legacyThread = await startConversation({ userId: plsOwner, firstMessage: 'old result' });
     await chatRepo.addMessage({ conversationId: legacyThread.id, role: 'ASSISTANT', content: '', payload: { results: [{ kind: 'pls', payload: { estimates: { paths: [{ from: 'A', to: 'B', coefficient: 0.4321 }] } } }] } });
     check('chat: a stored result without provenance is still allowed as unpinned', untraced(inspectChatReply('The path was β = .432.', { allowed: await chatAllowedValues({ userId: plsOwner, conversationId: legacyThread.id }), message: '' }).flags), false);
+
+    {
+      section('task writing and task exports use eligible analysis results only (WS2 B4, N4)');
+
+      /* The scripted-model setup of the N1 block, restored afterwards. */
+      const { FakeAdapter } = await import('@/server/ai/gateway/adapters/fake');
+      const { createGateway } = await import('@/server/ai/gateway/gateway');
+      const { productionDeps, setGatewayForTests } = await import('@/server/ai/gateway');
+      const { resetEnvCache: resetEnv } = await import('@/config/env');
+      const { runForUser } = await import('@/server/ai/request-scope');
+      const { artifacts: artifactsTable } = await import('@/server/db/schema');
+      const ExcelJS = (await import('exceljs')).default;
+      const fake = new FakeAdapter('openai');
+      setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: fake }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+      const previousKey = process.env.OPENAI_API_KEY;
+      process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+      resetEnv();
+      const markers = (text: string, marker: string) => text.split(marker).length - 1;
+
+      try {
+        registerAllHandlers();
+        const write = handlerFor('document.write')!;
+        const generate = handlerFor('document.generate')!;
+        const analyse = handlerFor('data.analyse')!;
+        type Obs = Awaited<ReturnType<typeof write>> & { status: string; outputs: OutputReference[]; warnings: { code: string; metadata?: Record<string, unknown> }[]; errors: { code: string }[]; artifacts: { id: string }[]; recommendedNextActions: { input?: Record<string, unknown> }[] };
+        const step = (userId: string, input: Record<string, unknown>, available: OutputReference[], context: Record<string, unknown> = {}) => ({
+          taskId: statsTask.id,
+          stepId: crypto.randomUUID(),
+          userId,
+          projectId: null,
+          locale: 'en' as const,
+          input,
+          available,
+          dependencies: {},
+          context,
+          signal: new AbortController().signal,
+        });
+        const run = async (handler: typeof write, userId: string, ...rest: [Record<string, unknown>, OutputReference[], Record<string, unknown>?]) =>
+          (await runForUser(userId, () => handler(step(userId, ...rest)))) as Obs;
+        const producerOf = (capability: string) => ({ taskId: statsTask.id, stepId: crypto.randomUUID(), capability, projectId: null });
+
+        /* The real task outputs of the B2 block: a pinned PLS estimate and a pinned CB-SEM fit. */
+        const computedOutputs = statsSteps.flatMap((entry) => ((entry.output as { outputs?: OutputReference[] } | null)?.outputs ?? []));
+        const plsData = computedOutputs.find((output) => output.type === 'pls-results.v1')?.data as { estimates: { paths: { from: string; to: string; coefficient: number }[] } };
+        const cbsemData = computedOutputs.find((output) => output.type === 'analysis.v1')?.data as { fit: { cfi: number } };
+        const pinnedCoefficient = plsData.estimates.paths.find((path) => path.from === 'A' && path.to === 'B')!.coefficient;
+        const pinnedBeta = pinnedCoefficient.toFixed(3);
+        const pinnedCfi = cbsemData.fit.cfi.toFixed(3);
+        /* A PLS estimate on the first rows of a file only (D3), as a task output. */
+        const windowedCoefficient = windowed.structural.paths.find((path) => path.from === 'A' && path.to === 'B')!.coefficient;
+        const windowedOutput = makeOutput(producerOf('statistics.pls'), 'pls-results.v1', {
+          verdict: windowed.report.verdict,
+          n: windowed.n,
+          estimates: { paths: windowed.structural.paths.map((path) => ({ from: path.from, to: path.to, coefficient: path.coefficient })), n: windowed.n },
+          provenance: windowed.provenance,
+        });
+        /* Prose an earlier step wrote: its numbers are not the researcher's. */
+        const earlierProse = makeOutput(producerOf('document.write'), 'prose.v1', { text: 'Earlier we reported M = 4.4417 for the scale.', references: [], heading: 'Earlier' });
+        const available = [...computedOutputs, windowedOutput, earlierProse];
+
+        /* --- document.write: the real handler, finished --- */
+        fake.push({
+          reply: {
+            text:
+              `The path from A to B was β = ${pinnedBeta}, and the CFI was ${pinnedCfi}. ` +
+              `A further test found t(98) = 9.137, p = .0271. On the larger file the path was β = ${windowedCoefficient.toFixed(3)}. ` +
+              'The sample was N = 321. The planner mentioned r = .6173, and the earlier section gave M = 4.4417.',
+          },
+        });
+        const callsBefore = fake.calls.length;
+        const written = await run(write, plsOwner, { section: 'Results with r = .6173' }, available, { request: 'Write the results chapter. Our sample was N = 321.' });
+        const prose = written.outputs.find((output) => output.type === 'prose.v1')?.data as { text: string; integrity?: import('@/server/integrity/section').SectionIntegrity };
+        check('document.write (real handler) succeeds', written.status, 'success');
+        assertTrue('a pinned PLS coefficient survives', prose.text.includes(`β = ${pinnedBeta}`));
+        assertTrue('a pinned CB-SEM fit index survives', prose.text.includes(pinnedCfi));
+        assertTrue('a number in the researcher’s request survives', prose.text.includes('N = 321'));
+        assertTrue('invented numbers are quarantined', !/9\.137|\.0271/.test(prose.text));
+        assertTrue('the windowed estimate is quarantined (D3)', !prose.text.includes(windowedCoefficient.toFixed(3)));
+        assertTrue('a number only in the planner’s step input is quarantined', !prose.text.includes('.6173'));
+        assertTrue('a number only in earlier prose is quarantined', !prose.text.includes('4.4417'));
+        check('each quarantined number is a visible English marker', markers(prose.text, QUARANTINE_MARKER.en), prose.integrity?.quarantined);
+        assertTrue('at least the five untraced numbers were quarantined', (prose.integrity?.quarantined ?? 0) >= 5);
+        check(
+          'prose.v1 records the model-mode result, with the eligible results used and the windowed one excluded (never "verified")',
+          [prose.integrity?.mode, prose.integrity?.guardVersion, prose.integrity?.sources.map((source) => source.tier), prose.integrity?.excluded.map((source) => [source.id, source.tier])],
+          ['model', NUMERIC_GUARD_VERSION, ['pinned', 'pinned'], [[windowedOutput.id, 'windowed']]],
+        );
+        const quarantineWarning = written.warnings.find((warning) => warning.code === 'write.quarantined');
+        check('the step warns write.quarantined with the count', quarantineWarning?.metadata?.quarantined, prose.integrity?.quarantined);
+        const prompt = JSON.stringify(fake.calls.slice(callsBefore).map((call) => call.request));
+        assertTrue('the prompt labels results as computed, not verified', prompt.includes('not independently verified'));
+        assertTrue('the windowed result is not given to the model', !prompt.includes('truncatedTo') && prompt.includes(pinnedCoefficient.toFixed(4).replace(/0+$/, '')));
+
+        /* Arabic writing: the Arabic marker. */
+        fake.push({ reply: { text: `كان معامل المسار β = ${pinnedBeta}، ووجدنا t = 9.137 في اختبار آخر، وهذا ما أظهرته النتائج.` } });
+        const arabic = await run(write, plsOwner, { section: 'النتائج' }, available, { request: 'اكتب فصل النتائج' });
+        const arabicText = (arabic.outputs[0]?.data as { text: string }).text;
+        assertTrue('Arabic: the traced value survives, the invented one takes the Arabic marker', arabicText.includes(pinnedBeta) && !arabicText.includes('9.137') && markers(arabicText, QUARANTINE_MARKER.ar) === 1);
+
+        /* Clean text is kept exactly, with no warning. */
+        fake.push({ reply: { text: 'This chapter reports the structural model and the measurement model in turn, as planned.' } });
+        const clean = await run(write, plsOwner, { section: 'Overview' }, available, { request: 'Write an overview.' });
+        check(
+          'text with no untraced number is unchanged and not warned about',
+          [(clean.outputs[0]?.data as { text: string }).text, (clean.outputs[0]?.data as { integrity: { quarantined: number } }).integrity.quarantined, clean.warnings.some((warning) => warning.code === 'write.quarantined')],
+          ['This chapter reports the structural model and the measurement model in turn, as planned.', 0, false],
+        );
+
+        /* --- the unfinished path: quarantined too, and the continuation starts from the guarded text --- */
+        fake.push(
+          { reply: { text: 'The first finding was t = 9.137 in the survey, and the analysis continued', finishReason: 'length' } },
+          ...Array.from({ length: 5 }, () => ({ reply: { text: ' with more of the chapter', finishReason: 'length' as const } })),
+        );
+        const unfinished = await run(write, plsOwner, { section: 'Discussion' }, available, { request: 'Write the discussion.' });
+        const unfinishedProse = unfinished.outputs[0]?.data as { text: string; complete: boolean; integrity: { quarantined: number } };
+        const continueFrom = String(unfinished.recommendedNextActions[0]?.input?.continueFrom ?? '');
+        check(
+          'unfinished writing is partial, quarantined, and warned about',
+          [unfinished.status, unfinishedProse.complete, unfinishedProse.text.includes('9.137'), unfinishedProse.integrity.quarantined, unfinished.warnings.map((warning) => warning.code).sort()],
+          ['partial', false, false, 1, ['write.incomplete', 'write.quarantined']],
+        );
+        assertTrue('continueFrom holds the quarantined text, not the number', continueFrom.includes(QUARANTINE_MARKER.en) && !continueFrom.includes('9.137'));
+
+        /* --- a run-backed data.analyse display: tiered by its run row --- */
+        const tDisplay = makeOutput(producerOf('data.analyse'), 'analysis.v1', { display: { kind: 'analysis', payload: tTest.result, runId: tTest.run.id } });
+        const tValue = (tTest.result as { statistic: { value: number } }).statistic.value;
+        fake.push({ reply: { text: `The groups differed, t = ${tValue.toFixed(3)}, and a second test gave t = 9.137.` } });
+        const tWritten = await run(write, statsOwner, { section: 'Results' }, [tDisplay], { request: 'Write the results.' });
+        const tProse = tWritten.outputs[0]?.data as { text: string; integrity: { sources: { id: string; tier: string }[] } };
+        check('a run-backed result traces through its run row', [tProse.text.includes(`t = ${tValue.toFixed(3)}`), tProse.text.includes('9.137'), tProse.integrity.sources], [true, false, [{ id: tTest.run.id, tier: legacyResultTier(tTest.run) }]]);
+
+        /* --- XLSX: eligible results only, planner input.table ignored, a Provenance sheet --- */
+        const plannerTable = { headers: ['Invented'], rows: [[99999.5]] };
+        const artifactCount = async (userId: string) => (await db.select().from(artifactsTable).where(eq(artifactsTable.userId, userId))).length;
+        const xlsx = await run(generate, plsOwner, { format: 'xlsx', title: 'Results workbook', table: plannerTable }, available);
+        check('the XLSX export succeeds, warning that a windowed result was left out', [xlsx.status, xlsx.warnings.map((warning) => warning.code)], ['success', ['export.windowedExcluded']]);
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load((await readArtifact(xlsx.artifacts[0]!.id, plsOwner)).bytes as never);
+        const sheetNames = workbook.worksheets.map((sheet) => sheet.name);
+        const cellsOf = (name: string) => {
+          const values: unknown[][] = [];
+          workbook.getWorksheet(name)?.eachRow((row) => values.push((row.values as unknown[]).slice(1)));
+          return values;
+        };
+        const allCells = sheetNames.flatMap((name) => cellsOf(name).flat());
+        check(
+          'sheets come from the eligible results, then Provenance; no planner "Data" sheet',
+          sheetNames,
+          ['S1 PLS path coefficients', 'S1 PLS R squared', 'S1 PLS loadings', 'S2 CB-SEM fit indices', 'S2 CB-SEM standardised loadings', 'Provenance'],
+        );
+        assertTrue('the planner table’s value is nowhere in the workbook', !allCells.includes(99999.5));
+        assertTrue('the windowed coefficient is nowhere in the workbook', !allCells.includes(windowedCoefficient));
+        const pathRow = cellsOf('S1 PLS path coefficients').find((row) => row[0] === 'A' && row[1] === 'B');
+        check('numbers are written as numbers, exactly as computed', [typeof pathRow?.[2], pathRow?.[2]], ['number', pinnedCoefficient]);
+        const provenance = cellsOf('Provenance');
+        check(
+          'the Provenance sheet: source, tier and the legacy engine stamp; computed, never "verified"',
+          [provenance[0], provenance.slice(1).map((row) => [row[0], row[4], row[5], row[9]])],
+          [
+            ['Source', 'Analysis', 'Step', 'Reference', 'Tier', 'Engine', 'Dataset version', 'Content hash', 'Rows analysed', 'Status'],
+            [
+              ['S1', 'pinned', LEGACY_ENGINE_STAMP, 'Computed by the legacy analysis engine; not independently verified'],
+              ['S2', 'pinned', LEGACY_ENGINE_STAMP, 'Computed by the legacy analysis engine; not independently verified'],
+            ],
+          ],
+        );
+        assertTrue('no tier or cell says "verified"', !allCells.some((cell) => typeof cell === 'string' && /^verified$/i.test(cell)));
+
+        /* --- CSV: one long table from the same results, deterministic --- */
+        const csvOnce = await run(generate, plsOwner, { format: 'csv', title: 'Results table', table: plannerTable }, available);
+        const csvTwice = await run(generate, plsOwner, { format: 'csv', title: 'Results table', table: plannerTable }, available);
+        /* Decoded with the byte-order mark kept, so its presence can be checked. */
+        const csvText = (id: string) => readArtifact(id, plsOwner).then((found) => new TextDecoder('utf-8', { ignoreBOM: true }).decode(found.bytes));
+        const csv = await csvText(csvOnce.artifacts[0]!.id);
+        const csvLines = csv.replace(/^﻿/, '').split('\r\n');
+        check('the CSV has a byte-order mark, CRLF lines and the long header', [csv.startsWith('﻿'), csv.includes('\r\n'), !/[^\r]\n/.test(csv), csvLines[0]], [true, true, true, 'source,table,row,column,value']);
+        assertTrue('the CSV carries the pinned coefficient as a long row', csvLines.includes(`S1,PLS path coefficients,1,Coefficient,${pinnedCoefficient}`) || csvLines.some((line) => line.startsWith('S1,PLS path coefficients,') && line.endsWith(`,Coefficient,${pinnedCoefficient}`)));
+        assertTrue('the CSV carries the provenance rows', csvLines.includes('S1,provenance,1,Tier,pinned') && csvLines.includes(`S2,provenance,1,Engine,${LEGACY_ENGINE_STAMP}`));
+        assertTrue('the planner table and the windowed result are not in the CSV', !csv.includes('99999.5') && !csv.includes('Invented') && !csv.includes(String(windowedCoefficient)));
+        check('the same outputs give the same CSV', await csvText(csvTwice.artifacts[0]!.id), csv);
+
+        /* --- no eligible results: a plain failure, no file --- */
+        const before = await artifactCount(plsOwner);
+        const modelCallsBefore = fake.calls.length;
+        const failures = [
+          await run(generate, plsOwner, { format: 'xlsx', table: plannerTable }, []),
+          await run(generate, plsOwner, { format: 'csv', table: plannerTable }, [earlierProse]),
+          await run(generate, plsOwner, { format: 'xlsx', table: plannerTable }, [windowedOutput]),
+          await run(generate, plsOwner, { format: 'csv', table: plannerTable }, [windowedOutput]),
+        ];
+        check(
+          'no analysis → export.noAnalysis; only windowed → export.windowedOnly',
+          failures.map((failure) => [failure.status, failure.errors[0]?.code]),
+          [['failed', 'export.noAnalysis'], ['failed', 'export.noAnalysis'], ['failed', 'export.windowedOnly'], ['failed', 'export.windowedOnly']],
+        );
+        check('and no artifact is stored for a failed export, and no model is called', [await artifactCount(plsOwner), failures.every((failure) => failure.artifacts.length === 0), fake.calls.length], [before, true, modelCallsBefore]);
+
+        /* --- data.analyse descriptive tables carry the provenance of the data read --- */
+        const describe = (datasetId: string) => run(analyse, plsOwner, { intent: 'data.describe' }, [], { datasetId, request: 'describe the data' });
+        const wholeFile = await describe(plsFile.dataset.id);
+        const firstRows = await describe(bigFile.dataset.id);
+        const provenanceOf = (observation: Obs) => (observation.outputs[0]?.data as { provenance?: { truncatedTo?: number; datasetVersionId: string | null; engineVersion: string } }).provenance;
+        check(
+          'data.analyse outputs record the data read: whole file pinned, first rows windowed',
+          [provenanceOf(wholeFile)?.truncatedTo, Boolean(provenanceOf(wholeFile)?.datasetVersionId), provenanceOf(wholeFile)?.engineVersion, provenanceOf(firstRows)?.truncatedTo],
+          [undefined, true, LEGACY_ENGINE_STAMP, 5_000],
+        );
+        const describedXlsx = await run(generate, plsOwner, { format: 'xlsx' }, wholeFile.outputs);
+        const describedBook = new ExcelJS.Workbook();
+        await describedBook.xlsx.load((await readArtifact(describedXlsx.artifacts[0]!.id, plsOwner)).bytes as never);
+        check('descriptive tables from the whole file export, tiered pinned', [describedBook.worksheets[0]?.name, describedBook.getWorksheet('Provenance')?.getRow(2).getCell(5).value], ['S1 Descriptive statistics', 'pinned']);
+        check('descriptive tables from the first rows only: export.windowedOnly', (await run(generate, plsOwner, { format: 'csv' }, firstRows.outputs)).errors[0]?.code, 'export.windowedOnly');
+        const windowedMean = (firstRows.outputs[0]?.data as { display: { payload: { descriptives: { mean: number }[] } } }).display.payload.descriptives[0]!.mean;
+        fake.push({ reply: { text: `The first indicator had a mean of M = ${windowedMean.toFixed(3)} across the file.` } });
+        const describedProse = (await run(write, plsOwner, { section: 'Descriptives' }, firstRows.outputs, { request: 'Describe the sample.' })).outputs[0]?.data as { text: string };
+        assertTrue('a windowed descriptive value does not authorize a number in prose', !describedProse.text.includes(windowedMean.toFixed(3)));
+      } finally {
+        setGatewayForTests(null);
+        if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = previousKey;
+        resetEnv();
+      }
+    }
   }
 
   const realPath = bootstrapped?.paths.find((path) => path.key === 'A→B');
@@ -3616,7 +3839,17 @@ async function main() {
    * test below asserts. Exercising the format itself needs Latin text, which
    * the case after this loop provides.
    */
-  for (const format of ['docx', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'bib', 'ris'] as const) {
+  /*
+   * XLSX and CSV hold computed analysis results only (WS2 B4): the planner's
+   * `input.table` in this fixture is not one, and there is no analysis here,
+   * so the export fails plainly and stores nothing.
+   */
+  for (const format of ['xlsx', 'csv'] as const) {
+    const { generate } = await generateAs(format);
+    check(`${format}: a planner table alone is refused (export.noAnalysis), no file`, [generate?.status, generate?.errorReasonKey, generate?.artifactIds.length], ['FAILED', 'export.noAnalysis', 0]);
+  }
+
+  for (const format of ['docx', 'pptx', 'md', 'txt', 'bib', 'ris'] as const) {
     const { task, generate } = await generateAs(format);
 
     check(`${format}: the task completes`, (await tasksRepo.findAny(task.id))?.status, 'COMPLETED');
@@ -3699,8 +3932,9 @@ async function main() {
   }
 
   {
-    const { generate } = await generateAs('xlsx');
-    const { bytes } = await readArtifact(generate?.artifactIds[0] as string, artifactOwner2);
+    /* The workbook generator itself; the task path to it is covered in the WS2 B4 block. */
+    const { generateXlsx } = await import('@/server/generators/spreadsheet');
+    const bytes = await generateXlsx([{ name: 'Data', headers: ['المتغيّر', 'القيمة'], rows: [['التحصيل', 4.2]] }]);
 
     const zip = await JSZip.loadAsync(bytes);
     assertTrue('the workbook is valid', zip.file('xl/workbook.xml') !== null);
@@ -3731,8 +3965,8 @@ async function main() {
   }
 
   {
-    const { generate } = await generateAs('csv');
-    const { bytes } = await readArtifact(generate?.artifactIds[0] as string, artifactOwner2);
+    /* The CSV generator itself; the task path to it is covered in the WS2 B4 block. */
+    const bytes = generateCsv(['المتغيّر', 'القيمة'], [['التحصيل', 4.2]]);
 
     /* The BOM, without which Excel on Windows mangles Arabic. */
     check('CSV carries a UTF-8 BOM', bytes[0], 0xef);

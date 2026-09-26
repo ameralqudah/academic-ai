@@ -1,4 +1,4 @@
-import { and, count, desc, eq } from 'drizzle-orm';
+import { and, count, desc, eq, inArray } from 'drizzle-orm';
 
 import type { SectionKey } from '@/config/research';
 import { db } from '@/server/db';
@@ -151,6 +151,16 @@ export async function addVersion(
   const [row] = await db.insert(sectionVersions).values(values).returning();
   if (!row) throw new Error('Failed to store section version');
   return row;
+}
+
+/** The latest version of each of these sections, in one query (sections with none are absent). */
+export async function latestVersions(sectionIds: readonly string[]): Promise<SectionVersion[]> {
+  if (sectionIds.length === 0) return [];
+  return db
+    .selectDistinctOn([sectionVersions.sectionId])
+    .from(sectionVersions)
+    .where(inArray(sectionVersions.sectionId, [...sectionIds]))
+    .orderBy(sectionVersions.sectionId, desc(sectionVersions.createdAt));
 }
 
 export async function listVersions(sectionId: string, limit = 20): Promise<SectionVersion[]> {

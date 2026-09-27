@@ -13,10 +13,10 @@ import './support/unit-env';
 
 import { AppError } from '@/server/http/errors';
 import { actionHash, inputHash, stepIdempotencyKey } from '@/server/runs/approvals';
-import { assertRlsEnforced, RLS_PROBE_ATTEMPTS, rlsProbeFailure, setRlsProbeForTests, type RlsProbe } from '@/server/runs/db-scope';
+import { assertRlsEnforced, isTransientDbError, RLS_PROBE_ATTEMPTS, rlsProbeFailure, setRlsProbeForTests, type RlsProbe } from '@/server/runs/db-scope';
 import { createLeaseKeeper, LEASE_RENEW_MAX_ERRORS } from '@/server/runs/lease';
 import { activeElapsedMs, DEFAULT_RUN_LIMITS, HARD_CEILINGS, resolveLimits } from '@/server/runs/limits';
-import { decide, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
+import { decide, planPreflight, storedDecision, type PolicyDeps, type PolicyRequest } from '@/server/runs/policy';
 import { resolveReferences, toolsFor, validatePlan } from '@/server/runs/planner';
 import { gatewayToolsFor, listTools, TOOL_NAMES, toolByName } from '@/server/runs/registry';
 import { canApproval, canRun, canStep, IllegalTransitionError, assertRun } from '@/server/runs/state';
@@ -249,6 +249,45 @@ async function main() {
   const decision = await decide(request(), deps());
   check('every rule’s result is recorded', decision.rules.map((rule) => rule.rule), ['tool.known', 'tool.context', 'flag', 'auth.project', 'auth.resources', 'entitlement', 'limits.run', 'limits.user', 'run.state', 'approval']);
   check('the stored decision has no inputs', Object.keys(storedDecision(decision)).sort(), ['approval', 'evaluatedAt', 'outcome', 'reason', 'role', 'rules', 'tier', 'tool']);
+
+  section('WS3-B R7: the checks before the planner’s model call');
+  const preflight = async (d: PolicyDeps = deps(), cancelRequested = false) => {
+    const result = await planPreflight({ userId: 'u', projectId: 'p', run: { id: 'run', cancelRequested } }, d);
+    return result.ok ? 'ok' : result.stopReason;
+  };
+  const freeDeps = (over: Partial<PolicyDeps> = {}) => deps({ tier: async () => 'free', ...over });
+  const freeLimits = DEFAULT_RUN_LIMITS.free;
+  check('an editor with budget left may plan', await preflight(), 'ok');
+  check('a cancelled run is not planned', await preflight(deps(), true), 'cancelled');
+  check('… cancellation wins over every other refusal', await preflight(deps({ flags: () => ({ graph: false, runs: false }) }), true), 'cancelled');
+  check('FF_RUNS off: no planning', await preflight(deps({ flags: () => ({ graph: true, runs: false }) })), 'policy_denied');
+  check('FF_GRAPH off: no planning', await preflight(deps({ flags: () => ({ graph: false, runs: true }) })), 'policy_denied');
+  check('a viewer, or a non-member, may not plan', [await preflight(deps({ role: async () => 'VIEWER' })), await preflight(deps({ role: async () => null }))], ['policy_denied', 'policy_denied']);
+  check('an owner may plan', await preflight(deps({ role: async () => 'OWNER' })), 'ok');
+  check('a run with no room for one more model call in its token budget is not planned', await preflight(freeDeps({ runUsage: async () => ({ tokens: freeLimits.maxRunTokens - 1, costMicroUsd: 0 }) })), 'limit_tokens');
+  check('… nor in its cost budget', await preflight(freeDeps({ runUsage: async () => ({ tokens: 0, costMicroUsd: freeLimits.maxCostMicroUsd - 1 }) })), 'limit_cost');
+  check('… nor when the user’s daily cost leaves no room for the call', await preflight(freeDeps({ dailyCost: async () => freeLimits.maxDailyCostMicroUsd - 1 })), 'limit_daily_cost');
+  check('… while a daily cost well under the limit plans', await preflight(freeDeps({ dailyCost: async () => freeLimits.maxDailyCostMicroUsd / 10 })), 'ok');
+  const allRules = await planPreflight({ userId: 'u', projectId: 'p', run: { id: 'run', cancelRequested: false } }, deps());
+  check('every preflight rule is recorded, in order', allRules.rules.map((rule) => rule.rule), ['run.state', 'flag', 'auth.project', 'limits.run', 'limits.user']);
+  let usageRead = false;
+  await planPreflight({ userId: 'u', projectId: 'p', run: { id: 'run', cancelRequested: false } }, deps({ role: async () => 'VIEWER', runUsage: async () => { usageRead = true; return { tokens: 0, costMicroUsd: 0 }; } }));
+  check('the first refusal wins (a viewer’s budget is never read)', usageRead, false);
+
+  section('WS3-B R6: which database errors a retry can fix');
+  const coded = (code: string) => Object.assign(new Error(code), { code });
+  check(
+    'connection and server failures are transient: sockets, postgres.js, shutdown, cannot-connect, class 08 and 53, serialisation, deadlock',
+    ['ECONNRESET', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', '57P01', '57P03', '08006', '53300', '40001', '40P01'].map((code) => isTransientDbError(coded(code))),
+    Array(9).fill(true),
+  );
+  check('… also when wrapped as the cause (as drizzle wraps the driver error)', isTransientDbError(Object.assign(new Error('query failed'), { cause: coded('ECONNRESET') })), true);
+  check(
+    'statement errors are not: a unique violation, a trigger refusal, an RLS denial, a missing role, or no code at all',
+    [coded('23505'), coded('P0001'), coded('42501'), coded('42704'), new Error('boom')].map((error) => isTransientDbError(error)),
+    [false, false, false, false, false],
+  );
+  check('the RLS probe keeps the same classification', [rlsProbeFailure(coded('ECONNRESET')), rlsProbeFailure(coded('42501'))], ['transient', 'definitive']);
 
   section('Planner: proposes; its plan is validated, never trusted');
   const allowed = toolsFor('EDITOR', 'free');

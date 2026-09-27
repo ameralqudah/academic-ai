@@ -20,7 +20,7 @@ process.env.JOB_RUNNER = 'inline';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { resetEnvCache } from '@/config/env';
 import { forgetPlan, productionDeps, setGatewayForTests } from '@/server/ai/gateway';
@@ -40,11 +40,12 @@ import { toolByName } from '@/server/runs/registry';
 import { cancelRun, createRun, decideApproval, getRun, listToolsFor, reapRuns } from '@/server/runs/service';
 import * as store from '@/server/runs/store';
 import { previewVersionReplacement, replacementOf, replaceVersion } from '@/server/stats/graph';
-import { createSpec, startRun } from '@/server/stats/runs';
+import { createSpec, getProvenance, startRun } from '@/server/stats/runs';
 import { listVersions, transformVersion } from '@/server/stats/versions';
 
 const RUN = `runs-${Date.now()}`;
 /** Idempotency keys unique to this test run (keys are global, as in production). */
+const randomSuffix = () => Math.random().toString(36).slice(2, 10);
 const testKey = (label: string) => createHash('sha256').update(`${RUN}:${label}`).digest('hex');
 let passed = 0;
 let failed = 0;
@@ -788,6 +789,303 @@ async function main() {
   check('… in bounded batches: a batch of 1 is the oldest; the default is REAPER_RUN_BATCH', [(await store.systemStrandedRuns(1)).map((run) => run.id), (await store.systemStrandedRuns()).length <= store.REAPER_RUN_BATCH, store.REAPER_RUN_BATCH], [strandedAll.slice(0, 1), true, 50]);
   await cancelRun(me, P, keptOwnerRun);
   await cancelRun({ userId: editor }, P, keptEditorRun);
+
+  /* ------------------------------------------------------------------ */
+  section('WS3-B: run-engine readiness (R3, R4, R5, R6, R7, R11)');
+  const setFault = executorModule.setRunFaultForTests;
+  const purposeOf = (call: { request: unknown }) => (call.request as { purpose?: string }).purpose;
+  const waitFor = async (probe: () => Promise<boolean>, ms = 8_000) => {
+    for (const until = Date.now() + ms; Date.now() < until; ) {
+      if (await probe()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return false;
+  };
+  const eventCount = async (runId: string, type: string) => (await db.select().from(runEvents).where(and(eq(runEvents.runId, runId), eq(runEvents.type, type)))).length;
+  const usageOf = async (runId: string, purpose: string) => (await db.select({ status: aiUsageEvents.status }).from(aiUsageEvents).where(and(eq(aiUsageEvents.runId, runId), eq(aiUsageEvents.purpose, purpose)))).map((row) => row.status).sort();
+  const slowPlan = (steps: unknown[], delayMs: number) => {
+    (fake as unknown as { script: unknown[] }).script.length = 0;
+    fake.push({ reply: { text: JSON.stringify({ summary: 'test plan', steps }) }, delayMs });
+  };
+
+  /* R3: a stale runner's plan is rolled back with its run move. */
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const r3 = (await createRun(me, P, { intent: 'R3: a stale planner.' })).run.id;
+  await store.claimRunLease(owner, r3, 'worker-A');
+  await holder(r3, 'worker-A', () => store.transitionRun(owner, r3, ['QUEUED'], 'PLANNING', { startedAt: new Date() }));
+  const r3Plan = await runForUser(owner, () => planRun({ userId: owner, projectId: P, intent: 'R3', context: {}, role: 'OWNER', tier: 'free', limits: limitsFor('free') }));
+  if (!r3Plan.ok) throw new Error('plan');
+  await db.update(researchRuns).set({ leaseOwner: 'worker-B', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, r3));
+  const staleRecorded = await holder(r3, 'worker-A', () => store.recordPlan(owner, r3, { summary: 'x' }, r3Plan.plan.steps, r3Plan.meta));
+  check(
+    'R3: a runner whose lease was taken cannot record its plan: nothing is written (no steps, no run.planned), the run is still PLANNING',
+    [staleRecorded, (await store.readSteps(owner, r3)).length, await eventCount(r3, 'run.planned'), (await store.readRun(owner, r3))?.status],
+    [false, 0, 0, 'PLANNING'],
+  );
+  const freshRecorded = await holder(r3, 'worker-B', () => store.recordPlan(owner, r3, { summary: 'x' }, r3Plan.plan.steps, r3Plan.meta));
+  check('… the runner holding the lease then records it (no duplicate-seq failure)', [freshRecorded, (await store.readSteps(owner, r3)).length, (await store.readRun(owner, r3))?.status], [true, 1, 'RUNNING']);
+  await db.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, r3));
+  check('… and the run completes', [(await drain(r3))?.status, (await store.readRun(owner, r3))?.stopReason], ['SUCCEEDED', 'completed']);
+
+  /* R4: an analysis that did not succeed fails the step and the run, naming the statistics run. */
+  planReply([
+    { tool: 'createAnalysisSpec', label: 'Specify', input: { datasetVersionId: v2.id, spec: { analysisType: 'descriptives', variables: ['no_such_column'] } }, dependsOn: [] },
+    { tool: 'runAnalysis', label: 'Run', input: { specId: { $step: 0, path: 'specId' } }, dependsOn: [0] },
+    { tool: 'getAnalysisResult', label: 'Read', input: { runId: { $step: 1, path: 'runId' } }, dependsOn: [1] },
+  ]);
+  const r4 = (await createRun(me, P, { intent: 'R4: an analysis that is refused.' })).run.id;
+  const r4Done = await drain(r4);
+  const r4Steps = await store.readSteps(owner, r4);
+  const r4Error = r4Steps[1]?.error as { code?: string; statRunId?: string; final?: boolean } | null;
+  const [r4Stat] = r4Error?.statRunId ? await db.select().from(statRuns).where(eq(statRuns.id, r4Error.statRunId)) : [];
+  const r4Tries = (await db.select().from(runEvents).where(and(eq(runEvents.runId, r4), eq(runEvents.type, 'step.running')))).filter((event) => event.stepId === r4Steps[1]?.id).length;
+  check('R4: a refused analysis is a FAILED step (not SUCCEEDED), final at once (tried once, no retry)', [r4Steps[1]?.status, r4Error?.code, r4Tries, r4Error?.final], ['FAILED', 'analysis_refused', 1, true]);
+  check('… the step names the statistics run it left behind (refused, keyed by the step)', [r4Stat?.status, r4Stat?.idempotencyKey === r4Steps[1]?.idempotencyKey], ['refused', true]);
+  check('… the step that needed its result is skipped, and the run fails as tool_failed', [r4Steps[2]?.status, r4Done?.status, r4Done?.stopReason], ['SKIPPED', 'FAILED', 'tool_failed']);
+  /* A failed and a cancelled analysis, through the tool itself (the same key returns the same statistics run). */
+  const r4Spec = await createSpec(me, { projectId: P, datasetVersionId: v2.id, spec: { analysisType: 'descriptives', variables: ['x'] } });
+  const seededRun = async (status: 'failed' | 'cancelled', label: string) => {
+    /* Created queued (as the database requires), then finished as `status` — the transition the engine itself makes. */
+    const base = await startRun(me, r4Spec.id, { projectId: P, idempotencyKey: testKey(`r4-base-${label}`) });
+    const [row] = await db
+      .insert(statRuns)
+      .values({ specId: base.specId, userId: base.userId, projectId: base.projectId, datasetVersionId: base.datasetVersionId, datasetContentHash: base.datasetContentHash, specHash: base.specHash, analysisType: base.analysisType, engine: base.engine, engineVersion: base.engineVersion, runtime: base.runtime, status: 'queued', idempotencyKey: testKey(`r4-${label}`) })
+      .returning();
+    await db.update(statRuns).set({ status, finishedAt: new Date() }).where(eq(statRuns.id, row!.id));
+    return row!;
+  };
+  const analysisTool = toolByName('runAnalysis')!;
+  const toolCtx = (execution: 'run' | 'assistant', key: string) => ({ userId: owner, projectId: P, tier: 'free' as const, execution, runId: 'r', stepId: 's', idempotencyKey: key, signal: new AbortController().signal });
+  const failedRun = await seededRun('failed', 'failed');
+  const cancelledRun = await seededRun('cancelled', 'cancelled');
+  const inRun = async (key: string) => {
+    try {
+      await analysisTool.execute({ specId: r4Spec.id }, toolCtx('run', key));
+      return 'ok';
+    } catch (error) {
+      return error instanceof AppError ? [error.code, (error.details as { reason: string }).reason, (error.details as { statRunId: string }).statRunId] : 'threw';
+    }
+  };
+  check('… a failed analysis fails the run step, naming the statistics run', await inRun(testKey('r4-failed')), ['VALIDATION', 'analysis_failed', failedRun.id]);
+  check('… so does a cancelled one', await inRun(testKey('r4-cancelled')), ['VALIDATION', 'analysis_cancelled', cancelledRun.id]);
+  check(
+    '… while the statistics assistant still reads the status, unchanged (D-B1: runs only)',
+    [((await analysisTool.execute({ specId: r4Spec.id }, toolCtx('assistant', testKey('r4-failed')))).output as { status: string }).status, ((await analysisTool.execute({ specId: r4Spec.id }, toolCtx('assistant', testKey('r4-cancelled')))).output as { status: string }).status],
+    ['failed', 'cancelled'],
+  );
+
+  /* R5: cancel reaches the model call in a step. */
+  planReply([{ tool: 'generateDraft', label: 'Draft', input: { instruction: 'Write one sentence about trust.' }, dependsOn: [] }]);
+  fake.push({ reply: { text: 'Trust matters to people.' }, delayMs: 30_000 });
+  const r5 = (await createRun(me, P, { intent: 'R5: cancel a slow draft.' })).run.id;
+  const r5Runner = advanceRun(r5);
+  const r5Running = await waitFor(async () => (await store.readSteps(owner, r5))[0]?.status === 'RUNNING' && fake.calls.some((call) => purposeOf(call) === 'runs.generateDraft' && !call.signal.aborted));
+  const r5Call = fake.calls.filter((call) => purposeOf(call) === 'runs.generateDraft').at(-1)!;
+  const r5CancelAt = Date.now();
+  await cancelRun(me, P, r5);
+  await r5Runner;
+  const r5Stopped = Date.now() - r5CancelAt;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  check('R5: the draft step was calling the model when the run was cancelled', r5Running, true);
+  check('… the model call itself is aborted, and the runner stops within the cancel poll (not after the 30 s call)', [r5Call.signal.aborted, r5Stopped < 6_000], [true, true]);
+  check('… the step and the run are CANCELLED', [(await store.readSteps(owner, r5))[0]?.status, (await store.readRun(owner, r5))?.status], ['CANCELLED', 'CANCELLED']);
+  check('… and the aborted call is metered as cancelled, never as succeeded', await usageOf(r5, 'runs.generateDraft'), ['cancelled']);
+
+  /* R5: a step's timeout aborts its model call. */
+  process.env.RUN_LIMITS = JSON.stringify({ free: { maxStepMs: 1_000 } });
+  resetEnvCache();
+  resetLimits();
+  planReply([{ tool: 'extractEvidence', label: 'Evidence', input: { question: 'What does it say about x?', text: 'The study found that x predicts y in the survey data.' }, dependsOn: [] }]);
+  fake.push({ reply: { text: '{}' }, delayMs: 30_000 }, { reply: { text: '{}' }, delayMs: 30_000 });
+  const r5t = (await createRun(me, P, { intent: 'R5: a step that times out.' })).run.id;
+  const callsBefore = fake.calls.length;
+  const r5tStarted = Date.now();
+  await drain(r5t);
+  const r5tCalls = fake.calls.slice(callsBefore).filter((call) => purposeOf(call) === 'runs.extractEvidence');
+  delete process.env.RUN_LIMITS;
+  resetEnvCache();
+  resetLimits();
+  const r5tRun = await store.readRun(owner, r5t);
+  check('R5: each timed-out attempt aborts its model call (two attempts, both aborted), well before the 30 s reply', [r5tCalls.length, r5tCalls.every((call) => call.signal.aborted), Date.now() - r5tStarted < 15_000], [2, true, true]);
+  check('… and the run fails on the timeout', [r5tRun?.status, ((await store.readSteps(owner, r5t))[0]?.error as { code?: string } | null)?.code], ['FAILED', 'timeout']);
+
+  /* R5 + R7: a cancel during planning aborts the planner's call and cancels the run. */
+  slowPlan([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }], 30_000);
+  const r5p = (await createRun(me, P, { intent: 'R5: cancel while planning.' })).run.id;
+  const r5pRunner = advanceRun(r5p);
+  const r5pPlanning = await waitFor(async () => fake.calls.some((call) => purposeOf(call) === 'runs.plan' && !call.signal.aborted) && (await store.readRun(owner, r5p))?.status === 'PLANNING');
+  const r5pCall = fake.calls.filter((call) => purposeOf(call) === 'runs.plan').at(-1)!;
+  const r5pCancelAt = Date.now();
+  await cancelRun(me, P, r5p);
+  await r5pRunner;
+  const r5pRun = await store.readRun(owner, r5p);
+  check('R5: the planner was calling the model when the run was cancelled', r5pPlanning, true);
+  check('… its call is aborted and the runner stops within the cancel poll', [r5pCall.signal.aborted, Date.now() - r5pCancelAt < 6_000], [true, true]);
+  check('… the run is CANCELLED (not planner_failed), with no steps', [r5pRun?.status, r5pRun?.stopReason, (await store.readSteps(owner, r5p)).length], ['CANCELLED', 'cancelled', 0]);
+
+  /* R5: a lost lease during planning aborts the planner's call; nothing is written. */
+  setHeartbeat(150);
+  slowPlan([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }], 4_000);
+  const r5l = (await createRun(me, P, { intent: 'R5: lease lost while planning.' })).run.id;
+  const r5lRunner = advanceRun(r5l);
+  await waitFor(async () => fake.calls.some((call) => purposeOf(call) === 'runs.plan' && !call.signal.aborted) && (await store.readRun(owner, r5l))?.status === 'PLANNING');
+  const r5lCall = fake.calls.filter((call) => purposeOf(call) === 'runs.plan').at(-1)!;
+  await db.update(researchRuns).set({ leaseOwner: 'worker-B', leaseExpiresAt: sql`now() + interval '2 minutes'` }).where(eq(researchRuns.id, r5l));
+  const r5lAt = Date.now();
+  await r5lRunner;
+  setHeartbeat(null);
+  const r5lRun = await store.readRun(owner, r5l);
+  check('R5: a runner that loses its lease while planning aborts the planner call and stops soon', [r5lCall.signal.aborted, Date.now() - r5lAt < 3_000], [true, true]);
+  check('… and writes nothing: still PLANNING, no stop reason, no steps', [r5lRun?.status, r5lRun?.stopReason ?? null, (await store.readSteps(owner, r5l)).length], ['PLANNING', null, 0]);
+  await db.update(researchRuns).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(researchRuns.id, r5l));
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  check('… a later runner plans it and completes', (await drain(r5l))?.status, 'SUCCEEDED');
+
+  /* R6: a transient database error mid-run records no stop; the next dispatch completes the run. */
+  const transient = () => Object.assign(new Error('Connection reset'), { code: 'ECONNRESET' });
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const r6 = (await createRun(me, P, { intent: 'R6: a connection reset mid-run.' })).run.id;
+  let driveCalls = 0;
+  setFault((point) => {
+    if (point === 'drive' && ++driveCalls === 2) throw transient();
+  });
+  const r6Outcome = await advanceRun(r6);
+  setFault(null);
+  const r6Row = await store.readRun(owner, r6);
+  check('R6: a connection reset after planning leaves the run for the reaper: unavailable, still RUNNING, no stop reason, lease released', [r6Outcome, r6Row?.status, r6Row?.stopReason ?? null, r6Row?.leaseOwner ?? null], ['unavailable', 'RUNNING', null, null]);
+  check('… the next dispatch completes it', (await drain(r6))?.status, 'SUCCEEDED');
+
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const r6p = (await createRun(me, P, { intent: 'R6: a connection reset while planning.' })).run.id;
+  const planCallsBefore = fake.calls.filter((call) => purposeOf(call) === 'runs.plan').length;
+  let planFaults = 0;
+  setFault((point) => {
+    if (point === 'plan' && ++planFaults === 1) throw transient();
+  });
+  const r6pOutcome = await advanceRun(r6p);
+  setFault(null);
+  const r6pRow = await store.readRun(owner, r6p);
+  check('R6 (D-B4): a connection reset while planning is not planner_failed: unavailable, still PLANNING, no stop reason, no model call', [r6pOutcome, r6pRow?.status, r6pRow?.stopReason ?? null, fake.calls.filter((call) => purposeOf(call) === 'runs.plan').length - planCallsBefore], ['unavailable', 'PLANNING', null, 0]);
+  check('… the next dispatch plans and completes it', (await drain(r6p))?.status, 'SUCCEEDED');
+
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const r6i = (await createRun(me, P, { intent: 'R6: infrastructure while planning.' })).run.id;
+  setFault((point) => {
+    if (point === 'plan') throw new AppError('UNAVAILABLE', 'down', 'down', { reason: 'infra_unavailable', transient: true });
+  });
+  const r6iOutcome = await advanceRun(r6i);
+  setFault(null);
+  check('… infra_unavailable while planning stays transient (unavailable, no stop)', [r6iOutcome, (await store.readRun(owner, r6i))?.stopReason ?? null], ['unavailable', null]);
+  await finish(r6i);
+  await drain(r6i);
+
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const r6r = (await createRun(me, P, { intent: 'R6: RLS unavailable while planning.' })).run.id;
+  setFault((point) => {
+    if (point === 'plan') throw new AppError('UNAVAILABLE', 'no rls', 'no rls', { reason: 'rls_unavailable' });
+  });
+  await advanceRun(r6r);
+  setFault(null);
+  const r6rRow = await store.readRun(owner, r6r);
+  check('… while rls_unavailable while planning is still recorded, fail-closed (the two stay distinct)', [r6rRow?.status, r6rRow?.stopReason], ['FAILED', 'rls_unavailable']);
+
+  planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+  const r6x = (await createRun(me, P, { intent: 'R6: a permanent database error.' })).run.id;
+  setFault((point) => {
+    if (point === 'drive') throw Object.assign(new Error('duplicate key'), { code: '23505' });
+  });
+  const r6xOutcome = await advanceRun(r6x);
+  setFault(null);
+  const r6xRow = await store.readRun(owner, r6x);
+  check('… a permanent database error (unique violation) still stops the run as worker_lost', [r6xOutcome, r6xRow?.status, r6xRow?.stopReason], ['ran', 'FAILED', 'worker_lost']);
+
+  /* R7: nothing is planned — no model call — when the run may not continue. */
+  const planCalls = () => fake.calls.filter((call) => purposeOf(call) === 'runs.plan').length;
+  const preflightRun = async (intent: string, setup: (runId: string) => Promise<void>) => {
+    planReply([{ tool: 'listDatasets', label: 'List', input: {}, dependsOn: [] }]);
+    const runId = (await createRun(me, P, { intent })).run.id;
+    await setup(runId);
+    const before = planCalls();
+    await advanceRun(runId);
+    const row = await store.readRun(owner, runId);
+    await finish(runId);
+    await drain(runId);
+    return [row?.status, row?.stopReason, planCalls() - before];
+  };
+  let r7Cancelled = false;
+  check(
+    'R7: a cancel recorded after the run moved to PLANNING is seen before the planner call: CANCELLED, no model call',
+    await preflightRun('R7: cancelled just before planning.', async (runId) => {
+      r7Cancelled = false;
+      setFault(async (point) => {
+        if (point === 'drive' && !r7Cancelled) {
+          r7Cancelled = true;
+          await db.update(researchRuns).set({ cancelRequestedAt: new Date() }).where(eq(researchRuns.id, runId));
+        }
+      });
+    }).finally(() => setFault(null)),
+    ['CANCELLED', 'cancelled', 0],
+  );
+  const seeded: string[] = [];
+  const seedUsage = async (values: Partial<typeof aiUsageEvents.$inferInsert>) => {
+    const [row] = await db.insert(aiUsageEvents).values({ callId: `ws3b-${randomSuffix()}`, attempt: 1, userId: owner, purpose: 'ws3b.seed', kind: 'generate', provider: 'openai', model: 'gpt-4.1', modelClass: 'standard', status: 'succeeded', ...values } as typeof aiUsageEvents.$inferInsert).returning({ id: aiUsageEvents.id });
+    seeded.push(row!.id);
+  };
+  check(
+    '… a user whose daily cost leaves no room for one call: limit_daily_cost, no model call',
+    await preflightRun('R7: daily budget spent.', async () => seedUsage({ costMicroUsd: limitsFor('free').maxDailyCostMicroUsd })),
+    ['FAILED', 'limit_daily_cost', 0],
+  );
+  await db.delete(aiUsageEvents).where(inArray(aiUsageEvents.id, seeded.splice(0)));
+  check(
+    '… a run whose token budget has no room for one call: limit_tokens, no model call',
+    await preflightRun('R7: run token budget spent.', async (runId) => seedUsage({ runId, projectId: P, inputTokens: limitsFor('free').maxRunTokens, totalTokens: limitsFor('free').maxRunTokens })),
+    ['FAILED', 'limit_tokens', 0],
+  );
+  check(
+    '… a run whose cost budget has no room for one call: limit_cost, no model call',
+    await preflightRun('R7: run cost budget spent.', async (runId) => seedUsage({ runId, projectId: P, costMicroUsd: limitsFor('free').maxCostMicroUsd })),
+    ['FAILED', 'limit_cost', 0],
+  );
+  await db.delete(aiUsageEvents).where(inArray(aiUsageEvents.id, seeded.splice(0)));
+  check(
+    '… FF_RUNS switched off while the run was queued: policy_denied, no model call',
+    await preflightRun('R7: flag off.', async () => {
+      process.env.FF_RUNS = 'false';
+      resetEnvCache();
+    }).finally(() => {
+      process.env.FF_RUNS = 'true';
+      resetEnvCache();
+    }),
+    ['FAILED', 'policy_denied', 0],
+  );
+
+  /* R11: what a run created names its run and step; what a person or the assistant created does not. */
+  planReply([
+    { tool: 'createDatasetVersion', label: 'Clean', input: { datasetVersionId: v2.id, transformation: { operation: 'clean', actions: [{ kind: 'trim-whitespace', columns: ['group'] }] } }, dependsOn: [] },
+    { tool: 'createAnalysisSpec', label: 'Specify', input: { datasetVersionId: { $step: 0, path: 'datasetVersionId' }, spec: { analysisType: 'descriptives', variables: ['x'] } }, dependsOn: [0] },
+    { tool: 'runAnalysis', label: 'Run', input: { specId: { $step: 1, path: 'specId' } }, dependsOn: [1] },
+  ]);
+  const r11 = (await createRun(me, P, { intent: 'R11: provenance of what a run creates.' })).run.id;
+  check('R11: the run completes', (await drain(r11))?.status, 'SUCCEEDED');
+  const r11Steps = await store.readSteps(owner, r11);
+  const r11Stat = (r11Steps[2]!.outputRef as { id: string }).id;
+  const r11Provenance = await getProvenance(me, r11Stat, P);
+  check(
+    '… the statistics run, its specification and the new data version resolve to exactly this run and their own steps',
+    [r11Provenance.run.createdByRun, r11Provenance.specification.createdByRun, r11Provenance.dataset.at(-1)?.transformation?.createdByRun],
+    [{ runId: r11, stepId: r11Steps[2]!.id }, { runId: r11, stepId: r11Steps[1]!.id }, { runId: r11, stepId: r11Steps[0]!.id }],
+  );
+  check('… the specification is reported as origin run (stored as assistant: no schema change)', [r11Provenance.specification.origin, (await db.select({ origin: statSpecs.origin }).from(statSpecs).where(eq(statSpecs.id, r11Provenance.specification.id)))[0]?.origin], ['run', 'assistant']);
+  check('… the versions a person made earlier in the chain name no run', r11Provenance.dataset.slice(0, -1).map((entry) => entry.transformation?.createdByRun ?? null), r11Provenance.dataset.slice(0, -1).map(() => null));
+  const personProvenance = await getProvenance(me, (await startRun(me, r4Spec.id, { projectId: P })).id, P);
+  check('… a specification and a run a person created name no run', [personProvenance.run.createdByRun, personProvenance.specification.createdByRun, personProvenance.specification.origin], [null, null, 'user']);
+  const assistantSpec = (await toolByName('createAnalysisSpec')!.execute({ datasetVersionId: v2.id, spec: { analysisType: 'descriptives', variables: ['m'] } }, toolCtx('assistant', testKey('r11-assistant-spec')))).output as { specId: string };
+  const assistantRun = (await analysisTool.execute({ specId: assistantSpec.specId }, toolCtx('assistant', testKey('r11-assistant-run')))).output as { runId: string };
+  const assistantProvenance = await getProvenance(me, assistantRun.runId, P);
+  check('… nor does one the assistant created with a key of a step’s shape that is no step', [assistantProvenance.run.createdByRun, assistantProvenance.specification.createdByRun, assistantProvenance.specification.origin], [null, null, 'assistant']);
+  check('… a stranger learns nothing from it (the provenance read is refused)', await outcome(() => getProvenance({ userId: stranger }, r11Stat, P)), 'NOT_FOUND');
+
 
   section('Flags');
   process.env.FF_RUNS = 'false';

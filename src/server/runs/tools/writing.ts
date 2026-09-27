@@ -36,7 +36,7 @@ export const explainResult = defineRunTool({
   resources: (input) => [{ kind: 'statRun', id: input.runId }],
   approval: async () => null,
   async execute(input, ctx) {
-    const explained = await explainRun(actor(ctx), ctx.projectId, input.runId, input.locale);
+    const explained = await explainRun(actor(ctx), ctx.projectId, input.runId, input.locale, { signal: ctx.signal });
     return { output: { text: explained.text.slice(0, 20_000), keys: explained.keys.slice(0, 200), verified: explained.verified }, ref: { kind: 'stat_run', id: input.runId } };
   },
 });
@@ -74,7 +74,7 @@ export const generateDraft = defineRunTool({
       maxOutputTokens: 2000,
       temperature: 0.3,
       countsAsRequest: false,
-    });
+    }, { signal: ctx.signal });
     const text = response.text.trim();
     const untraced = untracedStatistics(text, { strict: true });
     const unknown = tokensIn(text).filter((key) => !byKey.has(key));

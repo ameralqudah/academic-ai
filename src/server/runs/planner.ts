@@ -144,6 +144,8 @@ export interface PlannerInput {
   role: ProjectRole;
   tier: Tier;
   limits: Readonly<RunLimits>;
+  /** Aborts the model call when the run is cancelled or its lease is lost (WS3-B, R5). */
+  signal?: AbortSignal;
 }
 
 /** Asks the model for a plan through the gateway and validates it. */
@@ -169,7 +171,7 @@ export async function planRun(input: PlannerInput): Promise<{ ok: true; plan: Va
       countsAsRequest: true,
     },
     PLAN_SCHEMA,
-    { name: 'plan' },
+    { name: 'plan', ...(input.signal ? { signal: input.signal } : {}) },
   );
   const meta = { provider: response.provider, model: response.model, callId: response.callId };
   const validated = validatePlan(data, tools, input.limits);

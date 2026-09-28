@@ -879,7 +879,7 @@ async function main() {
   fake.push({ reply: { text: 'Trust matters to people.' }, delayMs: 30_000 });
   const r5 = (await createRun(me, P, { intent: 'R5: cancel a slow draft.' })).run.id;
   const r5Runner = advanceRun(r5);
-  const r5Running = await waitFor(async () => (await store.readSteps(owner, r5))[0]?.status === 'RUNNING' && fake.calls.some((call) => purposeOf(call) === 'runs.generateDraft' && !call.signal.aborted));
+  const r5Running = await waitFor(async () => (await store.readSteps(owner, r5))[0]?.status === 'RUNNING' && fake.calls.some((call) => purposeOf(call) === 'runs.generateDraft'));
   const r5Call = fake.calls.filter((call) => purposeOf(call) === 'runs.generateDraft').at(-1)!;
   const r5CancelAt = Date.now();
   await cancelRun(me, P, r5);

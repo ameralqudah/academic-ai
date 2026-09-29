@@ -879,7 +879,12 @@ async function main() {
   fake.push({ reply: { text: 'Trust matters to people.' }, delayMs: 30_000 });
   const r5 = (await createRun(me, P, { intent: 'R5: cancel a slow draft.' })).run.id;
   const r5Runner = advanceRun(r5);
-  const r5Running = await waitFor(async () => (await store.readSteps(owner, r5))[0]?.status === 'RUNNING' && fake.calls.some((call) => purposeOf(call) === 'runs.generateDraft'));
+  /*
+   * Wait on the in-memory model call, not the database: the run first plans, checks and claims the step
+   * (dozens of round trips), which takes seconds on a remote database, and polling would compete for the
+   * pool. The step is claimed RUNNING before its tool runs, so once the call is seen the step must be RUNNING.
+   */
+  const r5Running = (await waitFor(async () => fake.calls.some((call) => purposeOf(call) === 'runs.generateDraft'), 60_000)) && (await store.readSteps(owner, r5))[0]?.status === 'RUNNING';
   const r5Call = fake.calls.filter((call) => purposeOf(call) === 'runs.generateDraft').at(-1)!;
   const r5CancelAt = Date.now();
   await cancelRun(me, P, r5);

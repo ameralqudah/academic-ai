@@ -32,6 +32,7 @@ import { aiToolCalls, analysisJobs, datasetTransformations, datasetVersions, gra
 import * as graph from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
+import * as referencesRepo from '@/server/repositories/references.repository';
 import { register } from '@/server/services/account.service';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
@@ -552,6 +553,23 @@ async function main() {
 
   const taskDoc = await docxOf(await generateDocx({ title: 'Task', sections: [{ heading: 'Body', level: 1, paragraphs: [`A claim {{claim:${claimB.id}}} here.`], table: { headers: ['{{claim:x}}'], rows: [[`{{claim:${claimB.id}}}`]] } }] }));
   check('a task’s Word file (no validated claim chain) never shows a raw reference: it becomes the marker', [taskDoc.xml.includes('{{claim:'), taskDoc.paragraphs.includes(`A claim ${QUARANTINE_MARKER.en} here.`)], [false, true]);
+
+  /* WS3-D closure: the project title and the reference list are not claim-reference sources; a token there is never shown raw. */
+  const titled = await projectsRepo.create({ userId: owner, title: `Title {{claim:${claimB.id}}}`, academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+  await saveUserEdit({ projectId: titled.id, userId: owner, sectionKey: 'PROBLEM', content: 'Plain text, no reference.' });
+  await referencesRepo.create({ projectId: titled.id, rawText: `Doe (2020) {{claim:${claimB.id}}} and {{claim:00000000-0000-4000-8000-000000000000}}.` });
+  const titledBytes = (await exportProjectDocx({ projectId: titled.id, userId: owner, sectionLabels: {}, referencesLabel: 'References', unverifiedLabel: 'unverified' })).buffer;
+  const titledZip = await JSZip.loadAsync(titledBytes);
+  const rawAnywhere = (await Promise.all(Object.values(titledZip.files).filter((file) => !file.dir).map(async (file) => (await file.async('string')).includes('{{claim:')))).some(Boolean);
+  const titledDoc = await docxOf(titledBytes);
+  const titleMarker = [QUARANTINE_MARKER.en, QUARANTINE_MARKER.ar].find((candidate) => titledDoc.paragraphs.includes(`Title ${candidate}`));
+  check(
+    'a {{claim:…}} in the project title or a reference entry never reaches the Word file raw: anywhere in the package, including its metadata',
+    [rawAnywhere, Boolean(titleMarker), titledDoc.paragraphs.some((text) => text.startsWith(`Doe (2020) ${titleMarker} and ${titleMarker}.`))],
+    [false, true, true],
+  );
+  check('… they show the marker even for a current claim (only section text is a reference source), and add no claims appendix', [titledDoc.xml.includes(textOf(claimB)), titledDoc.paragraphs.some((text) => text === 'Claims and traceability' || text === 'الادعاءات وإمكانية تتبّعها')], [false, false]);
+  check('… and the stored title and reference are unchanged', [(await projectsRepo.findById(titled.id))?.title, (await referencesRepo.listForProject(titled.id))[0]?.rawText.includes(`{{claim:${claimB.id}}}`)], [`Title {{claim:${claimB.id}}}`, true]);
 
   /* ------------------------------------------------------------------ */
   section('Legacy paths: ownership, pinning, counts, cleaning, job races');

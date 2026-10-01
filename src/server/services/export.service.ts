@@ -300,10 +300,17 @@ export async function exportProjectDocx(input: ExportInput): Promise<{
   }
   const traces = referencedIn.size ? await claimTraceability(input.projectId, input.userId, [...referencedIn.keys()]) : [];
   const rendered = new Map(traces.flatMap((trace) => (trace.text !== null ? [[trace.id, trace.text] as const] : [])));
+  /*
+   * The title and the reference list are not claim-reference sources (only
+   * section text is validated, D1), so a `{{claim:…}}` typed there is shown
+   * as the marker, as in any other document (the generic Word generator).
+   */
+  const scrub = (text: string) => renderClaimTokens(text, new Map(), marker);
+  const title = scrub(project.title);
 
   const children: (Paragraph | Table)[] = [
     new Paragraph({
-      text: project.title,
+      text: title,
       heading: HeadingLevel.TITLE,
       alignment: AlignmentType.CENTER,
       bidirectional: rtl,
@@ -337,7 +344,7 @@ export async function exportProjectDocx(input: ExportInput): Promise<{
           new Paragraph({
             children: [
               new TextRun({
-                text: reference.formatted ?? reference.rawText,
+                text: scrub(reference.formatted ?? reference.rawText),
                 rightToLeft: rtl,
               }),
               ...(reference.verification === 'UNVERIFIED'
@@ -377,7 +384,7 @@ export async function exportProjectDocx(input: ExportInput): Promise<{
 
   const document = new Document({
     creator: 'Academic AI Research Assistant',
-    title: project.title,
+    title,
     numbering: {
       config: [
         {

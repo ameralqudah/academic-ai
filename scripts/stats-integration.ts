@@ -26,7 +26,7 @@ import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { createGateway } from '@/server/ai/gateway/gateway';
 import { runForUser } from '@/server/ai/request-scope';
 import { db } from '@/server/db';
-import { aiToolCalls, analysisJobs, datasetTransformations, datasetVersions, graphEdges, graphNodes, projectMembers, statEstimates, statFigures, statRuns, statSpecs, statTables } from '@/server/db/schema';
+import { aiToolCalls, analysisJobs, datasetTransformations, datasetVersions, graphEdges, graphNodes, projectMembers, staleMarks, statEstimates, statFigures, statRuns, statSpecs, statTables } from '@/server/db/schema';
 import * as graph from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
@@ -34,9 +34,13 @@ import { register } from '@/server/services/account.service';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { deleteFileOnly, saveCleanedCopy, saveUpload } from '@/server/services/dataset.service';
+import { generateSection } from '@/server/services/ai.service';
+import { personIntegrity, saveUserEdit } from '@/server/services/section.service';
 import { runAnalysis } from '@/server/services/statistics.service';
 import { hashOf } from '@/server/stats/access';
 import { previewReplacement, recordRunInGraph, replaceVersion, syncRunToGraph } from '@/server/stats/graph';
+import { QUARANTINE_MARKER } from '@/server/integrity/numbers';
+import type { SectionIntegrity } from '@/server/integrity/section';
 import { insertClaim, untracedStatistics } from '@/server/stats/manuscript';
 import { cancelRun, createSpec, executeRun, getProvenance, getRun, reapStatRuns, startRun, validateSpecRecord } from '@/server/stats/runs';
 import { executeStatsTool, explainRun, runAssistant, STATS_TOOL_NAMES } from '@/server/stats/tools';
@@ -347,6 +351,126 @@ async function main() {
   fake.push({ reply: { text: 'The effect is b = 0.25.' } }, { reply: { text: 'Still b = 0.25.' } });
   check('an explanation that keeps typing numbers is refused', await runForUser(owner, () => outcome(() => explainRun(me, P, rerunNew.id))), 'CONFLICT');
   setGatewayForTests(null);
+
+  /* ------------------------------------------------------------------ */
+  section('WS3-D (D1, D2): claims referenced from manuscript sections');
+  const latestIntegrity = async (key: 'RESULTS' | 'DISCUSSION' | 'CONCLUSION') => {
+    const saved = await projectsRepo.findSection(P, key);
+    return (saved ? (await projectsRepo.listVersions(saved.id, 1))[0]?.integrity : null) as SectionIntegrity | null;
+  };
+  const mirrorOf = async (key: string) => {
+    const blocks = await db.select().from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'block'), sql`${graphNodes.data} ->> 'role' = ${`claims:${key}`}`));
+    const block = blocks[0];
+    const sections = block ? await db.select({ srcId: graphEdges.srcId }).from(graphEdges).where(and(eq(graphEdges.dstId, block.id), eq(graphEdges.rel, 'has_block'))) : [];
+    const asserts = block ? await db.select({ id: graphEdges.id, dstId: graphEdges.dstId }).from(graphEdges).where(and(eq(graphEdges.srcId, block.id), eq(graphEdges.rel, 'asserts'))) : [];
+    return { blocks: blocks.length, block, sections: sections.length, asserts: asserts.map((edge) => edge.dstId).sort(), edgeIds: asserts.map((edge) => edge.id).sort() };
+  };
+  const sameSet = (ids: string[]) => [...ids].sort();
+  const claimA = (await insertClaim(me, P, rerunNew.id, { keys: ['coef:x'] })).claim;
+  const literature = await graph.createNode(P, me, { type: 'claim', data: { text: 'Earlier studies report the same direction.' } });
+  const claimText = String((claimA.data as { text: string }).text);
+  check('baseline: the claim’s own numbers, typed into a section, are manual (no attached analysis has them)', (await personIntegrity(P, owner, 'RESULTS', `X predicted Y: ${claimText}.`)).manual > 0, true);
+
+  const withA = `X predicted Y ({{claim:${claimA.id}}}). {{claim:${literature.id}}}`;
+  const savedA = await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: withA });
+  const integrityA = await latestIntegrity('RESULTS');
+  const numbersA = integrityA?.claims?.find((claim) => claim.id === claimA.id)?.numbers ?? 0;
+  check('1. a section referencing current claims saves, as written (the reference is the record)', [savedA.content, savedA.status], [withA, 'USER_EDITED']);
+  check(
+    '5. the claims are recorded with the version, and their numbers count as traced — not manual, not legacy',
+    [integrityA?.claims?.map((claim) => claim.id), numbersA > 0, integrityA?.traced === numbersA, integrityA?.manual, integrityA?.findings.length, integrityA?.sources],
+    [[claimA.id, literature.id], true, true, 0, 0, []],
+  );
+  const mirrorA = await mirrorOf('RESULTS');
+  check('6. the graph mirror is section ─has_block→ block ─asserts→ each referenced claim', [mirrorA.blocks, mirrorA.sections, mirrorA.asserts], [1, 1, sameSet([claimA.id, literature.id])]);
+  check('… and the mirror block is current', (await graph.assess(P, me, mirrorA.block!.id)).effective, 'current');
+
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: withA });
+  await Promise.all([saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: withA }), saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: withA })]);
+  const mirrorAgain = await mirrorOf('RESULTS');
+  const sectionNodes = await db.select({ id: graphNodes.id }).from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'section'), sql`${graphNodes.data} ->> 'key' = 'RESULTS'`));
+  check('7. saving the same text again, even twice at once, is idempotent: one section, one block, the same edges', [mirrorAgain.blocks, sectionNodes.length, mirrorAgain.edgeIds], [1, 1, mirrorA.edgeIds]);
+
+  const refusedSave = async (content: string) => {
+    try {
+      await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content });
+      return 'ok';
+    } catch (error) {
+      return error instanceof AppError ? [error.code, (error.details as { reason?: string })?.reason, ((error.details as { references?: { reason: string }[] })?.references ?? []).map((reference) => reference.reason)] : 'threw';
+    }
+  };
+  check('2. a missing claim is refused', await refusedSave(`See {{claim:00000000-0000-4000-8000-000000000000}} and {{claim:not-an-id}}.`), ['VALIDATION', 'invalid_claim_reference', ['not_found', 'not_found']]);
+  const theirClaim = await graph.createNode(other.id, { userId: stranger }, { type: 'claim', data: { text: 'Their own claim.' } });
+  check('3. a claim of another project is refused (as not found: nothing about it is revealed)', await refusedSave(`See {{claim:${theirClaim.id}}}.`), ['VALIDATION', 'invalid_claim_reference', ['not_found']]);
+  check('… and a node that is not a claim is refused', await refusedSave(`See {{claim:${hypothesis.id}}}.`), ['VALIDATION', 'invalid_claim_reference', ['not_a_claim']]);
+  check('4. a claim on replaced data (invalidated) is refused', await refusedSave(`See {{claim:${freshClaim.claim.id}}}.`), ['VALIDATION', 'invalid_claim_reference', ['not_current']]);
+  const untracedClaimId = (await db.insert(graphNodes).values({ projectId: P, type: 'claim', label: 'seeded', data: { text: 'The effect was b = 0.77, p = .010.' }, status: 'active', createdByUserId: owner }).returning({ id: graphNodes.id }))[0]!.id;
+  check('… and a claim whose numbers trace to nothing (not written through the strict path) is refused', await refusedSave(`See {{claim:${untracedClaimId}}}.`), ['VALIDATION', 'invalid_claim_reference', ['not_verified']]);
+  check('… a refused save changes nothing: text, record and mirror stay', [(await projectsRepo.findSection(P, 'RESULTS'))?.content, (await mirrorOf('RESULTS')).edgeIds], [withA, mirrorA.edgeIds]);
+
+  /* 8. Replacing claim A: the block that asserts it is flagged (WS3-A); the text must then reference the replacement. */
+  let replaceAck: string | undefined;
+  try {
+    await insertClaim(me, P, rerunNew.id, { keys: ['coef:x'], text: 'X predicted Y ({{value:coef:x}}).', supersedes: claimA.id });
+  } catch (error) {
+    replaceAck = (error as AppError & { details: { report?: { hash: string } } }).details.report?.hash;
+  }
+  const claimB = (await insertClaim(me, P, rerunNew.id, { keys: ['coef:x'], text: 'X predicted Y ({{value:coef:x}}).', supersedes: claimA.id, impactAcknowledged: replaceAck })).claim;
+  check('8. replacing a referenced claim asks for the impact first (the mirror block depends on it), then flags the block', [Boolean(replaceAck), (await graph.assess(P, me, mirrorA.block!.id)).effective !== 'current'], [true, true]);
+  check('… the text still referencing the replaced claim cannot be saved again', await refusedSave(withA), ['VALIDATION', 'invalid_claim_reference', ['not_current']]);
+  const withB = `X predicted Y ({{claim:${claimB.id}}}). {{claim:${literature.id}}}`;
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: withB });
+  const mirrorB = await mirrorOf('RESULTS');
+  const openOnBlock = await db.select({ kind: staleMarks.kind }).from(staleMarks).where(and(eq(staleMarks.nodeId, mirrorA.block!.id), sql`${staleMarks.resolvedAt} is null`));
+  check(
+    '… referencing the replacement moves the mirror to it (the replaced claim is no longer asserted), the block current again',
+    [mirrorB.blocks, mirrorB.asserts, (await graph.assess(P, me, mirrorA.block!.id)).effective, openOnBlock.length],
+    [1, sameSet([claimB.id, literature.id]), 'current', 0],
+  );
+  check('… and the replaced claim keeps its record (superseded, not deleted)', (await graph.assess(P, me, claimA.id)).effective, 'superseded');
+
+  /* 9. Unrelated content. */
+  const plain = await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'CONCLUSION', content: 'The study supports the hypothesis in 240 students.' });
+  const plainIntegrity = await latestIntegrity('CONCLUSION');
+  check('9. a section with no claim reference is saved and checked exactly as before: no claims recorded, no mirror', [plain.content.startsWith('The study'), 'claims' in (plainIntegrity ?? {}), (await mirrorOf('CONCLUSION')).blocks, (await mirrorOf('RESULTS')).asserts], [true, false, 0, sameSet([claimB.id, literature.id])]);
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: `X predicted Y ({{claim:${claimB.id}}}).` });
+  check('… the mirror follows the text: a reference removed from it is unlinked', (await mirrorOf('RESULTS')).asserts, [claimB.id]);
+
+  /* With the graph off, references are still validated; nothing is mirrored until the next save with it on. */
+  process.env.FF_GRAPH = 'false';
+  resetEnvCache();
+  const offline = await refusedSave(`See {{claim:00000000-0000-4000-8000-000000000000}}.`);
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: `Only {{claim:${literature.id}}}.` }).finally(() => {
+    process.env.FF_GRAPH = 'true';
+    resetEnvCache();
+  });
+  check('with FF_GRAPH off a missing claim is still refused, and a valid save leaves the mirror as it was', [offline, (await mirrorOf('RESULTS')).asserts], [['VALIDATION', 'invalid_claim_reference', ['not_found']], [claimB.id]]);
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: `Only {{claim:${literature.id}}}.` });
+  check('… and the next save with it on brings the mirror up to date', (await mirrorOf('RESULTS')).asserts, [literature.id]);
+
+  /* 10. A model's text: the same validation, quarantine instead of refusal. */
+  const sectionModel = new FakeAdapter('openai');
+  setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ openai: sectionModel }), models: async () => ({ configured: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai', siblings: {} }) }));
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'placeholder-for-the-scripted-model';
+  resetEnvCache();
+  try {
+    sectionModel.push({ reply: { text: `As shown, {{claim:${claimB.id}}}. Also {{claim:00000000-0000-4000-8000-000000000000}} and {{claim:${claimA.id}}} and {{claim:${theirClaim.id}}}. The effect was b = 0.99.` } });
+    const generated = await runForUser(owner, () => generateSection(owner, P, 'DISCUSSION'));
+    const modelIntegrity = await latestIntegrity('DISCUSSION');
+    check(
+      '10. model text cannot bypass validation: its valid reference is kept, every other one (missing, replaced, another project’s) and its typed number are quarantined',
+      [generated.content.includes(`{{claim:${claimB.id}}}`), generated.content.includes(claimA.id) || generated.content.includes(theirClaim.id) || generated.content.includes('00000000-0000'), generated.content.split(QUARANTINE_MARKER.en).length + generated.content.split(QUARANTINE_MARKER.ar).length - 2, generated.integrity.quarantined],
+      [true, false, 4, 4],
+    );
+    check('… its record names the valid claim, whose numbers are traced', [modelIntegrity?.mode, modelIntegrity?.claims?.map((claim) => claim.id), (modelIntegrity?.traced ?? 0) >= 1, modelIntegrity?.quarantined], ['model', [claimB.id], true, 4]);
+    check('… and the mirror is built from it alone', (await mirrorOf('DISCUSSION')).asserts, [claimB.id]);
+  } finally {
+    setGatewayForTests(null);
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+    resetEnvCache();
+  }
 
   /* ------------------------------------------------------------------ */
   section('Legacy paths: ownership, pinning, counts, cleaning, job races');

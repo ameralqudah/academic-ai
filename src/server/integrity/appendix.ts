@@ -54,11 +54,33 @@ export interface AppendixAnalysis {
   status: AppendixAnalysisStatus;
 }
 
+/** WS3-D (D3): a claim the document references as `{{claim:id}}`, with what its graph records. */
+export interface AppendixClaim {
+  /** "claim:1a2b3c4d". */
+  reference: string;
+  /** The sections that reference it. */
+  sections: readonly string[];
+  status: 'current' | 'not_found' | 'not_a_claim' | 'not_current' | 'not_verified';
+  /** Its stored text, only while current. */
+  text: string | null;
+  /** Keys of the result values it reports. */
+  values: readonly string[];
+  /** "run:1a2b3c4d" for each statistics run behind those values. */
+  runs: readonly string[];
+  engine: string | null;
+  datasetVersions: readonly string[];
+  contentHashes: readonly string[];
+  /** The research run and step that wrote it (short ids), or null when a person did. */
+  writtenBy: { run: string; step: string } | null;
+}
+
 export interface AppendixInput {
   language: AppendixLanguage;
   guardVersion: string;
   sections: readonly AppendixSection[];
   analyses: readonly AppendixAnalysis[];
+  /** WS3-D (D3): the claims the document references; the block is shown only when there are some. */
+  claims?: readonly AppendixClaim[];
   /** Text included in the document that no guard checked (a task's literature review, say). */
   notChecked?: readonly string[];
 }
@@ -86,6 +108,15 @@ const WORDS = {
     status: { used: 'used', excluded: 'excluded (windowed)', unavailable: 'no longer available' },
     noAnalyses: 'No analyses are attached to this document.',
     notChecked: 'Text not checked by the numeric guard',
+    claims: 'Claims and traceability',
+    claimsStatement: [
+      'Claims are referenced in the text and shown there as recorded: their numbers were rendered from the statistics engine’s stored estimates when each claim was written, and are not recomputed at export.',
+      `A referenced claim that is no longer current (replaced, resting on replaced or invalidated data, or not found) is not shown as evidence: the text shows the marker ${QUARANTINE_MARKER.en} in its place.`,
+    ],
+    claimHeaders: ['Reference', 'Sections', 'Claim', 'Status', 'Values', 'Statistics run', 'Engine', 'Dataset version', 'Content hash', 'Written by'],
+    claimStatus: { current: 'current, verified', not_found: 'not found', not_a_claim: 'not a claim', not_current: 'not current', not_verified: 'not verified' },
+    researcher: 'researcher',
+    writtenBy: (run: string, step: string) => `research run ${run}, step ${step}`,
   },
   ar: {
     title: 'ملحق سلامة الأرقام ومصدرها',
@@ -109,6 +140,15 @@ const WORDS = {
     status: { used: 'مستخدم', excluded: 'مستبعد (محدود)', unavailable: 'لم يعد متاحًا' },
     noAnalyses: 'لا توجد تحليلات مرفقة بهذا المستند.',
     notChecked: 'نص لم تفحصه أداة فحص الأرقام',
+    claims: 'الادعاءات وإمكانية تتبّعها',
+    claimsStatement: [
+      'يُشار إلى الادعاءات في النص وتُعرض فيه كما سُجّلت: صيغت أرقامها من تقديرات محرّك الإحصاء المحفوظة عند كتابة كل ادعاء، ولا يُعاد حسابها عند التصدير.',
+      `الادعاء المشار إليه الذي لم يعد حاليًا (استُبدل، أو يعتمد على بيانات مستبدلة أو ملغاة، أو لم يُعثر عليه) لا يُعرض دليلًا: يظهر في النص بدله الرمز ${QUARANTINE_MARKER.ar}.`,
+    ],
+    claimHeaders: ['المرجع', 'الأقسام', 'الادعاء', 'الحالة', 'القيم', 'تشغيل الإحصاء', 'المحرّك', 'نسخة البيانات', 'بصمة المحتوى', 'الكاتب'],
+    claimStatus: { current: 'حالي، موثَّق', not_found: 'غير موجود', not_a_claim: 'ليس ادعاءً', not_current: 'غير حالي', not_verified: 'غير موثَّق' },
+    researcher: 'الباحث',
+    writtenBy: (run: string, step: string) => `تشغيل بحثي ${run}، الخطوة ${step}`,
   },
 } as const;
 
@@ -173,6 +213,31 @@ export function integrityAppendix(input: AppendixInput): DocumentSection[] {
         }
       : { heading: words.analyses, level: 2, paragraphs: [words.noAnalyses] },
   );
+
+  /* WS3-D (D3): only when the document references claims, so a document without any is unchanged. */
+  if (input.claims?.length) {
+    const list = (items: readonly string[], short = false) => (items.length ? items.map((item) => (short ? shortHash(item) : item)).join(', ') : '—');
+    blocks.push({
+      heading: words.claims,
+      level: 2,
+      paragraphs: [...words.claimsStatement],
+      table: {
+        headers: [...words.claimHeaders],
+        rows: input.claims.map((claim) => [
+          claim.reference,
+          list(claim.sections),
+          claim.text ?? '—',
+          words.claimStatus[claim.status],
+          list(claim.values),
+          list(claim.runs),
+          claim.engine ?? '—',
+          list(claim.datasetVersions),
+          list(claim.contentHashes, true),
+          claim.writtenBy ? words.writtenBy(claim.writtenBy.run, claim.writtenBy.step) : words.researcher,
+        ]),
+      },
+    });
+  }
 
   if (input.notChecked?.length) {
     blocks.push({ heading: words.notChecked, level: 2, paragraphs: input.notChecked.map((label) => `• ${label}`) });

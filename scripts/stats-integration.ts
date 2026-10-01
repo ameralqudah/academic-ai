@@ -16,6 +16,8 @@ import 'dotenv/config';
 
 import { readFileSync } from 'node:fs';
 
+import JSZip from 'jszip';
+
 import { and, eq, sql } from 'drizzle-orm';
 
 import { execute } from '@/analysis/engine/run';
@@ -34,7 +36,10 @@ import { register } from '@/server/services/account.service';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { deleteFileOnly, saveCleanedCopy, saveUpload } from '@/server/services/dataset.service';
+import { generateDocx } from '@/server/generators/docx';
 import { generateSection } from '@/server/services/ai.service';
+import { startCheckout } from '@/server/services/billing.service';
+import { exportProjectDocx } from '@/server/services/export.service';
 import { personIntegrity, saveUserEdit } from '@/server/services/section.service';
 import { runAnalysis } from '@/server/services/statistics.service';
 import { hashOf } from '@/server/stats/access';
@@ -471,6 +476,82 @@ async function main() {
     else process.env.OPENAI_API_KEY = previousKey;
     resetEnvCache();
   }
+
+  /* ------------------------------------------------------------------ */
+  section('WS3-D (D3): claim references in the Word export, and the claims appendix');
+  /* The text of word/document.xml, one entry per paragraph (table cells included), and the raw XML. */
+  const docxOf = async (bytes: Uint8Array | Buffer) => {
+    const xml = (await (await JSZip.loadAsync(bytes)).file('word/document.xml')?.async('string')) ?? '';
+    const decode = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+    return { xml: decode(xml), paragraphs: [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((match) => decode([...match[0].matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((text) => text[1]).join(''))) };
+  };
+  const rowFrom = (paragraphs: string[], first: string, cells: number) => {
+    const index = paragraphs.indexOf(first);
+    return index < 0 ? [] : paragraphs.slice(index, index + cells);
+  };
+  const short = (id: string) => id.slice(0, 8);
+  const textOf = (claim: { data: unknown }) => String((claim.data as { text: string }).text);
+  await startCheckout({ userId: owner, planCode: 'PRO', locale: 'en' });
+
+  /* RESULTS: two current claims (one verified statistical, one from the literature). */
+  const resultsText = `X predicted Y ({{claim:${claimB.id}}}). {{claim:${literature.id}}}`;
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RESULTS', content: resultsText });
+  /* CONCLUSION: a claim valid when saved, replaced afterwards (so stale at export). */
+  const claimC = (await insertClaim(me, P, rerunNew.id, { keys: ['coef:m'] })).claim;
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'CONCLUSION', content: `In short, {{claim:${claimC.id}}}.` });
+  let replaceC: string | undefined;
+  try {
+    await insertClaim(me, P, rerunNew.id, { keys: ['coef:m'], supersedes: claimC.id });
+  } catch (error) {
+    replaceC = (error as AppError & { details: { report?: { hash: string } } }).details.report?.hash;
+  }
+  await insertClaim(me, P, rerunNew.id, { keys: ['coef:m'], supersedes: claimC.id, impactAcknowledged: replaceC });
+  /* RECOMMENDATIONS: text that bypassed the save checks (stored directly, as text saved before D1 could be). */
+  await saveUserEdit({ projectId: P, userId: owner, sectionKey: 'RECOMMENDATIONS', content: 'Further work is needed.' });
+  const injected = `See {{claim:00000000-0000-4000-8000-000000000000}} and {{claim:${theirClaim.id}}}.`;
+  await db.execute(sql`update research_sections set content = ${injected} where project_id = ${P} and section_key = 'RECOMMENDATIONS'`);
+
+  const exported = await exportProjectDocx({ projectId: P, userId: owner, sectionLabels: {}, referencesLabel: 'References', unverifiedLabel: 'unverified' });
+  const doc = await docxOf(exported.buffer);
+  const markerAr = QUARANTINE_MARKER.ar;
+  check('D3: no raw {{claim:…}} reference reaches the document (body, headings or appendix)', [doc.xml.includes('{{claim:'), doc.paragraphs.some((text) => text.includes('{{claim'))], [false, false]);
+  check(
+    '… a current claim is rendered as its stored text, exactly: the section reads as written, with nothing recomputed or added',
+    doc.paragraphs.includes(`X predicted Y (${textOf(claimB)}). ${textOf(literature)}`),
+    true,
+  );
+  check(
+    '… a claim replaced since the text was saved is not shown as evidence: the marker stands in its place, and its numbers appear nowhere',
+    [doc.paragraphs.includes(`In short, ${markerAr}.`), doc.xml.includes(textOf(claimC))],
+    [true, false],
+  );
+  check('… references that never resolved (missing, another project’s) become the marker too', doc.paragraphs.includes(`See ${markerAr} and ${markerAr}.`), true);
+  const discussion = doc.paragraphs.find((text) => text.startsWith('As shown, '));
+  check(
+    '… a model’s section: its valid reference rendered, its quarantined values still markers (b = 0.99 never returns)',
+    [discussion?.startsWith(`As shown, ${textOf(claimB)}.`), (discussion?.split(markerAr).length ?? 1) - 1 + (discussion?.split(QUARANTINE_MARKER.en).length ?? 1) - 1, doc.xml.includes('0.99')],
+    [true, 4, false],
+  );
+  check('… the saved texts are unchanged by the export (the references stay the record)', [(await projectsRepo.findSection(P, 'RESULTS'))?.content, (await projectsRepo.findSection(P, 'RECOMMENDATIONS'))?.content], [resultsText, injected]);
+
+  const claimsHeading = 'الادعاءات وإمكانية تتبّعها';
+  check('the appendix has a claims and traceability table', doc.paragraphs.includes(claimsHeading), true);
+  const rowB = rowFrom(doc.paragraphs, `claim:${short(claimB.id)}`, 10);
+  check(
+    '… a statistical claim: its sections, text, status, the values it reports (keys, not numbers), its statistics run, engine, dataset version and content hash',
+    [rowB[1]?.split(', ').length, rowB[2], rowB[3], rowB[4], rowB[5], rowB[6]?.startsWith('academic-ai-ts-core'), rowB[7], rowB[8], rowB[9]],
+    [2, textOf(claimB), 'حالي، موثَّق', 'coef:x', `run:${short(rerunNew.id)}`, true, short(v3.id), v3.contentHash.slice(0, 12), 'الباحث'],
+  );
+  check('… a claim from the literature: current, with no values or runs behind it', rowFrom(doc.paragraphs, `claim:${short(literature.id)}`, 10).slice(2, 8), [textOf(literature), 'حالي، موثَّق', '—', '—', '—', '—']);
+  check('… the replaced claim: not current, its text withheld', rowFrom(doc.paragraphs, `claim:${short(claimC.id)}`, 10).slice(2, 4), ['—', 'غير حالي']);
+  check('… the unresolved references: not found, nothing about another project’s claim shown', [rowFrom(doc.paragraphs, 'claim:00000000', 10).slice(2, 5), rowFrom(doc.paragraphs, `claim:${short(theirClaim.id)}`, 10).slice(2, 5)], [['—', 'غير موجود', '—'], ['—', 'غير موجود', '—']]);
+
+  check('… and a reference that is stale is still refused on save (D1)', await refusedSave(`See {{claim:${claimC.id}}}.`), ['VALIDATION', 'invalid_claim_reference', ['not_current']]);
+  const reexported = await docxOf((await exportProjectDocx({ projectId: P, userId: owner, sectionLabels: {}, referencesLabel: 'References', unverifiedLabel: 'unverified' })).buffer);
+  check('… the same project exports the same text (deterministic)', reexported.paragraphs, doc.paragraphs);
+
+  const taskDoc = await docxOf(await generateDocx({ title: 'Task', sections: [{ heading: 'Body', level: 1, paragraphs: [`A claim {{claim:${claimB.id}}} here.`], table: { headers: ['{{claim:x}}'], rows: [[`{{claim:${claimB.id}}}`]] } }] }));
+  check('a task’s Word file (no validated claim chain) never shows a raw reference: it becomes the marker', [taskDoc.xml.includes('{{claim:'), taskDoc.paragraphs.includes(`A claim ${QUARANTINE_MARKER.en} here.`)], [false, true]);
 
   /* ------------------------------------------------------------------ */
   section('Legacy paths: ownership, pinning, counts, cleaning, job races');

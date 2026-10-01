@@ -18,13 +18,15 @@ import { SECTION_LABELS_EN } from '@/ai/context/labels';
 import type { ResearchSection } from '@/server/db/schema';
 import type { DocumentSection } from '@/server/generators/documents';
 import { AppError } from '@/server/http/errors';
-import { integrityAppendix, type AppendixAnalysis, type AppendixSection } from '@/server/integrity/appendix';
-import { legacyResultTier, NUMERIC_GUARD_VERSION, type LegacyResultTier } from '@/server/integrity/numbers';
+import { integrityAppendix, type AppendixAnalysis, type AppendixClaim, type AppendixSection } from '@/server/integrity/appendix';
+import { claimIdsIn, renderClaimTokens } from '@/server/integrity/claims';
+import { legacyResultTier, NUMERIC_GUARD_VERSION, QUARANTINE_MARKER, type LegacyResultTier } from '@/server/integrity/numbers';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as referencesRepo from '@/server/repositories/references.repository';
 
 import { getProjectWithSections } from './project.service';
+import { claimTraceability, type ClaimTrace } from './section-claims';
 import { personIntegrity } from './section.service';
 import { resolvePlanForUser } from './subscription.service';
 import { recordSimple } from './usage.service';
@@ -200,6 +202,24 @@ async function appendixFor(input: {
   return { sections, analyses };
 }
 
+/** A referenced claim as an appendix row (WS3-D, D3): short references, no number but the claim's own stored text. */
+function appendixClaim(trace: ClaimTrace, sections: readonly string[]): AppendixClaim {
+  const short = (id: string) => id.slice(0, 8);
+  const engines = [...new Set(trace.runs.map((run) => (run.engine ? `${run.engine}${run.engineVersion ? `@${run.engineVersion}` : ''}` : null)).filter((engine): engine is string => Boolean(engine)))];
+  return {
+    reference: `claim:${short(trace.id)}`,
+    sections,
+    status: trace.status,
+    text: trace.text,
+    values: trace.values,
+    runs: trace.runs.map((run) => `run:${short(run.statRunId)}`),
+    engine: engines.length ? engines.join(', ') : null,
+    datasetVersions: trace.datasets.map((dataset) => short(dataset.datasetVersionId)),
+    contentHashes: trace.datasets.flatMap((dataset) => (dataset.contentHash ? [dataset.contentHash] : [])),
+    writtenBy: trace.writtenBy ? { run: short(trace.writtenBy.researchRunId), step: short(trace.writtenBy.stepId) } : null,
+  };
+}
+
 /** The appendix's blocks as Word paragraphs and tables, starting on a new page. */
 function appendixBlocks(blocks: readonly DocumentSection[], rtl: boolean): (Paragraph | Table)[] {
   const alignment = rtl ? AlignmentType.RIGHT : AlignmentType.LEFT;
@@ -265,6 +285,22 @@ export async function exportProjectDocx(input: ExportInput): Promise<{
     .map((key) => sections.find((section) => section.sectionKey === key))
     .filter((section): section is ResearchSection => Boolean(section?.content.trim()));
 
+  /*
+   * WS3-D (D3): `{{claim:id}}` references are rendered for the reader. Each
+   * claim is checked again now (the D1 checks): a current, verified claim is
+   * shown as its stored text, rendered from recorded estimates when it was
+   * written (nothing is recomputed); any other reference shows the
+   * quarantine marker. No raw reference reaches the document, and the saved
+   * text is not changed.
+   */
+  const marker = QUARANTINE_MARKER[rtl ? 'ar' : 'en'];
+  const referencedIn = new Map<string, string[]>();
+  for (const section of ordered) {
+    for (const id of claimIdsIn(section.content)) referencedIn.set(id, [...(referencedIn.get(id) ?? []), headingFor(section.sectionKey, input.sectionLabels)]);
+  }
+  const traces = referencedIn.size ? await claimTraceability(input.projectId, input.userId, [...referencedIn.keys()]) : [];
+  const rendered = new Map(traces.flatMap((trace) => (trace.text !== null ? [[trace.id, trace.text] as const] : [])));
+
   const children: (Paragraph | Table)[] = [
     new Paragraph({
       text: project.title,
@@ -282,7 +318,7 @@ export async function exportProjectDocx(input: ExportInput): Promise<{
         spacing: { before: 360, after: 180 },
         pageBreakBefore: true,
       }),
-      ...paragraphsFrom(section.content, rtl),
+      ...paragraphsFrom(renderClaimTokens(section.content, rendered, marker), rtl),
     ]),
   ];
 
@@ -336,7 +372,8 @@ export async function exportProjectDocx(input: ExportInput): Promise<{
     sections: ordered,
     label: (key) => headingFor(key, input.sectionLabels),
   });
-  children.push(...appendixBlocks(integrityAppendix({ language: rtl ? 'ar' : 'en', guardVersion: NUMERIC_GUARD_VERSION, ...appendix }), rtl));
+  const claims = traces.map((trace) => appendixClaim(trace, referencedIn.get(trace.id) ?? []));
+  children.push(...appendixBlocks(integrityAppendix({ language: rtl ? 'ar' : 'en', guardVersion: NUMERIC_GUARD_VERSION, ...appendix, ...(claims.length ? { claims } : {}) }), rtl));
 
   const document = new Document({
     creator: 'Academic AI Research Assistant',

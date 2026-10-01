@@ -32,6 +32,8 @@ import {
 } from 'docx';
 
 import type { DocumentContent, DocumentSection } from './documents';
+import { renderClaimTokens } from '@/server/integrity/claims';
+import { QUARANTINE_MARKER } from '@/server/integrity/numbers';
 
 /** Any Arabic letter means the document should be laid out right to left. */
 function hasArabic(text: string): boolean {
@@ -46,7 +48,17 @@ function hasArabic(text: string): boolean {
  * implementation for PDF and a third for Markdown. This is where it becomes
  * real formatting.
  */
-function runsFrom(text: string, rtl: boolean): TextRun[] {
+/**
+ * WS3-D (D3): a document built here (a task's Word file) has no validated
+ * claim chain, so a `{{claim:…}}` that reached its text is never shown raw:
+ * it becomes the quarantine marker. Project exports render references first.
+ */
+function withoutClaimTokens(text: string, rtl: boolean): string {
+  return renderClaimTokens(text, new Map(), QUARANTINE_MARKER[rtl ? 'ar' : 'en']);
+}
+
+function runsFrom(source: string, rtl: boolean): TextRun[] {
+  const text = withoutClaimTokens(source, rtl);
   const runs: TextRun[] = [];
   const pattern = /(\*\*[^*]+\*\*|\*[^*]+\*)/g;
 
@@ -186,7 +198,7 @@ export async function generateDocx(
                   new TableCell({
                     children: [
                       new Paragraph({
-                        children: [new TextRun({ text: header, bold: true, rightToLeft: rtl })],
+                        children: [new TextRun({ text: withoutClaimTokens(header, rtl), bold: true, rightToLeft: rtl })],
                         alignment,
                         bidirectional: rtl,
                       }),
@@ -202,7 +214,7 @@ export async function generateDocx(
                       new TableCell({
                         children: [
                           new Paragraph({
-                            children: [new TextRun({ text: String(cell), rightToLeft: rtl })],
+                            children: [new TextRun({ text: withoutClaimTokens(String(cell), rtl), rightToLeft: rtl })],
                             alignment,
                             bidirectional: rtl,
                           }),

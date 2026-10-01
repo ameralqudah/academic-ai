@@ -37,3 +37,13 @@ export function replaceClaimTokens(text: string, ids: ReadonlySet<string>, repla
   });
   return { text: out, replaced };
 }
+
+/**
+ * WS3-D (D3): the text a reader sees. Each reference to a claim in `rendered`
+ * becomes that claim's stored text (rendered from recorded estimates when the
+ * claim was written, never recomputed here); every other reference becomes
+ * `fallback` (the quarantine marker). No raw `{{claim:…}}` survives.
+ */
+export function renderClaimTokens(text: string, rendered: ReadonlyMap<string, string>, fallback: string): string {
+  return text.replace(CLAIM_TOKEN, (_token, id: string) => rendered.get(id) ?? fallback);
+}

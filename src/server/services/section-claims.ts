@@ -50,12 +50,17 @@ export interface ClaimReferences {
  * `userId` (who must be able to read the project). Read-only.
  */
 export async function resolveClaimReferences(projectId: string, userId: string, text: string): Promise<ClaimReferences> {
-  const ids = claimIdsIn(text);
-  if (ids.length === 0) return { claims: [], unresolved: [] };
-  if (ids.length > MAX_REFERENCES) return { claims: [], unresolved: ids.map((id) => ({ id, reason: 'not_found' as const })) };
+  const { claims, unresolved } = await resolveClaimIds(projectId, userId, claimIdsIn(text));
+  return { claims, unresolved };
+}
+
+/** The same checks for a list of ids, with the claim nodes that resolved. */
+async function resolveClaimIds(projectId: string, userId: string, ids: readonly string[]): Promise<ClaimReferences & { nodes: Map<string, { id: string; type: string; data: unknown; origin: string; createdByRunId: string | null; createdByStepId: string | null }> }> {
+  if (ids.length === 0) return { claims: [], unresolved: [], nodes: new Map() };
+  if (ids.length > MAX_REFERENCES) return { claims: [], unresolved: ids.map((id) => ({ id, reason: 'not_found' as const })), nodes: new Map() };
 
   const rows = await db
-    .select({ id: graphNodes.id, type: graphNodes.type, data: graphNodes.data })
+    .select({ id: graphNodes.id, type: graphNodes.type, data: graphNodes.data, origin: graphNodes.origin, createdByRunId: graphNodes.createdByRunId, createdByStepId: graphNodes.createdByStepId })
     .from(graphNodes)
     .where(and(eq(graphNodes.projectId, projectId), inArray(graphNodes.id, ids)));
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -90,7 +95,78 @@ export async function resolveClaimReferences(projectId: string, userId: string, 
     }
     claims.push({ id, numbers });
   }
-  return { claims, unresolved };
+  return { claims, unresolved, nodes: byId };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                       Traceability for an export (D3)                      */
+/* -------------------------------------------------------------------------- */
+
+export interface ClaimTrace {
+  id: string;
+  /** Current and verified now (the D1 checks, run at export); otherwise why not. */
+  status: 'current' | UnresolvedClaim['reason'];
+  /** The claim's stored text, only while current: a claim no longer current is not shown as evidence. */
+  text: string | null;
+  /** The keys of the result values it reports (never the numbers themselves). */
+  values: string[];
+  /** The statistics runs those values were produced by, as the graph recorded them. */
+  runs: { statRunId: string; engine: string | null; engineVersion: string | null; resultHash: string | null }[];
+  /** The dataset versions those runs used. */
+  datasets: { datasetVersionId: string; contentHash: string | null }[];
+  /** The research run and step that wrote it, when a run did (WS3-E, E4); null for a person. */
+  writtenBy: { researchRunId: string; stepId: string } | null;
+}
+
+/**
+ * What an export can say about each claim it references (WS3-D, D3): whether
+ * it is still current and verified, its text, and the evidence its graph
+ * records — claim ─reports→ result ─produced_by→ statistics run ─uses_data→
+ * dataset version. Only stored links are followed; nothing is recomputed.
+ * Read-only.
+ */
+export async function claimTraceability(projectId: string, userId: string, ids: readonly string[]): Promise<ClaimTrace[]> {
+  const unique = [...new Set(ids)];
+  const { claims, unresolved, nodes } = await resolveClaimIds(projectId, userId, unique);
+  const current = new Set(claims.map((claim) => claim.id));
+  const reasons = new Map(unresolved.map((entry) => [entry.id, entry.reason]));
+
+  const edgesFrom = async (srcIds: string[], rel: string) =>
+    srcIds.length ? db.select({ srcId: graphEdges.srcId, dstId: graphEdges.dstId }).from(graphEdges).where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, rel), inArray(graphEdges.srcId, srcIds))) : [];
+  const nodesOf = async (nodeIds: string[]) =>
+    nodeIds.length ? db.select({ id: graphNodes.id, data: graphNodes.data }).from(graphNodes).where(and(eq(graphNodes.projectId, projectId), inArray(graphNodes.id, nodeIds))) : [];
+
+  const known = unique.filter((id) => nodes.get(id)?.type === 'claim');
+  const reports = await edgesFrom(known, 'reports');
+  const produced = await edgesFrom([...new Set(reports.map((edge) => edge.dstId))], 'produced_by');
+  const used = await edgesFrom([...new Set(produced.map((edge) => edge.dstId))], 'uses_data');
+  const data = new Map((await nodesOf([...new Set([...reports, ...produced, ...used].map((edge) => edge.dstId))])).map((node) => [node.id, node.data as Record<string, unknown>]));
+  const str = (value: unknown) => (typeof value === 'string' ? value : null);
+
+  return unique.map((id) => {
+    const node = nodes.get(id);
+    const valueIds = reports.filter((edge) => edge.srcId === id).map((edge) => edge.dstId);
+    const runIds = [...new Set(produced.filter((edge) => valueIds.includes(edge.srcId)).map((edge) => edge.dstId))];
+    const versionIds = [...new Set(used.filter((edge) => runIds.includes(edge.srcId)).map((edge) => edge.dstId))];
+    const provenance = node ? graph.runProvenanceOf(node) : null;
+    return {
+      id,
+      status: current.has(id) ? 'current' : (reasons.get(id) ?? 'not_found'),
+      text: current.has(id) && node ? String((node.data as { text?: unknown }).text ?? '') : null,
+      values: valueIds.map((valueId) => str(data.get(valueId)?.key) ?? valueId).sort(),
+      runs: runIds
+        .map((runId) => data.get(runId))
+        .filter((run): run is Record<string, unknown> => Boolean(run && str(run.legacyRunId)))
+        .map((run) => ({ statRunId: str(run.legacyRunId)!, engine: str(run.engine), engineVersion: str(run.engineVersion), resultHash: str(run.resultHash) }))
+        .sort((a, b) => a.statRunId.localeCompare(b.statRunId)),
+      datasets: versionIds
+        .map((versionId) => data.get(versionId))
+        .filter((version): version is Record<string, unknown> => Boolean(version && str(version.datasetVersionId)))
+        .map((version) => ({ datasetVersionId: str(version.datasetVersionId)!, contentHash: str(version.contentHash) }))
+        .sort((a, b) => a.datasetVersionId.localeCompare(b.datasetVersionId)),
+      writtenBy: provenance?.kind === 'research_run' ? { researchRunId: provenance.researchRunId, stepId: provenance.stepId } : null,
+    };
+  });
 }
 
 /* -------------------------------------------------------------------------- */

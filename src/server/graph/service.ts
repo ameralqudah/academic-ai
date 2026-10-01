@@ -82,10 +82,37 @@ const ROLE_RANK: Record<ProjectRole, number> = { VIEWER: 1, COMMENTER: 2, EDITOR
  */
 export interface Actor {
   userId: string;
+  /**
+   * Recorded as `created_by_run_id`, which names one of two different runs
+   * (WS3-E, E4; see `runProvenanceOf`):
+   * - origin `engine`: the statistics run (`stat_runs.id`) being recorded; no step;
+   * - origin `agent`: the research run (`research_runs.id`) whose step (`stepId`) is writing.
+   */
   runId?: string;
   /** P1-D: the research-run step whose tool is writing; recorded as provenance. */
   stepId?: string;
   origin?: 'user' | 'agent' | 'import' | 'engine';
+}
+
+/** Which run wrote a node, edge or node version, by kind (WS3-E, E4). */
+export type RunProvenance =
+  | { kind: 'stat_run'; statRunId: string }
+  | { kind: 'research_run'; researchRunId: string; stepId: string }
+  | null;
+
+/**
+ * Reads `created_by_run_id` without confusing its two meanings. The column is
+ * shared: the analysis engine writes a statistics-run id (with no step), a
+ * research run's tool writes its research-run id together with its step id.
+ * So the kind comes from the origin and the step, never from the id itself.
+ * Anything else — a person, an engine write with no run (a dataset version
+ * mirrored on its own), or an inconsistent row — names no run.
+ */
+export function runProvenanceOf(record: { origin: string | null; createdByRunId: string | null; createdByStepId: string | null }): RunProvenance {
+  if (!record.createdByRunId) return null;
+  if (record.origin === 'engine' && !record.createdByStepId) return { kind: 'stat_run', statRunId: record.createdByRunId };
+  if (record.origin === 'agent' && record.createdByStepId) return { kind: 'research_run', researchRunId: record.createdByRunId, stepId: record.createdByStepId };
+  return null;
 }
 
 const isEngine = (actor: Actor) => actor.origin === 'engine';

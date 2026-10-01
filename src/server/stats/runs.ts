@@ -26,7 +26,7 @@ import { db } from '@/server/db';
 import { analysisJobs, datasets, datasetVersions, graphNodes, statEstimates, statFigures, statRuns, statSpecs, statTables, type StatRun } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 
-import { stepsByIdempotencyKeys } from '@/server/runs/store';
+import { stepsByIdempotencyKeys, type StepByKey } from '@/server/runs/store';
 
 import { authorise, hashOf, sameProject, type StatsActor } from './access';
 import { lineageOf, loadVersion, requireVersion } from './versions';
@@ -506,6 +506,37 @@ export async function listRuns(actor: StatsActor, projectId: string) {
   return db.select().from(statRuns).where(eq(statRuns.projectId, projectId)).orderBy(desc(statRuns.queuedAt)).limit(100);
 }
 
+/** A record a research-run step may have written, as `getProvenance` attributes it. */
+export interface AttributedRecord {
+  kind: 'stat_spec' | 'stat_run' | 'dataset_version';
+  id: string;
+  /** The user the record belongs to. */
+  ownerId: string;
+}
+
+/** The run tool that writes each kind of record. */
+const WRITER: Record<AttributedRecord['kind'], string> = { stat_spec: 'createAnalysisSpec', stat_run: 'runAnalysis', dataset_version: 'createDatasetVersion' };
+
+/**
+ * The research run and step that wrote `record`, or null (WS3-B R11; WS3-E E1).
+ *
+ * `step` is the step whose idempotency key the record carries, already read
+ * under the caller's row-level security and limited to the record's project.
+ * The key alone is not proof: a key is visible to whoever can read the run, and
+ * an owner could pass it with a request of their own. So the step must be of
+ * the tool that writes this kind of record, act for the record's owner, and
+ * have recorded this exact record as its effect — its `output_ref`, or for an
+ * analysis that failed, the statistics run its error names. Anything else (a
+ * person, the statistics assistant, a reused key) is null.
+ */
+export function attributedStep(step: StepByKey | undefined, record: AttributedRecord): { runId: string; stepId: string } | null {
+  if (!step || step.tool !== WRITER[record.kind] || step.ownerId !== record.ownerId) return null;
+  const ref = step.outputRef as { kind?: unknown; id?: unknown } | null;
+  const recorded = ref?.kind === record.kind && ref.id === record.id;
+  const failedRun = record.kind === 'stat_run' && (step.error as { statRunId?: unknown } | null)?.statRunId === record.id;
+  return recorded || failedRun ? { runId: step.runId, stepId: step.stepId } : null;
+}
+
 /**
  * "Where did this number come from?" — the full chain for a run: the engine
  * and its version, the specification (and its hash), the dataset version (and
@@ -515,18 +546,10 @@ export async function listRuns(actor: StatsActor, projectId: string) {
 export async function getProvenance(actor: StatsActor, runId: string, projectId?: string | null) {
   const { run, spec, estimates, supersededBy } = await getRun(actor, runId, projectId);
   const lineage = await lineageOf(run.datasetVersionId);
-  /*
-   * Which research run and step wrote each record (WS3-B, R11): the step whose
-   * idempotency key the record carries, of the tool that writes that kind of
-   * record, acting for the record's owner. Anything else — a person, the
-   * statistics assistant — is null.
-   */
-  const steps = run.projectId ? await stepsByIdempotencyKeys(actor.userId, run.projectId, [spec.idempotencyKey, run.idempotencyKey, ...lineage.map(({ transformation }) => transformation?.idempotencyKey)]) : new Map();
-  const createdByRun = (key: string | null | undefined, tool: string, ownerId: string) => {
-    const step = key ? steps.get(key) : undefined;
-    return step && step.tool === tool && step.ownerId === ownerId ? { runId: step.runId, stepId: step.stepId } : null;
-  };
-  const specCreatedByRun = createdByRun(spec.idempotencyKey, 'createAnalysisSpec', spec.userId);
+  /* Which research run and step wrote each record (WS3-B R11, hardened in WS3-E E1): see `attributedStep`. */
+  const steps = run.projectId ? await stepsByIdempotencyKeys(actor.userId, run.projectId, [spec.idempotencyKey, run.idempotencyKey, ...lineage.map(({ transformation }) => transformation?.idempotencyKey)]) : new Map<string, StepByKey>();
+  const createdByRun = (key: string | null | undefined, record: AttributedRecord) => attributedStep(key ? steps.get(key) : undefined, record);
+  const specCreatedByRun = createdByRun(spec.idempotencyKey, { kind: 'stat_spec', id: spec.id, ownerId: spec.userId });
   return {
     run: {
       id: run.id,
@@ -545,7 +568,7 @@ export async function getProvenance(actor: StatsActor, runId: string, projectId?
       supersedes: run.supersedesRunId,
       supersededBy,
       graphRunNodeId: run.graphRunNodeId,
-      createdByRun: createdByRun(run.idempotencyKey, 'runAnalysis', run.userId),
+      createdByRun: createdByRun(run.idempotencyKey, { kind: 'stat_run', id: run.id, ownerId: run.userId }),
     },
     specification: {
       id: spec.id,
@@ -567,7 +590,7 @@ export async function getProvenance(actor: StatsActor, runId: string, projectId?
       columns: version.columnCount,
       graphNodeId: version.graphNodeId,
       transformation: transformation
-        ? { id: transformation.id, operation: transformation.operation, parameters: transformation.parameters, report: transformation.report, engineVersion: transformation.engineVersion, at: transformation.createdAt, createdByRun: createdByRun(transformation.idempotencyKey, 'createDatasetVersion', transformation.userId) }
+        ? { id: transformation.id, operation: transformation.operation, parameters: transformation.parameters, report: transformation.report, engineVersion: transformation.engineVersion, at: transformation.createdAt, createdByRun: createdByRun(transformation.idempotencyKey, { kind: 'dataset_version', id: transformation.outputVersionId, ownerId: transformation.userId }) }
         : null,
     })),
     estimates: estimates.map((e) => ({ key: e.key, graphNodeId: e.graphNodeId })),

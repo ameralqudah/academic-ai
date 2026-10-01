@@ -1305,6 +1305,11 @@ export const graphNodes = pgTable(
     /** Set when a run has used this data (or data derived from it): no further edits. */
     frozenAt: timestamp('frozen_at', { withTimezone: true, mode: 'date' }),
     createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /**
+     * Two meanings, told apart by `origin` (WS3-E, E4; read it with `runProvenanceOf`):
+     * `engine` → a statistics run (`stat_runs.id`), no step; `agent` → a research run
+     * (`research_runs.id`), with `created_by_step_id`. Not a foreign key to either.
+     */
     createdByRunId: text('created_by_run_id'),
     /** P1-D: the research-run step that wrote this, when a run's tool did. */
     createdByStepId: text('created_by_step_id'),
@@ -1338,6 +1343,7 @@ export const nodeVersions = pgTable(
     /** Hash of the Impact Report the author acknowledged for this change (R6). */
     impactReportHash: varchar('impact_report_hash', { length: 64 }),
     createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** As `graph_nodes.created_by_run_id` (WS3-E, E4): with `created_by_step_id`, a research run; without, a statistics run. */
     createdByRunId: text('created_by_run_id'),
     /** P1-D: the research-run step that wrote this, when a run's tool did. */
     createdByStepId: text('created_by_step_id'),
@@ -1374,6 +1380,7 @@ export const graphEdges = pgTable(
     dependency: boolean('dependency').notNull(),
     attrs: jsonb('attrs').$type<Record<string, unknown>>().default({}).notNull(),
     createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** As `graph_nodes.created_by_run_id`, told apart by this edge's `origin` (WS3-E, E4). */
     createdByRunId: text('created_by_run_id'),
     /** P1-D: the research-run step that wrote this, when a run's tool did. */
     createdByStepId: text('created_by_step_id'),

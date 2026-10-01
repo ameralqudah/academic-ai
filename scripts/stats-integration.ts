@@ -36,7 +36,7 @@ import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { deleteFileOnly, saveCleanedCopy, saveUpload } from '@/server/services/dataset.service';
 import { runAnalysis } from '@/server/services/statistics.service';
 import { hashOf } from '@/server/stats/access';
-import { previewReplacement, recordRunInGraph, replaceVersion } from '@/server/stats/graph';
+import { previewReplacement, recordRunInGraph, replaceVersion, syncRunToGraph } from '@/server/stats/graph';
 import { insertClaim, untracedStatistics } from '@/server/stats/manuscript';
 import { cancelRun, createSpec, executeRun, getProvenance, getRun, reapStatRuns, startRun, validateSpecRecord } from '@/server/stats/runs';
 import { executeStatsTool, explainRun, runAssistant, STATS_TOOL_NAMES } from '@/server/stats/tools';
@@ -284,6 +284,42 @@ async function main() {
   const foreignHypothesis = await graph.createNode(other.id, { userId: stranger }, { type: 'hypothesis', data: { statement: 'theirs', kind: 'direct', direction: 'positive' } });
   check('a specification cannot test another project’s hypothesis', await outcome(() => createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'descriptives', variables: ['x'] }, hypothesisIds: [foreignHypothesis.id] })), 'NOT_FOUND');
   check('a stranger cannot create a specification on this data', await outcome(() => createSpec({ userId: stranger }, { projectId: other.id, datasetVersionId: v3.id, spec: { analysisType: 'descriptives', variables: ['x'] } })), 'NOT_FOUND');
+
+  /* ------------------------------------------------------------------ */
+  section('WS3-E (E2): recording a finished run in the graph after the fact');
+  check('1. a run that finished with the graph on was recorded then, with its values', [Boolean(run.graphRunNodeId), detail.estimates.every((e) => Boolean(e.graphNodeId))], [true, true]);
+  const lateSpec = await createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'regression', outcome: 'y', predictors: ['x'] }, label: 'late' });
+  process.env.FF_GRAPH = 'false';
+  resetEnvCache();
+  const late = await startRun(me, lateSpec.id, { projectId: P }).finally(() => {
+    process.env.FF_GRAPH = 'true';
+    resetEnvCache();
+  });
+  const lateDetail = await getRun(me, late.id, P);
+  check('2. a run that finished while the graph was off succeeded, but nothing of it is in the graph', [late.status, lateDetail.run.graphRunNodeId, lateDetail.estimates.some((e) => e.graphNodeId)], ['succeeded', null, false]);
+  check('… and it cannot be cited yet: the strict claim path still requires the graph record', await outcome(() => insertClaim(me, P, late.id, { keys: ['coef:x'] })), 'CONFLICT');
+  check('5. a stranger cannot record it', await outcome(() => syncRunToGraph({ userId: stranger }, late.id, P)), 'NOT_FOUND');
+  check('… nor can anyone through another project', await outcome(() => syncRunToGraph(me, late.id, other.id)), 'NOT_FOUND');
+  check('… nor a viewer of this one', await outcome(() => syncRunToGraph({ userId: viewer }, late.id, P)), 'FORBIDDEN');
+  check('… and still nothing of it is in the graph', (await getRun(me, late.id, P)).run.graphRunNodeId, null);
+  const synced = await syncRunToGraph(me, late.id, P);
+  const syncedDetail = await getRun(me, late.id, P);
+  const [syncedNode] = await db.select().from(graphNodes).where(eq(graphNodes.id, synced ?? ''));
+  check(
+    '3. an editor records it later: the same computed run node, with every value, as if recorded at completion',
+    [Boolean(synced), syncedDetail.run.graphRunNodeId === synced, syncedNode?.type, syncedNode?.provenance, (syncedNode?.data as { legacyRunId?: string }).legacyRunId === late.id, syncedDetail.estimates.every((e) => Boolean(e.graphNodeId))],
+    [true, true, 'analysis_run', 'computed', true, true],
+  );
+  const lateClaim = await insertClaim(me, P, late.id, { keys: ['coef:x'] });
+  const lateReports = await db.select().from(graphEdges).where(and(eq(graphEdges.srcId, lateClaim.claim.id), eq(graphEdges.rel, 'reports')));
+  check('… and its values can then be cited through the strict claim path', lateReports[0]?.dstId, syncedDetail.estimates.find((e) => e.key === 'coef:x')?.graphNodeId);
+  const syncedAgain = await Promise.all([syncRunToGraph(me, late.id, P), syncRunToGraph(me, late.id, P), recordRunInGraph(late.id)]);
+  const lateRunNodes = await db.select({ id: graphNodes.id }).from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'analysis_run'), sql`${graphNodes.data} ->> 'legacyRunId' = ${late.id}`));
+  check('4. recording again, even at once, is idempotent: one run node, the same id', [syncedAgain.every((id) => id === synced), lateRunNodes.length], [true, 1]);
+  const lateValues = await db.select({ id: graphEdges.id }).from(graphEdges).where(and(eq(graphEdges.rel, 'produced_by'), eq(graphEdges.dstId, synced ?? '')));
+  check('… with no duplicated values', lateValues.length, syncedDetail.estimates.length + syncedDetail.tables.length + syncedDetail.figures.length);
+  check('only a succeeded run is recorded: a refused one is refused', await outcome(() => syncRunToGraph(me, refused.id, P)), 'CONFLICT');
+  check('… and a run on replaced data is not recorded later either (its inputs are not current evidence)', [await outcome(() => syncRunToGraph(me, onSibling.id, P)) !== 'ok', (await getRun(me, onSibling.id, P)).run.graphRunNodeId], [true, null]);
 
   /* ------------------------------------------------------------------ */
   section('LLM tool boundary (scripted provider)');

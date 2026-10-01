@@ -27,7 +27,8 @@ import { forgetPlan, productionDeps, setGatewayForTests } from '@/server/ai/gate
 import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { createGateway } from '@/server/ai/gateway/gateway';
 import { db } from '@/server/db';
-import { aiUsageEvents, datasetVersions as datasetVersionsTable, graphEdges, graphNodes, projectMembers, researchRuns, runApprovals, runEvents, runSteps, statRuns, statSpecs, usageTracking } from '@/server/db/schema';
+import { aiUsageEvents, datasetTransformations, datasetVersions as datasetVersionsTable, graphEdges, graphNodes, projectMembers, researchRuns, runApprovals, runEvents, runSteps, statRuns, statSpecs, usageTracking } from '@/server/db/schema';
+import { runProvenanceOf } from '@/server/graph/service';
 import { AppError } from '@/server/http/errors';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import { register } from '@/server/services/account.service';
@@ -40,7 +41,7 @@ import { toolByName } from '@/server/runs/registry';
 import { cancelRun, createRun, decideApproval, getRun, listToolsFor, reapRuns } from '@/server/runs/service';
 import * as store from '@/server/runs/store';
 import { previewVersionReplacement, replacementOf, replaceVersion } from '@/server/stats/graph';
-import { createSpec, getProvenance, startRun } from '@/server/stats/runs';
+import { attributedStep, createSpec, getProvenance, startRun } from '@/server/stats/runs';
 import { listVersions, transformVersion } from '@/server/stats/versions';
 
 const RUN = `runs-${Date.now()}`;
@@ -207,6 +208,22 @@ async function main() {
   check('the approval was consumed (single use)', finalView.approvals[0]?.status, 'CONSUMED');
   const [claim] = await db.select().from(graphNodes).where(and(eq(graphNodes.projectId, P), eq(graphNodes.type, 'claim')));
   check('the claim is in the graph with the run and step as provenance', [claim?.origin, claim?.createdByRunId === main, claim?.createdByStepId === finalView.steps[4]!.id], ['agent', true, true]);
+  /* WS3-E (E4): created_by_run_id names a research run here, a statistics run on the engine's own nodes; read by origin, never by the id. */
+  const [statRunNode] = await db.select().from(graphNodes).where(eq(graphNodes.id, statRun?.graphRunNodeId ?? ''));
+  check(
+    'E4: the claim names its research run and step; the engine’s run node names its statistics run, not the research run',
+    [runProvenanceOf(claim!), runProvenanceOf(statRunNode!), statRunNode?.createdByRunId === main],
+    [{ kind: 'research_run', researchRunId: main, stepId: finalView.steps[4]!.id }, { kind: 'stat_run', statRunId }, false],
+  );
+  check(
+    '… a person’s node names no run, and an inconsistent row (engine with a step, agent without one) is not read as either kind',
+    [
+      runProvenanceOf({ origin: 'user', createdByRunId: null, createdByStepId: null }),
+      runProvenanceOf({ origin: 'engine', createdByRunId: statRunId, createdByStepId: finalView.steps[4]!.id }),
+      runProvenanceOf({ origin: 'agent', createdByRunId: main, createdByStepId: null }),
+    ],
+    [null, null, null],
+  );
   check('its number was rendered from the stored estimate, not typed', String((claim?.data as { text?: string }).text ?? '').startsWith('X predicted Y (b = '), true);
   const types = new Set(finalView.events.map((event) => event.type));
   check('the run is diagnosable from its events', ['run.created', 'run.planned', 'step.validated', 'step.authorized', 'step.running', 'step.succeeded', 'approval.requested', 'approval.approved', 'approval.consumed', 'run.resumed', 'run.succeeded'].every((type) => types.has(type)), true);
@@ -1097,6 +1114,47 @@ async function main() {
   const assistantProvenance = await getProvenance(me, assistantRun.runId, P);
   check('… nor does one the assistant created with a key of a step’s shape that is no step', [assistantProvenance.run.createdByRun, assistantProvenance.specification.createdByRun, assistantProvenance.specification.origin], [null, null, 'assistant']);
   check('… a stranger learns nothing from it (the provenance read is refused)', await outcome(() => getProvenance({ userId: stranger }, r11Stat, P)), 'NOT_FOUND');
+
+  /* WS3-E (E1): the key alone is not proof; the step must have recorded this exact record. */
+  const r4Provenance = await getProvenance(me, r4Stat!.id, P);
+  check(
+    'E1: a statistics run a step left behind failed is still attributed (the step’s error names it), with its specification',
+    [r4Provenance.run.createdByRun, r4Provenance.specification.createdByRun],
+    [{ runId: r4, stepId: r4Steps[1]!.id }, { runId: r4, stepId: r4Steps[0]!.id }],
+  );
+  const reusedKeyRun = await startRun(me, (await createSpec(me, { projectId: P, datasetVersionId: v2.id, spec: { analysisType: 'descriptives', variables: ['m'] } })).id, { projectId: P, idempotencyKey: r11Steps[2]!.idempotencyKey! });
+  const reusedKeyRunProvenance = await getProvenance(me, reusedKeyRun.id, P);
+  check(
+    '… the owner reusing a runAnalysis step’s key on another statistics run gets no attribution',
+    [reusedKeyRun.id !== r11Stat, reusedKeyRun.idempotencyKey === r11Steps[2]!.idempotencyKey, reusedKeyRunProvenance.run.createdByRun, reusedKeyRunProvenance.specification.createdByRun],
+    [true, true, null, null],
+  );
+  const { version: forgedVersion } = await transformVersion(me, v3.id, { operation: 'clean', actions: [{ kind: 'trim-whitespace', columns: ['group'] }] }, P, { idempotencyKey: r11Steps[0]!.idempotencyKey! });
+  const forgedVersionRun = await startRun(me, (await createSpec(me, { projectId: P, datasetVersionId: forgedVersion.id, spec: { analysisType: 'descriptives', variables: ['x'] } })).id, { projectId: P });
+  const forgedLineage = (await getProvenance(me, forgedVersionRun.id, P)).dataset;
+  const [forgedTransformation] = await db.select({ key: datasetTransformations.idempotencyKey }).from(datasetTransformations).where(eq(datasetTransformations.outputVersionId, forgedVersion.id));
+  check(
+    '… reusing a createDatasetVersion step’s key on another dataset version: no attribution',
+    [forgedVersion.id !== r11Provenance.dataset.at(-1)?.versionId, forgedTransformation?.key === r11Steps[0]!.idempotencyKey, forgedLineage.at(-1)?.versionId === forgedVersion.id, forgedLineage.at(-1)?.transformation?.createdByRun],
+    [true, true, true, null],
+  );
+  const specKey = r11Steps[1]!.idempotencyKey!;
+  const specStep = (await store.stepsByIdempotencyKeys(owner, P, [specKey])).get(specKey);
+  const otherSpec = await createSpec(me, { projectId: P, datasetVersionId: v2.id, spec: { analysisType: 'descriptives', variables: ['m'] } });
+  check(
+    '… a createAnalysisSpec step’s key cannot be carried by another specification (refused), and no other specification is attributed to the step',
+    [
+      await outcome(() => createSpec(me, { projectId: P, datasetVersionId: v2.id, spec: { analysisType: 'descriptives', variables: ['m'] }, idempotencyKey: specKey })),
+      attributedStep(specStep, { kind: 'stat_spec', id: r11Provenance.specification.id, ownerId: owner }),
+      attributedStep(specStep, { kind: 'stat_spec', id: otherSpec.id, ownerId: owner }),
+    ],
+    ['CONFLICT', { runId: r11, stepId: r11Steps[1]!.id }, null],
+  );
+  check(
+    '… and a step attributes nothing of another kind, nor of another owner, even with the id it recorded',
+    [attributedStep(specStep, { kind: 'stat_run', id: r11Provenance.specification.id, ownerId: owner }), attributedStep(specStep, { kind: 'stat_spec', id: r11Provenance.specification.id, ownerId: stranger })],
+    [null, null],
+  );
 
 
   section('Flags');

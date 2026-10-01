@@ -4,6 +4,8 @@
 
 **Status (2026-09-24): P1-D verification is CLOSED for security and deployment, with one explicit gate on `FF_RUNS`.**
 
+**Status update (2026-10-01): the `FF_RUNS` gate is met.** The app-level `test:runs:db` passed on a temporary Neon branch through both the direct and the pooled connection: 214 passed, 0 failed each, with `main` at `fc9f4d7` (§7). This closes WS3-C Gate 4 (`WS3_REPORT.md`). `FF_RUNS` and `FF_GRAPH` remain off; meeting the gate does not enable them.
+
 | Item | Status |
 |---|---|
 | Neon RLS: role, 11 policies, project isolation, no rows without a user, rejected cross-project, impersonating and viewer writes (§3) | ✅ Verified |
@@ -12,7 +14,7 @@
 | Production read-only RLS probe (`assertRlsEnforced`) | ✅ Passed (§5) |
 | Production connection | ✅ Role `neondb_owner` verified (§5); **pooled** Neon host, confirmed by the project owner in the Render dashboard |
 | `FF_RUNS` / `FF_GRAPH` in production | ✅ **OFF**: both absent from the Render environment (confirmed by the project owner), so both default to `false` |
-| App-level `test:runs:db` on Neon | ⏳ **Gate before `FF_RUNS` is enabled** (§6); not executed |
+| App-level `test:runs:db` on Neon | ~~⏳ **Gate before `FF_RUNS` is enabled** (§6); not executed~~ ✅ **Passed 2026-10-01** (§7): direct 214/0 and pooled 214/0 on `fc9f4d7`, temporary branch `ws3c-gate4` (since deleted) |
 
 The remaining gate is functional, not a security gap. The fail-closed probe runs in the same transaction as the run work, so a pooler that mishandled the role switch would make runs refuse (`rls_unavailable`) rather than expose data. The acting user is transaction-local and cannot carry over to another client on a pooled connection.
 
@@ -137,10 +139,35 @@ The Render service `academic-ai-app` (auto-deploys `main`; its build runs `npm r
 
 - **What it covers.** It runs the application's own run path against Neon's **pooled** host on **PostgreSQL 18**: the `postgres-js` driver (`prepare: false`), `withRunScope`'s transaction-local `SET LOCAL ROLE academic_app` + `set_config('app.user_id', …, true)`, and `assertRlsEnforced`. That is the combination production uses. The same suite (74 checks) already passes on PostgreSQL 16 locally and in CI. The database-level SQL was verified on PostgreSQL 18, most likely through the pooler (§4, correction).
 - **Why it is a gate and not a blocker for closure.** A failure there would be functional (runs refused or failing), not a data exposure. The probe runs in the same transaction as the work and refuses the run if the role or policies are not in force.
-- **How to satisfy it.** Create a temporary branch of `academic-ai-eu` with an empty `p1d_verify` database. Run `npm run db:migrate`, `db:seed` and `test:runs:db` against its direct string, then run `test:runs:db` against its `-pooler` string. Both runs must end `74 passed, 0 failed` with exit code 0. Then delete the branch.
+- **How to satisfy it.** Create a temporary branch of `academic-ai-eu` with an empty `p1d_verify` database. Run `npm run db:migrate`, `db:seed` and `test:runs:db` against its direct string, then run `test:runs:db` against its `-pooler` string. Both runs must end `74 passed, 0 failed` with exit code 0. Then delete the branch. *(Update 2026-10-01: after WS1 and WS3-B the suite has 214 checks, so the expected result is `214 passed, 0 failed`. It was met; see §7.)*
   - Run it from a machine that can reach `*.neon.tech`.
   - Obtain the connection strings with `neonctl connection-string … [--pooled]` straight into variables, so no credential is copied by hand.
   - Never run it against the production connection string: the suite briefly gives `academic_app` BYPASSRLS on the branch it runs on.
 - **Until the gate is met, `FF_RUNS` stays off.** Enabling it also requires `FF_GRAPH` and a queue-backed `JOB_RUNNER`. Production already uses `JOB_RUNNER=inline` per `render.yaml`.
 
-**What this does not claim.** It does not claim general "Neon support", nor that the whole application is RLS-protected (RLS covers only the four run tables and the run paths). It does not claim that the app-level Neon test has passed: it has not been executed.
+**What this does not claim.** It does not claim general "Neon support", nor that the whole application is RLS-protected (RLS covers only the four run tables and the run paths). It does not claim that the app-level Neon test has passed: it has not been executed. *(Superseded 2026-10-01: it has now been executed and passed; see §7.)*
+
+## 7. WS3-C Gate 4: app-level `test:runs:db` on Neon (2026-10-01)
+
+**Result: PASS.** This meets the gate in §6. The canonical WS3 record is `WS3_REPORT.md` §5–§6.
+
+| Item | Value |
+|---|---|
+| Code | `main` at `fc9f4d7` (merge of #49) |
+| Where it ran | The project owner's local machine (PowerShell), which can reach `*.neon.tech` |
+| Database | Temporary branch `ws3c-gate4` (`br-ancient-pond-b20vxyds`) of `academic-ai-eu` (`dark-smoke-87061117`), created from `import`. Never the production `import` branch. |
+| Branch schema | Checked read-only before the run: 18 migrations, latest `0017_ws2_section_integrity` with the same hash as in `fc9f4d7`; 11 run-table policies |
+| Direct connection | `npm run test:runs:db`: **214 passed, 0 failed** |
+| Pooled connection | `npm run test:runs:db`: **214 passed, 0 failed** |
+| Clean-up | `ws3c-gate4` was deleted after both runs passed; a read-only branch listing on 2026-10-01 confirms it is gone. `DATABASE_URL` was removed from the local PowerShell session. |
+| Production | Not tested and not changed: no production database test, and no change to the production database, Render configuration or flags. No migration was added. |
+
+**Expected count.** §6 was written when the suite had 74 checks. WS1 raised it to 174, and WS3-B to 214. An earlier run of 174/0 on both connections (2026-09-24, branch `p1d-ws1-m1m2-gate`, reported by the project owner) predates WS3-B's run-path changes, so it no longer covered `main`.
+
+**Earlier attempts.**
+- **The cloud session could not run it** (2026-09-27 and again on 2026-10-01): its network policy denies `*.neon.tech`, as in §4. It did only the read-only schema check above, through the Neon connector.
+- **A run on `5eb1e47` ended 211 passed, 3 failed** (2026-09-29, reported by the project owner). All three were R5 cancellation assertions. Diagnosis found no cancellation bug: two timing bounds were too tight for a remote database, and the planner check looked at an earlier planner call. The test-only fix is #49 (`scripts/runs-integration.ts` only; still 214 checks), merged as `fc9f4d7`.
+
+**What it shows.** The application's own run path works on Neon PostgreSQL 18 through both hosts: `postgres-js` (`prepare: false`), `withRunScope`'s transaction-local `SET LOCAL ROLE academic_app` and `app.user_id`, and `assertRlsEnforced`. Production uses the pooled host.
+
+**What it does not claim.** It is not a test of the production database. It does not enable `FF_RUNS` or `FF_GRAPH`, which remain off; enabling them is a separate decision. No connection string, credential or password is recorded here.

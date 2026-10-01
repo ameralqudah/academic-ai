@@ -10,7 +10,7 @@ Each step gets a section when it is merged.
 | P1-A Research Graph core | ✅ reviewed (`P1A_REVIEW.md`) and hardened (P1-A.1, `P1A_HARDENING_REPORT.md`) | [#30](https://github.com/ameralqudah/academic-ai/pull/30) |
 | P1-B Model Gateway | ✅ merged (`P1B_PLAN.md`, `P1B_REPORT.md`) | [#31](https://github.com/ameralqudah/academic-ai/pull/31) |
 | P1-C Deterministic statistics engine + graph integration (re-scoped) | ✅ merged (`P1C_PLAN.md`, `P1C_REPORT.md`); CI green on the merged head | [#32](https://github.com/ameralqudah/academic-ai/pull/32) |
-| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | ✅ merged (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); CI green on the merged head; **verification closed for security and deployment** (2026-09-24). `FF_RUNS` off; gate before enabling it: app-level `test:runs:db` on a Neon branch (postgres-js via the pooled host, PostgreSQL 18) | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
+| P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | ✅ merged (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); CI green on the merged head; **verification closed for security and deployment** (2026-09-24). `FF_RUNS` off; gate before enabling it: app-level `test:runs:db` on a Neon branch (postgres-js via the pooled host, PostgreSQL 18). *2026-10-01: gate met (WS3-C Gate 4, direct and pooled 214/0); `FF_RUNS` still off, see `WS3_REPORT.md`* | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
 
 ---
 
@@ -210,7 +210,7 @@ Full report: `docs/phase1/P1D_REPORT.md`. Plan and audit: `docs/phase1/P1D_PLAN.
 - **Verification closed (security and deployment).**
   - Neon RLS and fail-closed behaviour were verified on a Neon branch (since deleted).
   - In production, migrations 0014/0015 are applied, the read-only RLS probe passed, the app connects as `neondb_owner` through the pooled host, and `FF_RUNS` and `FF_GRAPH` are off (`P1D_NEON_VERIFICATION.md`).
-  - **Gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch, covering `postgres-js` through the Neon pooled host on PostgreSQL 18. It has not been executed.
+  - **Gate before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch, covering `postgres-js` through the Neon pooled host on PostgreSQL 18. It has not been executed. *(Status update 2026-10-01: executed and passed as WS3-C Gate 4; see below.)*
 
 ## After P1-D: WS1 and WS2 (status 2026-09-26)
 
@@ -221,3 +221,13 @@ Full report: `docs/phase1/P1D_REPORT.md`. Plan and audit: `docs/phase1/P1D_PLAN.
   - **Decisions:** WS2-D1 to WS2-D5 implemented; WS2-D2b declined.
   - **State:** guard version `ws2-2`; latest migration `0017_ws2_section_integrity.sql`.
 - **Flags:** `FF_RUNS` and `FF_GRAPH` remain off. The gate before enabling `FF_RUNS` (above) is unchanged.
+
+## After WS2: WS3 (status 2026-10-01)
+
+The canonical report is `WS3_REPORT.md`. WS3 is graph provenance plus `FF_RUNS` readiness; the authorization and operations hygiene items moved to WS4 (not started).
+
+- **WS3-A, claim integrity (N5, N6):** complete, merged via [#45](https://github.com/ameralqudah/academic-ai/pull/45) (`05e63ff`).
+- **WS3-B, run-engine readiness (R3–R7, R11):** complete, merged via [#46](https://github.com/ameralqudah/academic-ai/pull/46) (`e5d7896`). The runs database suite now has 214 checks.
+- **WS3-C, readiness gates: closed 2026-10-01.** Gates 1–5 pass. Gate 4, the app-level `test:runs:db` on Neon, ran from the project owner's machine against the temporary branch `ws3c-gate4` with `main` at `fc9f4d7`: **direct 214 passed, 0 failed; pooled 214 passed, 0 failed.** The branch was deleted afterwards. The cloud session could not reach Neon and did not run it. No production database test was performed (`P1D_NEON_VERIFICATION.md` §7).
+- **WS3-D (N7 claim-to-section linking) and WS3-E (M2 full tracing):** not started, deferred pending a decision.
+- **Flags and migrations:** `FF_RUNS` and `FF_GRAPH` remain off. Enabling them is a separate decision. WS3 added no migration; the latest is still `0017_ws2_section_integrity.sql`.

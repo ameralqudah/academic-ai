@@ -195,9 +195,19 @@ export async function recordRunInGraph(runId: string): Promise<string | null> {
   return recorded.run.id;
 }
 
-/** Records a run the user can edit (for example after turning the graph on). */
+/**
+ * Records a finished run in the graph after the fact (WS3-E, E2): when the
+ * graph was off as the run finished, or recording failed then (the run and its
+ * results stand either way). Only an editor of the run's project may, and only
+ * a succeeded run is recorded. The same `recordRunInGraph` does the writing,
+ * so it is idempotent: a run already recorded returns its node, and two calls
+ * at once record it once. Null only while the graph is off.
+ */
 export async function syncRunToGraph(actor: StatsActor, runId: string, projectId: string): Promise<string | null> {
-  await requireRun(runId, actor, 'EDITOR', projectId);
+  const run = await requireRun(runId, actor, 'EDITOR', projectId);
+  if (run.status !== 'succeeded') {
+    throw new AppError('CONFLICT', 'Only a succeeded run can be recorded in the Research Graph.', 'لا يُسجَّل في مخطط البحث إلا تشغيل ناجح.', { reason: 'not_succeeded', status: run.status });
+  }
   return recordRunInGraph(runId);
 }
 

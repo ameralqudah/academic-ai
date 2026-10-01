@@ -317,6 +317,10 @@ export interface StepByKey {
   tool: string;
   /** The run's owner, the user the step acted for. */
   ownerId: string;
+  /** What the step recorded it produced (`{ kind, id }`), when it succeeded. */
+  outputRef: Record<string, unknown> | null;
+  /** The step's error, when it failed (a failed analysis names its statistics run: `statRunId`). */
+  error: Record<string, unknown> | null;
 }
 
 /**
@@ -330,12 +334,12 @@ export async function stepsByIdempotencyKeys(userId: string, projectId: string, 
   if (wanted.length === 0) return new Map();
   const rows = await withRunScope(userId, (tx) =>
     tx
-      .select({ key: runSteps.idempotencyKey, runId: runSteps.runId, stepId: runSteps.id, tool: runSteps.tool, ownerId: researchRuns.userId })
+      .select({ key: runSteps.idempotencyKey, runId: runSteps.runId, stepId: runSteps.id, tool: runSteps.tool, ownerId: researchRuns.userId, outputRef: runSteps.outputRef, error: runSteps.error })
       .from(runSteps)
       .innerJoin(researchRuns, eq(researchRuns.id, runSteps.runId))
       .where(and(inArray(runSteps.idempotencyKey, wanted), eq(researchRuns.projectId, projectId))),
   );
-  return new Map(rows.filter((row) => row.key).map((row) => [row.key!, { runId: row.runId, stepId: row.stepId, tool: row.tool, ownerId: row.ownerId }]));
+  return new Map(rows.filter((row) => row.key).map((row) => [row.key!, { runId: row.runId, stepId: row.stepId, tool: row.tool, ownerId: row.ownerId, outputRef: row.outputRef ?? null, error: row.error ?? null }]));
 }
 
 export async function readSteps(userId: string, runId: string): Promise<RunStep[]> {

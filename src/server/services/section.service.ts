@@ -2,12 +2,14 @@ import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
 import { countWords } from '@/lib/text';
 import type { ResearchSection } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
+import { blankClaimTokens } from '@/server/integrity/claims';
 import { allowedFromLegacyResults, checkNumbers } from '@/server/integrity/numbers';
 import { sectionIntegrity, type SectionIntegrity } from '@/server/integrity/section';
 import * as analysisRunsRepo from '@/server/repositories/analysis-runs.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 
 import { getOwnedProject, refreshProjectStats } from './project.service';
+import { mirrorAfterSave, resolveClaimReferences } from './section-claims';
 
 export interface SaveSectionInput {
   projectId: string;
@@ -58,6 +60,8 @@ export async function saveSection(input: SaveSectionInput): Promise<ResearchSect
   }
 
   await refreshProjectStats(input.projectId, input.userId);
+  /* WS3-D (D2): the graph mirror follows the claims this text references, as validated into its integrity record. */
+  await mirrorAfterSave(input.projectId, input.userId, input.sectionKey, (input.integrity?.claims ?? []).map((claim) => claim.id));
   return section;
 }
 
@@ -90,6 +94,17 @@ export async function saveUserEdit(input: UserEditInput): Promise<ResearchSectio
   }
   const revoked = existing?.status === 'APPROVED';
   const integrity = await personIntegrity(input.projectId, input.userId, input.sectionKey, input.content);
+  /*
+   * WS3-D (D1): a person's text is never rewritten, so a claim reference that
+   * does not resolve (missing, another project's, replaced, invalidated or
+   * unverified) refuses the save — it is never kept as an unverified number.
+   */
+  if (integrity.unresolvedClaims?.length) {
+    throw new AppError('VALIDATION', 'The text references a claim that is missing, out of date or not verified. Reference the current claim.', 'يشير النص إلى ادعاء مفقود أو غير محدَّث أو غير موثَّق. أشِر إلى الادعاء الحالي.', {
+      reason: 'invalid_claim_reference',
+      references: integrity.unresolvedClaims,
+    });
+  }
   return saveSection({
     projectId: input.projectId,
     userId: input.userId,
@@ -109,11 +124,18 @@ export async function saveUserEdit(input: UserEditInput): Promise<ResearchSectio
  * trace to none counted as manual. Nothing is changed, stored or blocked
  * here; a person's edit stores the result with its version, and a Word
  * export uses it for a section with no stored record (WS2 B5).
+ *
+ * WS3-D (D1): `{{claim:id}}` references are resolved; the numbers of the
+ * current, verified claims count as traced (they are P1-C values, not legacy
+ * or manual ones), and the references are not read as numbers themselves.
+ * References that do not resolve are listed (`unresolvedClaims`) for the
+ * caller to refuse.
  */
 export async function personIntegrity(projectId: string, userId: string, sectionKey: SectionKey, content: string): Promise<SectionIntegrity> {
   const legacy = allowedFromLegacyResults(await analysisRunsRepo.listForSection(projectId, userId, sectionKey));
-  const check = checkNumbers(content, { mode: 'person', allowed: legacy.values });
-  return sectionIntegrity({ mode: 'person', check, legacy });
+  const references = await resolveClaimReferences(projectId, userId, content);
+  const check = checkNumbers(blankClaimTokens(content), { mode: 'person', allowed: legacy.values });
+  return sectionIntegrity({ mode: 'person', check, legacy, claims: references.claims, unresolvedClaims: references.unresolved });
 }
 
 export async function approveSection(

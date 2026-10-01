@@ -10,7 +10,8 @@ import { buildProjectContext } from '@/ai/context/builder';
 import { labelFor } from '@/ai/context/labels';
 import { inspectOutput, parseJsonOutput, type GuardrailResult } from '@/ai/guardrails';
 import { buildResultsContext } from '@/ai/context/results';
-import { allowedFromLegacyResults, checkNumbers, quarantine, type NumberSpan } from '@/server/integrity/numbers';
+import { blankClaimTokens, replaceClaimTokens } from '@/server/integrity/claims';
+import { allowedFromLegacyResults, checkNumbers, quarantine, QUARANTINE_MARKER, type NumberSpan } from '@/server/integrity/numbers';
 import { sectionIntegrity } from '@/server/integrity/section';
 import { generalPrompt } from '@/ai/prompts/general';
 import { chatPrompt, sectionPrompt } from '@/ai/prompts/wizard';
@@ -38,6 +39,7 @@ import * as titlesRepo from '@/server/repositories/titles.repository';
 
 import { getOwnedProject, getProjectWithSections, updateProject } from './project.service';
 import { checkChatReply } from './chat-integrity';
+import { resolveClaimReferences } from './section-claims';
 import { saveSection } from './section.service';
 import { assertCanUseAI } from './usage.service';
 
@@ -430,22 +432,32 @@ export async function generateSection(
    */
   const resultsSection = sectionKey === 'RESULTS' || sectionKey === 'CHAPTER_4';
   const stated = instruction?.trim() ? [instruction] : undefined;
-  const check = checkNumbers(result.text, {
+  const locale = project.language === 'AR' ? 'ar' : 'en';
+  /*
+   * WS3-D (D1): a `{{claim:id}}` the model wrote is validated like a person's:
+   * a current, verified claim of this project is kept (its numbers are traced),
+   * any other reference is quarantined like an untraced number. References are
+   * then blanked for the number check, so their ids are never read as numbers.
+   */
+  const references = await resolveClaimReferences(projectId, userId, result.text);
+  const referenced = replaceClaimTokens(result.text, new Set(references.unresolved.map((reference) => reference.id)), QUARANTINE_MARKER[locale]);
+  const check = checkNumbers(blankClaimTokens(referenced.text), {
     mode: 'model',
     ...(resultsSection ? { allowed: legacy.values } : {}),
     ...(stated ? { context: stated } : {}),
   });
-  const guarded = quarantine(result.text, check, project.language === 'AR' ? 'ar' : 'en');
+  const guarded = quarantine(referenced.text, check, locale);
+  const quarantined = guarded.quarantined + referenced.replaced;
   const guardrails = inspectOutput(result.text, {
     expectsNoStatistics: !resultsSection,
     /* Numbers in a results section must be ones the attached analyses produced (P1-C), windowed runs excluded (WS2 D3). */
     ...(resultsSection ? { verifiedNumbers: legacy.values } : {}),
     ...(stated ? { context: stated } : {}),
-    quarantined: guarded.quarantined,
+    quarantined,
   });
 
-  if (guarded.quarantined > 0) {
-    logger.info('ai.section.quarantined', { projectId, sectionKey, quarantined: guarded.quarantined, guardVersion: check.guardVersion });
+  if (quarantined > 0) {
+    logger.info('ai.section.quarantined', { projectId, sectionKey, quarantined, claimReferences: referenced.replaced, guardVersion: check.guardVersion });
   }
 
   await saveSection({
@@ -458,7 +470,7 @@ export async function generateSection(
     origin: 'AI',
     note: instruction?.slice(0, 200),
     /* The guard's result, stored with the version (WS2 D2); for a results section, the attached runs and their tiers. */
-    integrity: sectionIntegrity({ mode: 'model', check, legacy: resultsSection ? legacy : null, quarantined: guarded.quarantined }),
+    integrity: sectionIntegrity({ mode: 'model', check, legacy: resultsSection ? legacy : null, quarantined, claims: references.claims }),
   });
 
   return {
@@ -468,7 +480,7 @@ export async function generateSection(
     guardrails,
     integrity: {
       guardVersion: check.guardVersion,
-      quarantined: guarded.quarantined,
+      quarantined,
       findings: check.findings.slice(0, 20).map((found) => ({ text: found.text, value: found.value, kind: found.kind })),
     },
   };

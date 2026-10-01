@@ -228,7 +228,7 @@ All checks were read-only, on Render service `academic-ai-app` (auto-deploys `ma
 ## 12. Carried outside WS2
 
 - **WS3:** N5, N6 and N7 claim-to-section linking (§14).
-- **Before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch (`P1D_REPORT.md` §11.1). WS2 did not change this gate.
+- **Before `FF_RUNS` is enabled:** the app-level `test:runs:db` on a Neon branch (`P1D_REPORT.md` §11.1). WS2 did not change this gate. *(Status update 2026-10-01: the gate is met as WS3-C Gate 4, direct and pooled 214/0 on `fc9f4d7`; see `WS3_REPORT.md`. `FF_RUNS` remains off.)*
 - **A P1-D limitation:** a retry can bill a model call inside a tool twice (`P1D_REPORT.md` §11).
 - **Assignment to confirm:** `P1D_REPORT.md` §12 groups `projectId` checks and metering with WS2/WS3. Which workstream owns them needs confirming when WS3 is planned.
 
@@ -241,6 +241,8 @@ All checks were read-only, on Render service `academic-ai-app` (auto-deploys `ma
 - **`main`.** `276939f`, merge of #43, live on `academic-ai-app`.
 
 ## 14. Handover to WS3
+
+*(Status update 2026-10-01: N5 and N6 are closed by WS3-A, [#45](https://github.com/ameralqudah/academic-ai/pull/45). N7's claim-to-section linking is WS3-D, which is not started and deferred pending a decision. WS3-C is closed. See `WS3_REPORT.md`.)*
 
 **Items.**
 - **N5:** a user can create claim nodes with any text and link them to computed values, so a hand-typed claim can look traced.

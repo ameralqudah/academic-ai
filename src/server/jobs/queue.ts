@@ -19,6 +19,8 @@ export const QUEUES = {
   analysis: 'analysis-job-run',
   /** { runId } — advance a research run (P1-D). Same pg-boss instance; no second queue system. */
   run: 'research-run',
+  /** { conversationId, userId } — refresh a conversation's summary (P1-E, Context V2 only). */
+  summary: 'thread-summary',
   /** Every minute: re-queue work whose worker disappeared. */
   reaper: 'jobs-reaper',
 } as const;
@@ -74,6 +76,14 @@ export async function getBoss(): Promise<PgBoss | null> {
         expireInSeconds: 2 * 60 * 60,
         retryLimit: 3,
         retryDelay: 5,
+        retryBackoff: true,
+      });
+      /* P1-E: one queued and one active summary per conversation; a lost refresh is retried, then left to the next turn. */
+      await instance.createQueue(QUEUES.summary, {
+        policy: 'stately',
+        expireInSeconds: 10 * 60,
+        retryLimit: 2,
+        retryDelay: 30,
         retryBackoff: true,
       });
       await instance.createQueue(QUEUES.reaper, { policy: 'singleton', expireInSeconds: 120, retryLimit: 0 });

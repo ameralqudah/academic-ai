@@ -85,6 +85,17 @@ export async function listMessagesOwned(
 }
 
 
+/** One message of a conversation `userId` owns, or undefined. */
+export async function findMessageOwned(conversationId: string, userId: string, messageId: string): Promise<AIMessageRow | undefined> {
+  const [row] = await db
+    .select({ message: aiMessages })
+    .from(aiMessages)
+    .innerJoin(aiConversations, eq(aiConversations.id, aiMessages.conversationId))
+    .where(and(eq(aiMessages.id, messageId), eq(aiMessages.conversationId, conversationId), eq(aiConversations.userId, userId)))
+    .limit(1);
+  return row?.message;
+}
+
 export async function listMessagesAsc(conversationId: string): Promise<AIMessageRow[]> {
   return db
     .select()

@@ -14,9 +14,11 @@
  */
 
 import { logger } from '@/lib/logger';
+import { contextV2Enabled } from '@/server/context/flags';
 import type { AIConversation, AIMessageRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as chatRepo from '@/server/repositories/chat.repository';
+import { dispatchThreadSummary } from '@/server/jobs/dispatch';
 import { assertProjectLink } from '@/server/services/ownership';
 
 /** Above this a user is keeping more threads than any sidebar can serve. */
@@ -201,6 +203,17 @@ export async function recordTurn(input: {
   const conversation = await chatRepo.findOwned(input.conversationId, input.userId);
   if (conversation && !conversation.title) {
     await chatRepo.rename(input.conversationId, input.userId, titleFrom(input.userMessage));
+  }
+
+  /*
+   * P1-E: with Context V2 on, the conversation's summary is refreshed in the
+   * background once enough older turns have built up. Never awaited for the
+   * reply, and its failure never fails the turn. Off: nothing is scheduled.
+   */
+  if (contextV2Enabled()) {
+    void dispatchThreadSummary(input.conversationId, input.userId).catch((error: unknown) => {
+      logger.warn('chat.summaryNotScheduled', { conversationId: input.conversationId, error: String(error).slice(0, 200) });
+    });
   }
 
   return { user, assistant };

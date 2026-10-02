@@ -64,3 +64,18 @@ export async function dispatchAnalysisJob(jobId: string, kind: 'pls.bootstrap' |
     logger.error('analysisJob.crashed', { jobId, kind, error: String(error) });
   });
 }
+
+/**
+ * Refreshes a conversation's summary in the background (P1-E). Queued once
+ * per conversation at a time (the singleton key); otherwise run in this
+ * process. No lease is needed: a summary version is written at most once (the
+ * unique version index) and charged at most once (its idempotency key), so a
+ * second run only finds the work done.
+ */
+export async function dispatchThreadSummary(conversationId: string, userId: string): Promise<void> {
+  if (jobRunner() !== 'direct' && (await enqueue(QUEUES.summary, { conversationId, userId }, `summary:${conversationId}`))) return;
+  const { refreshThreadSummary } = await import('@/server/context/v2/summaries');
+  void refreshThreadSummary({ conversationId, userId }).catch((error: unknown) => {
+    logger.error('summary.crashed', { conversationId, error: String(error) });
+  });
+}

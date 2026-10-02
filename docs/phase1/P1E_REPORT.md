@@ -202,6 +202,71 @@ Thirteen mutations of the authorization, flag and boundary guards, each run agai
 | F11 | an unmatched request still gets a slice | killed (1) |
 | F12 | the summary copies payloads | killed (1, after the check was extended) |
 
+## Accelerated plan (approved 2026-10-02)
+
+After PR #62 (`2fb8a39`), the remaining P1-E work was audited and grouped into three PRs: **#4** thread summaries (R1, R2, R9), **#5** memories end to end (R3–R6), **#6** snapshot completeness, k=1 formalised, and closure (R7, R8, R14). Approved decisions: summaries are an internal gateway step (tokens charged, no request or words, the router's default model); own user memories are `user-instruction`, project memories `project-data`, proposed and archived memories never in context; agent proposals through the runs tool registry, proposed only; the slice stays k=1; the legacy `src/ai/context/*` builder (R10) moves to P1-F.
+
+## PR #4 — Thread summaries
+
+All behind `FF_CONTEXT_V2` (off: nothing is scheduled, generated or read, and the v1 prompt is byte-for-byte unchanged).
+
+| Part | Design |
+|---|---|
+| When (`v2/summaries.ts`) | After a recorded turn (`chat.service.recordTurn`), a background refresh (`dispatchThreadSummary`, queue `thread-summary`, stately: one queued and one active per conversation, retried twice; in-process when the queue is unavailable). Due once `SUMMARY_EVERY` (10) messages beyond the last summary are older than the `KEEP_RECENT` (6) most recent; the most recent messages are never summarised. At most 60 new messages per refresh. |
+| Metering | One gateway call, purpose `thread.summary`, routed by the router's default (capability `thread.summary`, no model requested). Internal step: `countsAsRequest: false`, `estimatedWords: 0`; tokens and cost on the usage ledger. The gateway reserves before any provider is contacted, so a refused reservation means no model call. |
+| Idempotency | Key `thread-summary:{conversationId}:v{version}`. A concurrent second refresh shares the reservation and finds the version taken (unique (conversation, version) index → `duplicate`); a key already charged is refused before the model, so a version is never paid for twice. |
+| Numeric integrity | The text is checked by the existing guard (`checkNumbers`, model mode) against the values the conversation's recorded analyses produced (`allowedFromLegacyResults`) and the numbers the user wrote (and the previous, already-guarded summary); untraced numbers are quarantined with the visible marker before storing. Claim references stay references; the context's claim pass renders them. |
+| Ownership | Messages are read through the owner-scoped reader; the summary is written through the memory scope (RLS) and its guard trigger. |
+| Failure | Quota, provider, a deleted conversation (refused by the guard trigger) or anything else: nothing is written, the outcome is logged, the context is built without it. |
+| In the context (`v2/summary-context.ts`) | Loaded through the memory scope (fail-safe: refused or failing → no summary). Used when turns had to be dropped, or when it covers only history older than every loaded turn; left out when every turn is shown verbatim. Costed by the same counter out of the conversation's share; the turns are refitted to the rest; **a kept turn the summary covers is removed**, so no turn is both summarised and shown, and the turns shown stay the newest contiguous run. Rendered first in the conversation block (`model-generated`, not evidence). |
+| R9 | `buildContextPrompt` accepts `tokenProvider`; the general answer passes its routed provider, the chat route the chosen one, the diagram extractor the preferred one. V2 measures with that provider's counter (today the estimate for all); v1 ignores it. |
+
+No migration (the repository accepts an explicit version; a new owner-scoped `findMessageOwned`), no new dependency, no change to storage or production configuration.
+
+### Tests
+
+`test:summary:db` (new, in CI): 35/0. `test:context:db` 63/0, `test:graphctx:db` 31/0 and `test:memory:db` 53/0 unchanged.
+
+- **Flag gating:** with `FF_CONTEXT_V2` off, a refresh is disabled (no model call, no row), a recorded turn schedules nothing, and the v1 prompt is byte-for-byte the same with a summary present and a provider passed.
+- **Cadence:** not due below 10 older messages; due writes version 1 through the last message older than the 6 most recent; the model sees only those older messages; routed by the router (no model requested), purpose `thread.summary`.
+- **Metering:** the reservation under `thread-summary:{conversation}:v1` is committed with no request and no words; the tokens are on the usage ledger.
+- **No duplicates:** nothing new → not due, no call; a version already charged is refused before the model; two refreshes at once write one version; a slow refresh finishing after a faster one is refused, not stored as a second version.
+- **Numeric guard:** numbers the analyses produced and the user stated are kept; untraced ones (an invented coefficient, a percentage) are quarantined with the marker, and the guard is recorded with the summary.
+- **Ownership, quota, deletion:** another user's refresh is not found with no model call; a refused reservation means no call and no row; a conversation deleted mid-generation leaves nothing written and nothing crashed.
+- **In the context:** used when turns are dropped, before the turns; no covered turn is shown; the turns stay chronological and newest; measured by the counter; left out when every turn fits; included when it covers only history older than the loaded turns; never for another user; claim references in it are rendered or marked, never raw; with RLS unavailable, no summary and the context still builds.
+- **Hook and counter:** a recorded turn refreshes the summary in the background with the flag on; the routed provider's counter measures the budget.
+- **Queue path (`JOB_RUNNER=inline`, as in production):** every queue in `QUEUES` is created before use; the workers start with the summary queue; a queued refresh is picked up by the worker and written once.
+
+### Mutation testing (PR #4)
+
+Nineteen mutations of the idempotency, duplicate, numeric, ownership, overlap, order, flag, metering, fail-safe and queue guards, each run against `test:summary:db`: eighteen killed; one equivalent survivor. D1 first survived (the simultaneous race computes the same version either way); a staggered test was added and D1 is now killed. Q3 is the defect found while preparing the regression: the summary queue was not created (pg-boss 12 needs `createQueue` first), so a queued refresh would fail to send and fall back to the in-process path, losing the queue's durability; the existing jobs suite passed regardless, so the summary suite now checks that every queue is created.
+
+| # | Mutation | Result |
+|---|---|---|
+| I1 | idempotency key removed | killed (3) |
+| D1 | the explicit version ignored | killed (1, after the staggered test) |
+| D2 | a version conflict treated as written | killed (1) |
+| N1 | numeric guard bypassed | killed (1) |
+| N2 | every number allowed | killed (2) |
+| O1 | unscoped message read, no owner check | killed (1) |
+| O2 | summary read on the owner connection (RLS bypassed) | killed (2) |
+| V1 | covered turns still shown (overlap) | killed (1) |
+| V2 | summary shown although every turn fits | killed (1) |
+| C1 | kept turns reordered | killed (2) |
+| C2 | summary rendered after the turns | killed (1) |
+| C3 | recent messages summarised | killed (6) |
+| F1 | generation ignores `FF_CONTEXT_V2` | killed (10) |
+| F2 | the turn hook ignores `FF_CONTEXT_V2` | survived: equivalent — the generation gate (F1, killed) still returns `disabled`, so nothing is called or written |
+| Q1 | metered as a request | killed (1) |
+| Q2 | metered with words | killed (1) |
+| S1 | an RLS failure breaks the context build | killed (suite stops) |
+| T1 | the routed provider ignored by the counter | killed (1) |
+| Q3 | the summary queue not created | killed (1) |
+
+### Known limitation
+
+If a process stops after the gateway has committed a summary's charge but before the row is written, that version's key is committed and is refused from then on (never charged twice), so the conversation's summary stays at the previous version. Recovering would need a key that also names the summary's last message; not done, to keep the approved key format.
+
 ## Remaining decisions (later PRs)
 
 - **Graph context, later.** A relevance-ranked (rather than lexical) focus choice, and an API or UI for a caller to name focus nodes; today only the assembler's `focusNodeIds` input does.

@@ -131,6 +131,12 @@ export async function deleteMemory(userId: string, id: string): Promise<void> {
 
 export interface NewThreadSummary {
   conversationId: string;
+  /**
+   * The version this summary must be (P1-E PR #4: the one its idempotency key
+   * names). A summary already at that version is refused as CONFLICT by the
+   * unique index, never written twice. Absent: the next version.
+   */
+  version?: number;
   summary: string;
   throughMessageId?: string | null;
   messageCount?: number;
@@ -150,7 +156,7 @@ export async function appendThreadSummary(userId: string, input: NewThreadSummar
         .values({
           conversationId: input.conversationId,
           userId,
-          version: (current?.version ?? 0) + 1,
+          version: input.version ?? (current?.version ?? 0) + 1,
           summary: input.summary,
           throughMessageId: input.throughMessageId ?? null,
           messageCount: input.messageCount ?? 0,

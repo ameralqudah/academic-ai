@@ -56,6 +56,17 @@ export async function startJobWorkers(options: { taskConcurrency?: number; analy
     },
   );
 
+  await boss.work<{ conversationId: string; userId: string }>(
+    QUEUES.summary,
+    { localConcurrency: 1, pollingIntervalSeconds: 5 },
+    async ([job]) => {
+      if (!job) return;
+      const { refreshThreadSummary } = await import('@/server/context/v2/summaries');
+      const result = await refreshThreadSummary(job.data);
+      logger.info('jobs.summary.done', { conversationId: job.data.conversationId, outcome: result.outcome, worker: WORKER_ID });
+    },
+  );
+
   await boss.schedule(QUEUES.reaper, '* * * * *');
   await boss.work(QUEUES.reaper, async () => {
     await reap();

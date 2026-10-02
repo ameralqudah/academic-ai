@@ -69,6 +69,9 @@ const CAPABILITY_PROFILE: Record<string, Partial<ModelRequirements>> = {
   'statistics.cbsem': { needsReasoning: true, expectedOutputTokens: 2000 },
   'file.analyse': { needsReasoning: false, expectedOutputTokens: 1500 },
 
+  /* P1-E: a conversation's rolling summary. Background, short, no reasoning needed. */
+  'thread.summary': { needsReasoning: false, latencySensitive: false, expectedOutputTokens: 800 },
+
   /* No model at all: the generator writes bytes. */
   'document.generate': { needsReasoning: false, expectedOutputTokens: 0, latencySensitive: true },
 };

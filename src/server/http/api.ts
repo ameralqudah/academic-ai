@@ -47,7 +47,11 @@ interface Options<TBody> {
   auth?: boolean;
   /** Restrict to admins. */
   admin?: boolean;
-  /** Route-specific limit; falls back to the global one. */
+  /**
+   * Route-specific limit, keyed by the client address. A write (any method but
+   * GET, HEAD or OPTIONS) that names none falls back to the global one — see
+   * `WRITE_FALLBACK_KEY` (WS4).
+   */
   rateLimit?: { max: number; windowSeconds?: number; key: string };
   /**
    * A second limit keyed by the signed-in user rather than the address (P1-D),
@@ -60,6 +64,17 @@ interface Options<TBody> {
 }
 
 type RouteArgs<TParams> = { params: Promise<TParams> } | undefined;
+
+/**
+ * WS4: the global limit's bucket. Every authenticated write whose route names
+ * no limit of its own counts here, per signed-in user, against the global
+ * `RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`. Before, the
+ * option's comment promised this fallback and nothing applied it: a route that
+ * named no limit (sections, references, title selection, recommendations, the
+ * billing portal, deletes, edits) had none.
+ */
+export const WRITE_FALLBACK_KEY = 'api.write';
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export function ok<T>(data: T, init?: ResponseInit) {
   return NextResponse.json({ ok: true, data }, init);
@@ -122,6 +137,12 @@ export function withApi<TBody = undefined, TParams = Record<string, string>>(
 
       if (options.userRateLimit && user) {
         const result = await consume(`ratelimit:${options.userRateLimit.key}:user:${user.id}`, options.userRateLimit.max, options.userRateLimit.windowSeconds);
+        if (!result.allowed) throw AppError.rateLimited(result.retryAfterSeconds);
+      }
+
+      if (!options.rateLimit && !options.userRateLimit && user && !READ_METHODS.has(request.method.toUpperCase())) {
+        /* The global limit, which the environment configures; per user, so one address shared by many is not one bucket. */
+        const result = await consume(`ratelimit:${WRITE_FALLBACK_KEY}:user:${user.id}`);
         if (!result.allowed) throw AppError.rateLimited(result.retryAfterSeconds);
       }
 

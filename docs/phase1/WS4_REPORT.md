@@ -75,6 +75,34 @@ No migration: the attempt count lives in the task's existing `context` column. N
 - **A renewal that fails for a database reason is tolerated** until the lease could have expired (about 90 s with the 120 s lease and 30 s heartbeat), then treated as lost.
 - **The interruption count is cumulative** for the task's lifetime: a clean end closes the execution but does not reset the count.
 
-### Left for later WS4 PRs
+Merged via #58.
 
-G5 (artifact idempotency), rate limits on the routes that have none, the cap on concurrent task streams, and the missing `.env.example` entries.
+## PR #4 — limits and hygiene (G5, rate limits, stream cap, `.env.example`)
+
+No migration: G5 keeps its keys in the artifact's existing `metadata`. No production or configuration change; `FF_RUNS` and `FF_GRAPH` stay off; the storage implementation is untouched.
+
+| Item | Change |
+|---|---|
+| **G5** — an artifact had no idempotency, so a double submit, a client retry or a re-run step stored the file twice | `storeArtifact` is idempotent. With an `idempotencyKey` (the artifacts route takes it from an `Idempotency-Key` header, the same format as the runs route), a replay returns the artifact the first request stored, at any time, even if the bytes were regenerated; the same key for a different file (kind, name, project, thread, job or replaced version) is refused with `CONFLICT`. Without a key, the same request with the same bytes within `REPEAT_WINDOW_MINUTES` (10) returns the artifact already stored instead of a duplicate, or instead of an extra version for a replacement. Lookup and store run under a per-user, per-key transaction lock, so identical requests racing each other store once; every query of a store uses the lock's own transaction (one connection per store, so waiting stores cannot exhaust the pool, which on serverless is a single connection). A deleted artifact is never handed back. |
+| **Rate limits** — routes that named no limit had none, although the option's comment promised a fallback | `withApi` now applies the global limit (`RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`, 60 per 60 s by default) to every authenticated write (any method but GET, HEAD or OPTIONS) whose route names no limit of its own. It is counted per signed-in user, so many users behind one address are not one bucket. Of the 25 write handlers that had no limit, 24 now fall back to it, among them title selection, references, section edits and approval, recommendations, the billing portal, settings, project and conversation edits, and the deletes. The 25th, task actions (answer, resume, retry), starts model work again, so it gets an explicit limit like starting an agent turn (30 per 5 min). |
+| **Stream cap** — the task stream had no limit, and each open stream re-reads the database every 1.5 s for up to 10 min | Opening a stream is limited per user (60 per 5 min), and what one user holds open at once is capped at `MAX_STREAMS_PER_USER` (5, per process); over either, the answer is 429 with `Retry-After`. A slot is freed when the stream ends, the client goes away, a write fails, or the runtime cancels it. The stream itself moved to `server/http/task-stream.ts` (the route keeps the sign-in check), so it is tested without a session. |
+| **`.env.example`** | Added `FF_RUNS`, `RUN_LIMITS`, `SERPER_API_KEY`, `OPENALEX_API_KEY`, `STORAGE_PROVIDER`, `STORAGE_LOCAL_DIR` and the `S3_*` keys (documentation only, safe defaults), and corrected the description of the global limit. |
+
+### Tests
+
+- `test:tasks:db`: 122/0, of which 18 are new.
+  - **G5:** an identical repeat returns the stored artifact (one row); five identical racing requests store once; different bytes, or another user's identical request, are separate artifacts; after the window the request stores again; a deleted artifact is never replayed; a key returns its first artifact even after a regeneration and a day later; the same key for a different file is refused; another user's identical key is their own; a replacement submitted twice adds one version.
+  - **Stream cap:** a user holds the cap's worth of streams; one more is refused with 429 and `Retry-After`, without taking a slot; another user's streams count apart; a foreign task is refused before taking a slot; closing a stream frees its slot at once; opening is limited at 60 per five minutes even when each stream closes at once.
+  - **Route checks:** task actions are limited; the artifacts route passes its key; the stream route hands over to the limited stream.
+- `e2e/limits.spec.ts` (new, against the built server): a write route with no limit of its own is refused at the 61st write per user, with `Retry-After`, while 70 reads pass; an artifact request retried with the same `Idempotency-Key` returns the first artifact, the key reused for another file is refused with 409, and an identical keyless request moments later is the same artifact.
+- `scripts/integration.ts`: its source checks on the task stream now read `server/http/task-stream.ts`.
+
+### Limitations and decisions
+
+- **The stream cap is per process**, like the memory rate-limit store: on several instances it bounds what one user can hold on any one instance, not across all of them.
+- **Content-hash deduplication only catches byte-identical repeats.** Formats that embed a timestamp, or a step that regenerates its text, produce different bytes; for client retries the `Idempotency-Key` header is the reliable path.
+- **The global write limit uses the memory store unless `RATE_LIMIT_STORE=redis`**, as every other limit does.
+
+### WS4 status
+
+With PRs #1–#4, every WS4 finding from the audit is addressed: A1, A3, A4 and A5; A2 decided (legacy records stay creator-only); G1–G8; rate limits; the stream cap; `.env.example`.

@@ -22,7 +22,7 @@ process.env.JOB_RUNNER = 'direct';
 process.env.STORAGE_PROVIDER = 'local';
 process.env.STORAGE_LOCAL_DIR = mkdtempSync(join(tmpdir(), 'tasks-hardening-'));
 
-import { count, eq } from 'drizzle-orm';
+import { and, count, eq, sql } from 'drizzle-orm';
 
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
@@ -38,7 +38,9 @@ import { gateway, productionDeps, setGatewayForTests } from '@/server/ai/gateway
 import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { createGateway } from '@/server/ai/gateway/gateway';
 import { runForUser, withCallIds } from '@/server/ai/request-scope';
-import { storeArtifact } from '@/server/services/artifact.service';
+import { REPEAT_WINDOW_MINUTES, storeArtifact } from '@/server/services/artifact.service';
+import { openTaskStream } from '@/server/http/task-stream';
+import { MAX_STREAMS_PER_USER, streamSlotsHeld } from '@/server/http/stream-slots';
 import { startConversation } from '@/server/services/chat.service';
 import { analyseDataRequest } from '@/server/services/data-analysis.service';
 import { saveUpload } from '@/server/services/dataset.service';
@@ -319,6 +321,98 @@ async function main() {
     check('… nor to someone else’s conversation', await outcome(() => startTask({ userId: owner, request: 'x', locale: 'en', conversationId: conversation.id })), 'NOT_FOUND');
     const before = (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length;
     check('and nothing was created', (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length, before);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G5: storing an artifact is idempotent');
+  {
+    const bytes = (text: string) => new TextEncoder().encode(`# G5\n\n${text}\n`);
+    const rowsNamed = async (filename: string, userId = owner) =>
+      (await db.select({ n: count() }).from(artifacts).where(and(eq(artifacts.userId, userId), eq(artifacts.filename, filename))))[0]!.n;
+
+    const first = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-a.md', bytes: bytes('one') });
+    const repeat = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-a.md', bytes: bytes('one') });
+    check('the same request with the same bytes, moments later, returns the stored artifact instead of a duplicate', [repeat.id === first.id, await rowsNamed('g5-a.md')], [true, 1]);
+    check('… recorded with what identifies it', [typeof first.metadata.contentSha256, typeof first.metadata.requestKey, typeof first.metadata.identity], ['string', 'string', 'string']);
+
+    const raced = await Promise.all(Array.from({ length: 5 }, () => storeArtifact({ userId: owner, kind: 'md', filename: 'g5-race.md', bytes: bytes('race') })));
+    check('five identical requests racing each other store once, and all get that artifact', [new Set(raced.map((a) => a.id)).size, await rowsNamed('g5-race.md')], [1, 1]);
+
+    const changed = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-a.md', bytes: bytes('two') });
+    check('different bytes are a different artifact', [changed.id !== first.id, await rowsNamed('g5-a.md')], [true, 2]);
+    const elsewhere = await storeArtifact({ userId: stranger, kind: 'md', filename: 'g5-a.md', bytes: bytes('one') });
+    check('… and so is another user’s identical request', [elsewhere.id !== first.id, elsewhere.userId], [true, stranger]);
+
+    await db.update(artifacts).set({ createdAt: sql`now() - make_interval(mins => ${REPEAT_WINDOW_MINUTES + 1})` }).where(eq(artifacts.id, first.id));
+    const later = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-a.md', bytes: bytes('one') });
+    check('after the repeat window the same request stores again (a deliberate regeneration)', [later.id !== first.id, await rowsNamed('g5-a.md')], [true, 3]);
+    await db.update(artifacts).set({ deletedAt: new Date() }).where(eq(artifacts.id, later.id));
+    const afterDelete = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-a.md', bytes: bytes('one') });
+    check('a deleted artifact is never handed back', afterDelete.id !== later.id, true);
+
+    const keyed = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-k.md', bytes: bytes('keyed'), idempotencyKey: 'g5-key-0001' });
+    const keyedAgain = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-k.md', bytes: bytes('regenerated differently'), idempotencyKey: 'g5-key-0001' });
+    await db.update(artifacts).set({ createdAt: sql`now() - interval '1 day'` }).where(eq(artifacts.id, keyed.id));
+    const keyedLater = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-k.md', bytes: bytes('keyed'), idempotencyKey: 'g5-key-0001' });
+    check('an idempotency key returns its first artifact, even when the bytes were regenerated, and at any time', [keyedAgain.id === keyed.id, keyedLater.id === keyed.id, await rowsNamed('g5-k.md')], [true, true, 1]);
+    check('… and the same key for a different file is refused', await outcome(() => storeArtifact({ userId: owner, kind: 'md', filename: 'g5-other.md', bytes: bytes('keyed'), idempotencyKey: 'g5-key-0001' })), 'CONFLICT');
+    check('… while another user’s identical key is their own', (await storeArtifact({ userId: stranger, kind: 'md', filename: 'g5-k.md', bytes: bytes('keyed'), idempotencyKey: 'g5-key-0001' })).userId, stranger);
+
+    const base = await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-v.md', bytes: bytes('v1') });
+    const [v2, v2Again] = [
+      await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-v.md', bytes: bytes('v2'), previousArtifactId: base.id }),
+      await storeArtifact({ userId: owner, kind: 'md', filename: 'g5-v.md', bytes: bytes('v2'), previousArtifactId: base.id }),
+    ];
+    check('a replacement submitted twice adds one version, not two', [v2.version, v2Again.id === v2.id, await rowsNamed('g5-v.md')], [2, true, 2]);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4: task streams are limited per user');
+  {
+    const watched = await makeTask(['test.ask']);
+    await tasksRepo.setStatus(watched.id, 'WAITING_FOR_INPUT', { pendingQuestion: 'Which one?' });
+    const open = (userId: string, taskId: string) => {
+      const controller = new AbortController();
+      const response = openTaskStream(new Request(`http://localhost/api/tasks/${taskId}/stream`, { signal: controller.signal }), userId, taskId);
+      return { controller, response };
+    };
+    const held = await Promise.all(Array.from({ length: MAX_STREAMS_PER_USER }, () => open(owner, watched.id)).map(async (s) => ({ ...s, status: (await s.response).status })));
+    check('a user may hold the cap’s worth of streams open', [held.every((s) => s.status === 200), streamSlotsHeld(owner)], [true, MAX_STREAMS_PER_USER]);
+    const over = await open(owner, watched.id).response;
+    check('… and one more is refused with 429 and a Retry-After, without taking a slot', [over.status, Number(over.headers.get('retry-after')) > 0, streamSlotsHeld(owner)], [429, true, MAX_STREAMS_PER_USER]);
+    const theirs = await makeTask(['test.ask'], { userId: stranger });
+    await tasksRepo.setStatus(theirs.id, 'WAITING_FOR_INPUT', { pendingQuestion: 'Which one?' });
+    const other = open(stranger, theirs.id);
+    check('another user’s streams are counted apart', (await other.response).status, 200);
+    other.controller.abort();
+    check('a stream for someone else’s task is refused before taking a slot', [(await open(owner, theirs.id).response).status, streamSlotsHeld(owner)], [404, MAX_STREAMS_PER_USER]);
+    held[0]!.controller.abort();
+    check('closing a stream frees its slot at once', [streamSlotsHeld(owner), (await open(owner, watched.id).response).status], [MAX_STREAMS_PER_USER - 1, 200]);
+    for (const s of held) s.controller.abort();
+
+    const opener = await user('g5-opener');
+    const ownTask = await makeTask(['test.ask'], { userId: opener });
+    await tasksRepo.setStatus(ownTask.id, 'WAITING_FOR_INPUT', { pendingQuestion: 'Which one?' });
+    let refusedAt = 0;
+    for (let attempt = 1; attempt <= 61; attempt += 1) {
+      const s = open(opener, ownTask.id);
+      const status = (await s.response).status;
+      s.controller.abort();
+      if (status === 429) {
+        refusedAt = attempt;
+        break;
+      }
+    }
+    check('opening is rate-limited per user as well (60 per five minutes), even when each stream is closed at once', [refusedAt, streamSlotsHeld(opener)], [61, 0]);
+
+    const taskRoute = readFileSync('src/app/api/tasks/[id]/route.ts', 'utf8');
+    const artifactRoute = readFileSync('src/app/api/artifacts/route.ts', 'utf8');
+    const streamRoute = readFileSync('src/app/api/tasks/[id]/stream/route.ts', 'utf8');
+    check(
+      'routes: task actions (answer, resume, retry) are limited; the artifacts route passes its Idempotency-Key; the stream route signs in and hands over to the limited stream',
+      [/rateLimit: \{ max: 30, windowSeconds: 300, key: 'task\.action' \}/.test(taskRoute), artifactRoute.includes("request.headers.get('idempotency-key')") && /idempotencyKey: key && \/\^\[A-Za-z0-9\._:-\]\{8,200\}\$\/\.test\(key\)/.test(artifactRoute), streamRoute.includes('return openTaskStream(request, session.user.id, id);')],
+      [true, true, true],
+    );
   }
 
   /* ------------------------------------------------------------------ */

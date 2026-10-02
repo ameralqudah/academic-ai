@@ -24,6 +24,7 @@ import {
   type DeepResearchReport,
 } from '@/server/research/pipeline';
 import { recordTurn } from '@/server/services/chat.service';
+import { assertProjectLink, assertConversationLink } from '@/server/services/ownership';
 import { recordSimple } from '@/server/services/usage.service';
 import { runForUser, withCallIds } from '@/server/ai/request-scope';
 import { isWebSearchConfigured } from '@/server/services/web-search.service';
@@ -39,6 +40,10 @@ export async function startDeepResearch(input: {
   /** Recorded here so the finished report joins the thread that asked for it. */
   conversationId?: string | null;
 }): Promise<AnalysisJob> {
+  /* WS4 A1: the job is filed under the project and thread the request names only when they are the caller's. */
+  await assertProjectLink(input.userId, input.projectId);
+  await assertConversationLink(input.userId, input.conversationId);
+
   if (!isWebSearchConfigured()) {
     /*
      * Deep research without web search is a literature search under another

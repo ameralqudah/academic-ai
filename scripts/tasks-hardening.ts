@@ -13,19 +13,35 @@
 
 import 'dotenv/config';
 
-process.env.JOB_RUNNER = 'direct';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { eq } from 'drizzle-orm';
+process.env.JOB_RUNNER = 'direct';
+/* WS4: the artifact and dataset checks store files; a private local directory, as `integration.ts` does. */
+process.env.STORAGE_PROVIDER = 'local';
+process.env.STORAGE_LOCAL_DIR = mkdtempSync(join(tmpdir(), 'tasks-hardening-'));
+
+import { count, eq } from 'drizzle-orm';
 
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
-import { projectMembers, taskSteps, tasks } from '@/server/db/schema';
+import { agentTasks, aiConversations, analysisJobs, analysisRuns, artifacts, projectMembers, taskSteps, tasks } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { register } from '@/server/services/account.service';
 import { answerTask, cancelTask, retryTask, startTask } from '@/server/services/task.service';
+import { runAgent } from '@/agents/orchestrator';
+import { storeArtifact } from '@/server/services/artifact.service';
+import { startConversation } from '@/server/services/chat.service';
+import { analyseDataRequest } from '@/server/services/data-analysis.service';
+import { saveUpload } from '@/server/services/dataset.service';
+import { startDeepResearch } from '@/server/services/deep-research.service';
+import { runPls, startBootstrap } from '@/server/services/pls.service';
+import { attachRun, runAnalysis } from '@/server/services/statistics.service';
+import { searchWeb } from '@/server/services/web-search.service';
 import { DEFAULT_BUDGET, registerCapability, type CapabilityDefinition } from '@/server/tasks/capabilities';
 import { failed, succeeded } from '@/server/tasks/contracts';
 import { registerHandler, runTask } from '@/server/tasks/executor';
@@ -231,6 +247,131 @@ async function main() {
     const before = (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length;
     check('and nothing was created', (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length, before);
   }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 A1: every write path checks the project and conversation it names');
+  {
+    const theirs = await projectsRepo.create({ userId: stranger, title: 'WS4 theirs', academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+    const shared = await projectsRepo.create({ userId: stranger, title: 'WS4 shared', academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+    await db.insert(projectMembers).values({ projectId: shared.id, userId: viewer, role: 'VIEWER' });
+    const mine = await projectsRepo.create({ userId: owner, title: 'WS4 mine', academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+    const theirThread = await conversationsRepo.findOrCreate({ userId: stranger, projectId: null, scope: 'TOOL', toolKey: 'rewriter' as never });
+    const myThread = await conversationsRepo.findOrCreate({ userId: owner, projectId: null, scope: 'TOOL', toolKey: 'rewriter' as never });
+    const rows = async () => ({
+      conversations: (await db.select({ n: count() }).from(aiConversations).where(eq(aiConversations.userId, owner)))[0]!.n,
+      viewerConversations: (await db.select({ n: count() }).from(aiConversations).where(eq(aiConversations.userId, viewer)))[0]!.n,
+      agentTasks: (await db.select({ n: count() }).from(agentTasks).where(eq(agentTasks.userId, owner)))[0]!.n,
+      artifacts: (await db.select({ n: count() }).from(artifacts).where(eq(artifacts.userId, owner)))[0]!.n,
+      jobs: (await db.select({ n: count() }).from(analysisJobs).where(eq(analysisJobs.userId, owner)))[0]!.n,
+    });
+
+    /* chat: startConversation (the conversations route and the agent's first turn) */
+    const beforeChat = await rows();
+    check('chat: a conversation cannot be filed under someone else’s project', await outcome(() => startConversation({ userId: owner, projectId: theirs.id })), 'NOT_FOUND');
+    check('… nor under a project the caller only views', await outcome(() => startConversation({ userId: viewer, projectId: shared.id })), 'FORBIDDEN');
+    check('… and neither refusal created a conversation', [(await rows()).conversations, (await rows()).viewerConversations], [beforeChat.conversations, beforeChat.viewerConversations]);
+    const started = await startConversation({ userId: owner, projectId: mine.id });
+    check('… while one in the caller’s own project, or in none, is created', [started.projectId, (await startConversation({ userId: owner })).projectId], [mine.id, null]);
+
+    /* orchestrator: runAgent */
+    const firstEvent = async (request: Parameters<typeof runAgent>[0]) => {
+      const turn = runAgent(request);
+      try {
+        const next = await turn.next();
+        return next.value && typeof next.value === 'object' && 'type' in next.value ? next.value.type : 'none';
+      } finally {
+        await turn.return(undefined);
+      }
+    };
+    const beforeAgent = await rows();
+    check('agent: a turn cannot name someone else’s project', await outcome(() => firstEvent({ userId: owner, message: 'hello', locale: 'en', projectId: theirs.id })), 'NOT_FOUND');
+    check('… nor a project the caller only views', await outcome(() => firstEvent({ userId: viewer, message: 'hello', locale: 'en', projectId: shared.id })), 'FORBIDDEN');
+    check('… nor someone else’s conversation', await outcome(() => firstEvent({ userId: owner, message: 'hello', locale: 'en', conversationId: theirThread.id })), 'NOT_FOUND');
+    const afterAgent = await rows();
+    check('… and no refused turn left a conversation or a task behind', [afterAgent.conversations, afterAgent.viewerConversations, afterAgent.agentTasks], [beforeAgent.conversations, beforeAgent.viewerConversations, beforeAgent.agentTasks]);
+    check('… while a turn in the caller’s own project and thread starts', [await firstEvent({ userId: owner, message: 'hello', locale: 'en', projectId: mine.id }), await firstEvent({ userId: owner, message: 'hello', locale: 'en', conversationId: myThread.id })], ['conversation', 'conversation']);
+
+    /* artifacts: storeArtifact (the artifacts route and every task handler) */
+    const file = { userId: owner, kind: 'md' as const, filename: 'ws4.md', bytes: new TextEncoder().encode('# WS4\n\nA file.\n') };
+    const beforeArtifacts = await rows();
+    check('artifact: a file cannot be filed under someone else’s project', await outcome(() => storeArtifact({ ...file, projectId: theirs.id })), 'NOT_FOUND');
+    check('… nor under a project the caller only views', await outcome(() => storeArtifact({ ...file, userId: viewer, projectId: shared.id })), 'FORBIDDEN');
+    check('… nor in someone else’s conversation', await outcome(() => storeArtifact({ ...file, conversationId: theirThread.id })), 'NOT_FOUND');
+    check('… and nothing was stored', (await rows()).artifacts, beforeArtifacts.artifacts);
+    const stored = await storeArtifact({ ...file, projectId: mine.id, conversationId: myThread.id });
+    check('… while the caller’s own project and thread take it', [stored.projectId, stored.conversationId], [mine.id, myThread.id]);
+
+    /* deep research: startDeepResearch (refuses later without a web search provider, which proves the check passed) */
+    const beforeResearch = await rows();
+    check('deep research: a job cannot be filed under someone else’s project', await outcome(() => startDeepResearch({ userId: owner, question: 'q', locale: 'en', projectId: theirs.id })), 'NOT_FOUND');
+    check('… nor under a project the caller only views', await outcome(() => startDeepResearch({ userId: viewer, question: 'q', locale: 'en', projectId: shared.id })), 'FORBIDDEN');
+    check('… nor report into someone else’s conversation', await outcome(() => startDeepResearch({ userId: owner, question: 'q', locale: 'en', conversationId: theirThread.id })), 'NOT_FOUND');
+    check('… and no job was created', (await rows()).jobs, beforeResearch.jobs);
+    check('… while the caller’s own project and thread pass the check (refused only for the missing provider)', await outcome(() => startDeepResearch({ userId: owner, question: 'q', locale: 'en', projectId: mine.id, conversationId: myThread.id })), 'VALIDATION');
+
+    /* web search: searchWeb (likewise) */
+    check('web search: it cannot be recorded under someone else’s project', await outcome(() => searchWeb({ userId: owner, query: 'q', locale: 'en', projectId: theirs.id })), 'NOT_FOUND');
+    check('… nor under a project the caller only views', await outcome(() => searchWeb({ userId: viewer, query: 'q', locale: 'en', projectId: shared.id })), 'FORBIDDEN');
+    check('… nor into someone else’s conversation', await outcome(() => searchWeb({ userId: owner, query: 'q', locale: 'en', conversationId: theirThread.id })), 'NOT_FOUND');
+    check('… while the caller’s own project and thread pass the check (refused only for the missing provider)', await outcome(() => searchWeb({ userId: owner, query: 'q', locale: 'en', projectId: mine.id, conversationId: myThread.id })), 'VALIDATION');
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 A3: legacy analyses keep a project’s data in that project');
+  {
+    const projectX = await projectsRepo.create({ userId: owner, title: 'WS4 X', academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+    const projectY = await projectsRepo.create({ userId: owner, title: 'WS4 Y', academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+    const lines = ['a1,a2,a3,b1,b2,b3'];
+    for (let i = 0; i < 40; i += 1) {
+      const a = (i % 5) + 1;
+      const b = ((i * 3) % 5) + 1;
+      lines.push([a, Math.min(5, a + (i % 2)), Math.max(1, a - (i % 3 === 0 ? 1 : 0)), b, Math.min(5, b + (i % 2)), Math.max(1, b - (i % 4 === 0 ? 1 : 0))].join(','));
+    }
+    const upload = (projectId: string | null) => saveUpload({ userId: owner, projectId, file: { name: 'ws4.csv', bytes: new TextEncoder().encode(lines.join('\n')).buffer as ArrayBuffer } });
+    const inX = (await upload(projectX.id)).dataset;
+    const unfiled = (await upload(null)).dataset;
+    const items = { items: ['a1', 'a2', 'a3'] };
+    const runsOf = async () => (await db.select({ n: count() }).from(analysisRuns).where(eq(analysisRuns.userId, owner)))[0]!.n;
+
+    const beforeRuns = await runsOf();
+    check('statistics: project X’s data is not analysed under project Y', await outcome(() => runAnalysis({ datasetId: inX.id, userId: owner, projectId: projectY.id, test: 'reliability.cronbachAlpha', columns: items })), 'NOT_FOUND');
+    check('… and no run was recorded', await runsOf(), beforeRuns);
+    const runX = (await runAnalysis({ datasetId: inX.id, userId: owner, projectId: projectX.id, test: 'reliability.cronbachAlpha', columns: items })).run;
+    const runNone = (await runAnalysis({ datasetId: inX.id, userId: owner, test: 'reliability.cronbachAlpha', columns: items })).run;
+    const runUnfiled = (await runAnalysis({ datasetId: unfiled.id, userId: owner, projectId: projectY.id, test: 'reliability.cronbachAlpha', columns: items })).run;
+    check('… while in its own project, with no project, or with unfiled data it runs as before', [runX.projectId, runNone.projectId, runUnfiled.projectId], [projectX.id, null, projectY.id]);
+
+    check('attach: a run of project X is not re-filed under project Y', await outcome(() => attachRun({ runId: runX.id, userId: owner, projectId: projectY.id, sectionKey: 'RESULTS' })), 'NOT_FOUND');
+    check('… and it still belongs to X, unattached', await db.select({ projectId: analysisRuns.projectId, sectionKey: analysisRuns.sectionKey }).from(analysisRuns).where(eq(analysisRuns.id, runX.id)), [{ projectId: projectX.id, sectionKey: null }]);
+    const attachedX = await attachRun({ runId: runX.id, userId: owner, projectId: projectX.id, sectionKey: 'RESULTS' });
+    const attachedNone = await attachRun({ runId: runNone.id, userId: owner, projectId: projectY.id, sectionKey: 'RESULTS' });
+    check('… while it attaches in its own project, and an unfiled run attaches anywhere the caller edits', [attachedX.projectId, attachedNone.projectId], [projectX.id, projectY.id]);
+
+    const inspect = (projectId: string | null) => analyseDataRequest({ userId: owner, datasetId: inX.id, intent: 'data.inspect', message: 'inspect', mentioned: [], language: 'en', projectId });
+    check('data analysis: project X’s data is refused under project Y', await outcome(() => inspect(projectY.id)), 'NOT_FOUND');
+    check('… while in its own project it is read', await outcome(() => inspect(projectX.id)), 'ok');
+
+    const model = {
+      constructs: [
+        { name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' as const },
+        { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' as const },
+      ],
+      paths: [{ from: 'A', to: 'B' }],
+    };
+    check('PLS: project X’s data is not estimated under project Y', await outcome(() => runPls({ datasetId: inX.id, userId: owner, model, projectId: projectY.id })), 'NOT_FOUND');
+    check('… while in its own project it is', await outcome(() => runPls({ datasetId: inX.id, userId: owner, model, projectId: projectX.id })), 'ok');
+    const cyclic = { ...model, paths: [{ from: 'A', to: 'B' }, { from: 'B', to: 'A' }] };
+    const jobsOf = async () => (await db.select({ n: count() }).from(analysisJobs).where(eq(analysisJobs.userId, owner)))[0]!.n;
+    const beforeJobs = await jobsOf();
+    check('PLS bootstrap: project X’s data gets no job under project Y', await outcome(() => startBootstrap({ datasetId: inX.id, userId: owner, model: cyclic, projectId: projectY.id })), 'NOT_FOUND');
+    check('… while in its own project it reaches model validation (the cyclic model is refused there, before any job)', await outcome(() => startBootstrap({ datasetId: inX.id, userId: owner, model: cyclic, projectId: projectX.id })), 'VALIDATION');
+    check('… and neither created a job', await jobsOf(), beforeJobs);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 A5: no unscoped lookup is exported');
+  check('conversations: no findById or listForProject', ['findById' in conversationsRepo, 'listForProject' in conversationsRepo], [false, false]);
+  check('projects: no findById', 'findById' in projectsRepo, false);
 
   /* ------------------------------------------------------------------ */
   console.log('\nstructural models run only once confirmed');

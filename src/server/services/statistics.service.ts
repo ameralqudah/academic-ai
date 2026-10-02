@@ -57,7 +57,7 @@ import type { AnalysisRun } from '@/server/db/schema';
 import { db } from '@/server/db';
 import { AppError } from '@/server/http/errors';
 import { legacyResultTier } from '@/server/integrity/numbers';
-import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
+import { assertConversationLink, assertProjectLink, assertSameProject } from '@/server/services/ownership';
 import { ensureInitialVersion } from '@/server/stats/versions';
 import { LEGACY_ENGINE, LEGACY_ENGINE_STAMP } from '@/server/stats/legacy-provenance';
 import * as runsRepo from '@/server/repositories/analysis-runs.repository';
@@ -156,6 +156,8 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisOut
   await assertProjectLink(request.userId, request.projectId);
   await assertConversationLink(request.userId, request.conversationId);
   const loaded = await loadForAnalysis(request.datasetId, request.userId);
+  /* WS4 A3: the result is filed under the request's project, so the data must not belong to another. */
+  assertSameProject(loaded.row, request.projectId, 'dataset');
   const started = Date.now();
 
   const result = compute(loaded.data, request);
@@ -606,6 +608,8 @@ export async function attachRun(input: {
   if (!existing) {
     throw new AppError('NOT_FOUND', 'That analysis was not found.', 'لم يُعثر على التحليل.');
   }
+  /* WS4 A3: attaching re-files the run under this project; a run of another project is not moved. */
+  assertSameProject(existing, input.projectId, 'analysis');
   if (legacyResultTier(existing) === 'windowed') {
     const rows = (existing.spec as { truncatedTo?: unknown }).truncatedTo;
     throw new AppError(

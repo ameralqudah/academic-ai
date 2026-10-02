@@ -52,8 +52,9 @@ async function lockAnd<T>(key: string, work: () => Promise<T>): Promise<T> {
 export async function ensureVersionNode(versionId: string, actor: EngineActor, projectId: string): Promise<string> {
   const [version] = await db.select().from(datasetVersions).where(eq(datasetVersions.id, versionId)).limit(1);
   if (!version) throw new AppError('NOT_FOUND', 'The dataset version was not found.', 'لم يُعثر على الإصدار.');
-  if (version.graphNodeId) return version.graphNodeId;
+  /* WS4 A4: checked before the cached node is returned, so another project's node never is. */
   if (version.projectId !== projectId) throw new AppError('NOT_FOUND', 'The dataset version was not found.', 'لم يُعثر على الإصدار.');
+  if (version.graphNodeId) return version.graphNodeId;
   const parentNode = version.parentVersionId ? await ensureVersionNode(version.parentVersionId, actor, projectId) : null;
   const [dataset] = version.datasetId ? await db.select({ name: datasets.originalName }).from(datasets).where(eq(datasets.id, version.datasetId)).limit(1) : [];
   return lockAnd(`graph-version:${versionId}`, async () => {
@@ -82,6 +83,8 @@ export async function ensureVersionNode(versionId: string, actor: EngineActor, p
 export async function ensureSpecNode(specId: string, actor: EngineActor, projectId: string): Promise<string> {
   const [spec] = await db.select().from(statSpecs).where(eq(statSpecs.id, specId)).limit(1);
   if (!spec) throw new AppError('NOT_FOUND', 'The specification was not found.', 'لم يُعثر على المواصفة.');
+  /* WS4 A4: as for a version — the specification must belong to the project its node is wanted in. */
+  if (spec.projectId !== projectId) throw new AppError('NOT_FOUND', 'The specification was not found.', 'لم يُعثر على المواصفة.');
   if (spec.graphNodeId) return spec.graphNodeId;
   return lockAnd(`graph-spec:${specId}`, async () => {
     const [fresh] = await db.select({ graphNodeId: statSpecs.graphNodeId }).from(statSpecs).where(eq(statSpecs.id, specId)).limit(1);

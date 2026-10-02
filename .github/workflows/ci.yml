@@ -99,6 +99,8 @@ jobs:
         run: npm run test:stats:db
         env:
           STORAGE_LOCAL_DIR: /tmp/academic-ai-storage
+      - name: Memory and thread-summary suite with RLS (P1-E)
+        run: npm run test:memory:db
 
   build-and-e2e:
     name: Production build and browser tests

@@ -84,20 +84,6 @@ export async function listMessagesOwned(
   return rows.map((row) => row.message).reverse();
 }
 
-/**
- * @deprecated Unscoped: reads any conversation by id. Use `listMessagesOwned`.
- * Kept only so nothing that still imports it breaks; the smoke suite fails if
- * code outside this file calls it.
- */
-export async function listMessages(conversationId: string, limit = 40): Promise<AIMessageRow[]> {
-  const rows = await db
-    .select()
-    .from(aiMessages)
-    .where(eq(aiMessages.conversationId, conversationId))
-    .orderBy(desc(aiMessages.createdAt))
-    .limit(limit);
-  return rows.reverse();
-}
 
 export async function listMessagesAsc(conversationId: string): Promise<AIMessageRow[]> {
   return db

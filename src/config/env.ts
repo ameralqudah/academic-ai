@@ -187,6 +187,16 @@ const serverSchema = z.object({
     .default('false')
     .transform((value) => value === 'true'),
   /**
+   * - `FF_CONTEXT_V2`: the context assembler v2 (P1-E): chronological turns,
+   *   the project summary snapshot, rendered claim references, memories and
+   *   thread summaries. Its graph-based parts (the snapshot's graph section,
+   *   the focus-graph slice) also need `FF_GRAPH`. Off until switched on.
+   */
+  FF_CONTEXT_V2: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  /**
    * Overrides of the research-run limits, as JSON keyed by tier
    * (`{"free":{"maxSteps":8}}`). Optional; the defaults are in
    * `src/server/runs/limits.ts`. Validated there: unknown keys or values

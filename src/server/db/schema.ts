@@ -1975,3 +1975,87 @@ export type ResearchRun = typeof researchRuns.$inferSelect;
 export type RunStep = typeof runSteps.$inferSelect;
 export type RunApproval = typeof runApprovals.$inferSelect;
 export type RunEvent = typeof runEvents.$inferSelect;
+
+/* -------------------------------------------------------------------------- */
+/*                          Memory and summaries (P1-E)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What Academic AI remembers (P1-E): a user's own memories ("prefers APA 7",
+ * "writes in Arabic") and a project's ("the supervisor requires Harvard style").
+ *
+ * Read and written only under row-level security (migration 0018,
+ * `server/memory/db-scope.ts`): a user memory belongs to its user alone; a
+ * project memory is read by every member of the project and written by an
+ * EDITOR (its author) or the project's OWNER — the same rank model as the run
+ * tables, and member-scoped, not creator-only (WS4 A2). Its scope, user and
+ * project never change once written (a trigger), so a memory cannot be moved
+ * out of reach of its project's policies.
+ *
+ * An agent may only propose one (`status = 'proposed'`, `source = 'agent'`);
+ * it is used once a person confirms it. No embedding yet: retrieval is P1-G.
+ */
+export const memories = pgTable(
+  'memories',
+  {
+    id: id(),
+    /** user | project */
+    scope: varchar('scope', { length: 16 }).notNull(),
+    /** For a user memory, its subject; for a project memory, its author. */
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Set exactly when `scope = 'project'`. */
+    projectId: text('project_id').references(() => researchProjects.id, { onDelete: 'cascade' }),
+    /** preference | fact | instruction | style | decision */
+    kind: varchar('kind', { length: 24 }).notNull(),
+    content: text('content').notNull(),
+    /** user | agent */
+    source: varchar('source', { length: 16 }).default('user').notNull(),
+    /** proposed | confirmed | archived */
+    status: varchar('status', { length: 16 }).default('confirmed').notNull(),
+    pinned: boolean('pinned').default(false).notNull(),
+    /** Where it came from (a conversation, a message, a run), as ids only. */
+    origin: jsonb('origin').$type<Record<string, unknown>>().default({}).notNull(),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true, mode: 'date' }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index('memories_user_idx').on(table.userId, table.scope, table.status),
+    index('memories_project_idx').on(table.projectId, table.status),
+  ],
+);
+
+/**
+ * The rolling summary of a conversation (P1-E): one row per refresh, never
+ * edited (a trigger), the latest version being current. Private to the
+ * conversation's owner, like the conversation itself; read and written only
+ * under row-level security (migration 0018).
+ */
+export const threadSummaries = pgTable(
+  'thread_summaries',
+  {
+    id: id(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => aiConversations.id, { onDelete: 'cascade' }),
+    /** The conversation's owner (checked against it on insert). */
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** 1, 2, … per conversation. */
+    version: integer('version').notNull(),
+    summary: text('summary').notNull(),
+    /** The last message this summary covers, and how many it covers. */
+    throughMessageId: text('through_message_id'),
+    messageCount: integer('message_count').default(0).notNull(),
+    /** The model call that wrote it (provider, model, call id), when one did. */
+    model: jsonb('model').$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex('thread_summaries_version_idx').on(table.conversationId, table.version)],
+);
+
+export type Memory = typeof memories.$inferSelect;
+export type ThreadSummary = typeof threadSummaries.$inferSelect;

@@ -22,3 +22,23 @@ export async function assertConversationLink(userId: string, conversationId: str
     throw new AppError('NOT_FOUND', 'The conversation was not found.', 'لم يُعثر على المحادثة.');
   }
 }
+
+/**
+ * WS4 A3: a record already filed under one project is not used or re-filed
+ * under another. The legacy paths load a dataset (or a run) by its owner and
+ * then record the result under the project the request names; without this,
+ * an owner's data from project X could be filed under project Y. A record with
+ * no project, or a request that names none, is unaffected: legacy records stay
+ * creator-only (WS4 A2), and attaching one's own unfiled data to a project one
+ * may edit is what the editor check above already allows.
+ */
+export function assertSameProject(
+  record: { projectId: string | null },
+  projectId: string | null | undefined,
+  what: 'dataset' | 'analysis',
+): void {
+  if (!projectId || !record.projectId || record.projectId === projectId) return;
+  throw what === 'dataset'
+    ? new AppError('NOT_FOUND', 'The dataset was not found in this project.', 'لم يُعثر على مجموعة البيانات في هذا المشروع.')
+    : new AppError('NOT_FOUND', 'That analysis was not found in this project.', 'لم يُعثر على التحليل في هذا المشروع.');
+}

@@ -17,6 +17,7 @@ import { logger } from '@/lib/logger';
 import type { AIConversation, AIMessageRow } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as chatRepo from '@/server/repositories/chat.repository';
+import { assertProjectLink } from '@/server/services/ownership';
 
 /** Above this a user is keeping more threads than any sidebar can serve. */
 const MAX_CONVERSATIONS = 500;
@@ -126,6 +127,9 @@ export async function startConversation(input: {
   firstMessage?: string;
   mode?: 'CHAT' | 'AGENT';
 }): Promise<AIConversation> {
+  /* WS4 A1: a conversation joins a project only when the caller may write to it. */
+  await assertProjectLink(input.userId, input.projectId);
+
   if ((await chatRepo.countForUser(input.userId)) >= MAX_CONVERSATIONS) {
     throw new AppError(
       'VALIDATION',

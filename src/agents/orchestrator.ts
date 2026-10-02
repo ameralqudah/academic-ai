@@ -41,6 +41,7 @@ import {
 } from '@/server/services/chat.service';
 import { search as searchKnowledge, type CoverageReport, type Source } from '@/server/knowledge';
 import { loadForAnalysis } from '@/server/services/dataset.service';
+import { assertProjectLink, assertConversationLink } from '@/server/services/ownership';
 import {
   runAnalysis,
   type AnalysisTestKey,
@@ -135,6 +136,14 @@ export async function* runAgent(request: AgentRequest): AsyncGenerator<AgentEven
   const structuredResults: Record<string, unknown>[] = [];
   /* Integrity flags on the prose (WS2 N11): stored with the reply, never used to change it. */
   const replyFlags = new Set<string>();
+
+  /*
+   * WS4 A1: the project and thread the request names, checked before the try,
+   * so a refusal records nothing — not a task, not a conversation, and not the
+   * failure turn the catch below would write into the named thread.
+   */
+  await assertProjectLink(request.userId, request.projectId);
+  await assertConversationLink(request.userId, request.conversationId);
 
   try {
     if (!conversationId) {

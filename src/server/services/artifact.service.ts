@@ -24,6 +24,7 @@ import type { Reference } from '@/server/quality/sources';
 import { validateArtifactBytes } from '@/server/generators/documents';
 import { AppError } from '@/server/http/errors';
 import * as artifactsRepo from '@/server/repositories/artifacts.repository';
+import { assertProjectLink, assertConversationLink } from '@/server/services/ownership';
 import { storageProvider } from '@/server/storage';
 import type { Artifact } from '@/server/db/schema';
 
@@ -84,6 +85,10 @@ export interface StoreInput {
  */
 export async function storeArtifact(input: StoreInput): Promise<Artifact> {
   const startedAt = Date.now();
+
+  /* WS4 A1: checked before anything is stored, so a foreign project or thread never gets a file. */
+  await assertProjectLink(input.userId, input.projectId);
+  await assertConversationLink(input.userId, input.conversationId);
 
   /*
    * 1. The bytes must be the file they claim to be, and must contain what was

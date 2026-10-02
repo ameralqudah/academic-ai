@@ -9,19 +9,6 @@ import {
   type AIMessageRow,
 } from '@/server/db/schema';
 
-export async function listForProject(projectId: string): Promise<AIConversation[]> {
-  return db
-    .select()
-    .from(aiConversations)
-    .where(eq(aiConversations.projectId, projectId))
-    .orderBy(desc(aiConversations.updatedAt));
-}
-
-export async function findById(id: string): Promise<AIConversation | undefined> {
-  const [row] = await db.select().from(aiConversations).where(eq(aiConversations.id, id)).limit(1);
-  return row;
-}
-
 export async function findOwned(
   id: string,
   userId: string,

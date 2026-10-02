@@ -31,11 +31,6 @@ export async function countByUser(userId: string): Promise<number> {
   return row?.value ?? 0;
 }
 
-export async function findById(id: string): Promise<ResearchProject | undefined> {
-  const [row] = await db.select().from(researchProjects).where(eq(researchProjects.id, id)).limit(1);
-  return row;
-}
-
 export async function findOwned(
   id: string,
   userId: string,

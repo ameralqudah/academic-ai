@@ -25,6 +25,7 @@ import { chartsFor } from '@/server/charts/plots';
 
 import { asksForCharts, asksForEverything, columnsNamedIn } from './data-requests';
 import { loadForAnalysis } from './dataset.service';
+import { assertSameProject } from './ownership';
 import { runCbSem, runPls } from './pls.service';
 import { runAnalysis } from './statistics.service';
 import { legacyProvenance, type LegacyProvenance } from '@/server/stats/legacy-provenance';
@@ -150,6 +151,8 @@ export async function analyseDataRequest(input: {
   }
 
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
+  /* WS4 A3: refused before any result, rather than by the first analysis it starts. */
+  assertSameProject(loaded.row, input.projectId, 'dataset');
   const profile = loaded.profile;
   /* Recorded on every finished outcome read from this load; never blocks it (see `legacyProvenance`). */
   const read = () => legacyProvenance(loaded);

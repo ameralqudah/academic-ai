@@ -44,7 +44,7 @@ import { exportProjectDocx } from '@/server/services/export.service';
 import { personIntegrity, saveUserEdit } from '@/server/services/section.service';
 import { runAnalysis } from '@/server/services/statistics.service';
 import { hashOf } from '@/server/stats/access';
-import { previewReplacement, recordRunInGraph, replaceVersion, syncRunToGraph } from '@/server/stats/graph';
+import { ensureSpecNode, ensureVersionNode, previewReplacement, recordRunInGraph, replaceVersion, syncRunToGraph } from '@/server/stats/graph';
 import { QUARANTINE_MARKER } from '@/server/integrity/numbers';
 import type { SectionIntegrity } from '@/server/integrity/section';
 import { insertClaim, untracedStatistics } from '@/server/stats/manuscript';
@@ -328,6 +328,22 @@ async function main() {
   check('4. recording again, even at once, is idempotent: one run node, the same id', [syncedAgain.every((id) => id === synced), lateRunNodes.length], [true, 1]);
   const lateValues = await db.select({ id: graphEdges.id }).from(graphEdges).where(and(eq(graphEdges.rel, 'produced_by'), eq(graphEdges.dstId, synced ?? '')));
   check('… with no duplicated values', lateValues.length, syncedDetail.estimates.length + syncedDetail.tables.length + syncedDetail.figures.length);
+
+  /* ------------------------------------------------------------------ */
+  section('WS4 A4: a graph node is handed out only within its own project');
+  {
+    const engine = { userId: me.userId, origin: 'engine' as const };
+    const [versionRow] = await db.select({ graphNodeId: datasetVersions.graphNodeId }).from(datasetVersions).where(eq(datasetVersions.id, v3.id));
+    const [specRow] = await db.select({ graphNodeId: statSpecs.graphNodeId }).from(statSpecs).where(eq(statSpecs.id, lateSpec.id));
+    check('the fixture: the version and the specification already have their nodes', [Boolean(versionRow?.graphNodeId), Boolean(specRow?.graphNodeId)], [true, true]);
+    check('a version’s cached node is not returned for another project', await outcome(() => ensureVersionNode(v3.id, engine, other.id)), 'NOT_FOUND');
+    check('… nor a specification’s', await outcome(() => ensureSpecNode(lateSpec.id, engine, other.id)), 'NOT_FOUND');
+    check('… and in its own project both are the cached nodes', [await ensureVersionNode(v3.id, engine, P), await ensureSpecNode(lateSpec.id, engine, P)], [versionRow?.graphNodeId, specRow?.graphNodeId]);
+    const freshSpec = await createSpec(me, { projectId: P, datasetVersionId: v3.id, spec: { analysisType: 'descriptives', variables: ['x'] }, label: 'ws4-a4' });
+    const nodesBefore = (await db.select({ id: graphNodes.id }).from(graphNodes).where(eq(graphNodes.projectId, other.id))).length;
+    check('a specification without a node gets none in another project', await outcome(() => ensureSpecNode(freshSpec.id, engine, other.id)), 'NOT_FOUND');
+    check('… and nothing was created there', (await db.select({ id: graphNodes.id }).from(graphNodes).where(eq(graphNodes.projectId, other.id))).length, nodesBefore);
+  }
   check('only a succeeded run is recorded: a refused one is refused', await outcome(() => syncRunToGraph(me, refused.id, P)), 'CONFLICT');
   check('… and a run on replaced data is not recorded later either (its inputs are not current evidence)', [await outcome(() => syncRunToGraph(me, onSibling.id, P)) !== 'ok', (await getRun(me, onSibling.id, P)).run.graphRunNodeId], [true, null]);
 
@@ -569,7 +585,7 @@ async function main() {
     [false, true, true],
   );
   check('… they show the marker even for a current claim (only section text is a reference source), and add no claims appendix', [titledDoc.xml.includes(textOf(claimB)), titledDoc.paragraphs.some((text) => text === 'Claims and traceability' || text === 'الادعاءات وإمكانية تتبّعها')], [false, false]);
-  check('… and the stored title and reference are unchanged', [(await projectsRepo.findById(titled.id))?.title, (await referencesRepo.listForProject(titled.id))[0]?.rawText.includes(`{{claim:${claimB.id}}}`)], [`Title {{claim:${claimB.id}}}`, true]);
+  check('… and the stored title and reference are unchanged', [(await projectsRepo.findOwned(titled.id, owner))?.title, (await referencesRepo.listForProject(titled.id))[0]?.rawText.includes(`{{claim:${claimB.id}}}`)], [`Title {{claim:${claimB.id}}}`, true]);
 
   /* ------------------------------------------------------------------ */
   section('Legacy paths: ownership, pinning, counts, cleaning, job races');

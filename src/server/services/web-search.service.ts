@@ -25,6 +25,7 @@ import type { Source } from '@/server/knowledge/types';
 import { AppError } from '@/server/http/errors';
 import { answerFromSources } from '@/server/services/ai.service';
 import { recordTurn } from '@/server/services/chat.service';
+import { assertProjectLink, assertConversationLink } from '@/server/services/ownership';
 import { assertCanUseAI, recordSimple } from '@/server/services/usage.service';
 
 /** Fetched in full. Beyond this the answer is padded rather than better. */
@@ -59,6 +60,10 @@ export async function searchWeb(input: {
   projectId?: string | null;
 }): Promise<WebSearchResult> {
   const startedAt = Date.now();
+
+  /* WS4 A1: the ids the request names are the caller's, checked before any work or record. */
+  await assertProjectLink(input.userId, input.projectId);
+  await assertConversationLink(input.userId, input.conversationId);
 
   /*
    * Metered before the work, not after.

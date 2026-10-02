@@ -54,7 +54,7 @@ import { recordTurn } from '@/server/services/chat.service';
 import { assertCanUseAI, recordSimple } from '@/server/services/usage.service';
 import type { AnalysisJob } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
-import { assertConversationLink, assertProjectLink } from '@/server/services/ownership';
+import { assertConversationLink, assertProjectLink, assertSameProject } from '@/server/services/ownership';
 import { resolveReason } from '@/server/http/reasons';
 import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { loadForAnalysis } from '@/server/services/dataset.service';
@@ -117,6 +117,8 @@ export async function runPls(input: {
   await assertProjectLink(input.userId, input.projectId);
   await assertConversationLink(input.userId, input.conversationId);
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
+  /* WS4 A3: the data of another project is not analysed under this one. */
+  assertSameProject(loaded.row, input.projectId, 'dataset');
 
   const columns = numericColumns(loaded.data);
 
@@ -391,6 +393,8 @@ export async function startBootstrap(input: {
    * told something that was knowable immediately.
    */
   const loaded = await loadForAnalysis(input.datasetId, input.userId);
+  /* WS4 A3: the job is filed under the request's project, so the data must not belong to another. */
+  assertSameProject(loaded.row, input.projectId, 'dataset');
   try {
     validateModel(input.model, loaded.data.columns);
   } catch (error) {

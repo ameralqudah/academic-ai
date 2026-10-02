@@ -91,17 +91,38 @@ export async function releaseLease(name: LeasedTable, id: string, owner = WORKER
     .where(and(eq(analysisJobs.id, id), eq(analysisJobs.leaseOwner, owner)));
 }
 
+/** For tests: a shorter heartbeat, to exercise lease loss quickly. `null` restores the default. */
+let heartbeatMs = HEARTBEAT_MS;
+export function setLeaseHeartbeatForTests(ms: number | null): void {
+  heartbeatMs = ms ?? HEARTBEAT_MS;
+}
+
+/** The reason a lease signal aborts with (WS4 G4). */
+export class LeaseLost extends Error {
+  constructor(readonly table: LeasedTable, readonly id: string) {
+    super(`The lease on ${table} ${id} was lost.`);
+    this.name = 'LeaseLost';
+  }
+}
+
 /**
  * Runs `work` under the row's lease, heartbeating while it runs.
  *
  * Returns 'busy' without running anything when another live worker holds the
  * lease. The lease is released however the work ends.
+ *
+ * WS4 G4: `work` receives a signal that aborts the moment the lease is lost —
+ * a renewal finds another owner on the row, or renewals have failed for so
+ * long that the lease may already have expired and been claimed (the next
+ * heartbeat would land after expiry). Before, a failed renewal only logged a
+ * warning and the work ran on beside its new owner. The work must stop and
+ * write nothing more; the result is then 'lost'.
  */
 export async function withLease(
   name: LeasedTable,
   id: string,
-  work: () => Promise<void>,
-): Promise<'ran' | 'busy'> {
+  work: (lease: AbortSignal) => Promise<void>,
+): Promise<'ran' | 'busy' | 'lost'> {
   /*
    * A token per execution, not per process: two jobs for the same row picked
    * up by one process (a queue retry beside a fallback run) must exclude each
@@ -110,16 +131,33 @@ export async function withLease(
   const owner = `${WORKER_ID}:${randomUUID().slice(0, 8)}`;
   if (!(await claimLease(name, id, owner))) return 'busy';
 
+  const lease = new AbortController();
+  const every = heartbeatMs;
+  let renewedAt = Date.now();
+  const lose = (reason: 'taken' | 'unrenewable', error?: unknown) => {
+    if (lease.signal.aborted) return;
+    logger.warn('jobs.lease.lost', { table: name, id, reason, error: error === undefined ? undefined : String(error).slice(0, 200) });
+    lease.abort(new LeaseLost(name, id));
+  };
   const heartbeat = setInterval(() => {
-    void renewLease(name, id, owner).catch((error: unknown) => {
-      logger.warn('jobs.lease.renewFailed', { table: name, id, error: String(error).slice(0, 200) });
-    });
-  }, HEARTBEAT_MS);
+    if (lease.signal.aborted) return;
+    void renewLease(name, id, owner).then(
+      (held) => {
+        if (held) renewedAt = Date.now();
+        else lose('taken');
+      },
+      (error: unknown) => {
+        logger.warn('jobs.lease.renewFailed', { table: name, id, error: String(error).slice(0, 200) });
+        /* The lease runs out LEASE_SECONDS after the last renewal; stop before a later heartbeat could land after that. */
+        if (Date.now() + every >= renewedAt + LEASE_SECONDS * 1000) lose('unrenewable', error);
+      },
+    );
+  }, every);
   heartbeat.unref?.();
 
   try {
-    await work();
-    return 'ran';
+    await work(lease.signal);
+    return lease.signal.aborted ? 'lost' : 'ran';
   } finally {
     clearInterval(heartbeat);
     await releaseLease(name, id, owner).catch(() => undefined);

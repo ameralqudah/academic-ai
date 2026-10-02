@@ -519,6 +519,8 @@ export function registerAllHandlers(): void {
       userId: context.userId,
       question,
       locale: context.locale,
+      /* WS4 G3: the signal itself, so the model call in flight stops too, not only the next stage. */
+      signal: context.signal,
       shouldStop: () => context.signal.aborted,
     });
 
@@ -660,6 +662,7 @@ export function registerAllHandlers(): void {
     );
 
     const reviewed = await generateLongForm({
+      signal: context.signal,
       provider: reviewSelection.provider,
       system: `${languageInstruction(reviewLanguage)}\n\nYou are writing an academic literature review. Write connected prose. Cite only the numbered sources given, and never invent a source.`,
       prompt: reviewPrompt,
@@ -968,6 +971,7 @@ export function registerAllHandlers(): void {
     const selection = await selectModel(requirements);
 
     const generated = await generateLongForm({
+      signal: context.signal,
       provider: selection.provider,
       system: `${languageInstruction(language)}\n\nYou are writing part of an academic document. Write prose, not bullet points. Cite only the numbered sources given.`,
       prompt: instruction,

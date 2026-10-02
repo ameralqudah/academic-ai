@@ -102,6 +102,11 @@ export interface PipelineOptions {
   locale: 'ar' | 'en';
   onProgress?: (progress: ResearchProgress) => void;
   shouldStop?: () => boolean;
+  /**
+   * WS4 G3: aborted on cancel, timeout or a lost lease. Unlike `shouldStop`,
+   * which is checked between stages, it also stops the model call in flight.
+   */
+  signal?: AbortSignal;
 }
 
 const web = new SerperProvider();
@@ -113,7 +118,20 @@ const web = new SerperProvider();
  * seconds, and interrupting mid-search would leave sources half-collected for
  * no gain.
  */
-export async function runDeepResearch(options: PipelineOptions): Promise<DeepResearchReport> {
+export async function runDeepResearch(input: PipelineOptions): Promise<DeepResearchReport> {
+  try {
+    return await runPipeline(input);
+  } catch (error) {
+    /* A model call stopped by the signal surfaces as the cancellation it is, not as a provider failure. */
+    if (input.signal?.aborted && !(error instanceof ResearchCancelled)) throw new ResearchCancelled();
+    throw error;
+  }
+}
+
+async function runPipeline(input: PipelineOptions): Promise<DeepResearchReport> {
+  /* Every between-stage check sees the signal too, so an abort is never waited out to the next stage's end. */
+  const options: PipelineOptions = { ...input, shouldStop: () => Boolean(input.signal?.aborted) || Boolean(input.shouldStop?.()) };
+  const signal = input.signal;
   const startedAt = Date.now();
   const report = (stage: ResearchStage, percent: number, detail?: Record<string, string | number>) =>
     options.onProgress?.({ stage, percent, detail });
@@ -123,6 +141,7 @@ export async function runDeepResearch(options: PipelineOptions): Promise<DeepRes
   report('planning', 5);
 
   const plan = await planResearch({
+    signal,
     userId: options.userId,
     question: options.question,
     locale: options.locale,
@@ -234,6 +253,7 @@ export async function runDeepResearch(options: PipelineOptions): Promise<DeepRes
     if (relevant.length === 0) continue;
 
     const extracted = await extractEvidence({
+      signal,
       userId: options.userId,
       subQuestion,
       locale: options.locale,
@@ -261,6 +281,7 @@ export async function runDeepResearch(options: PipelineOptions): Promise<DeepRes
   report('checking-gaps', 78);
 
   let gaps = await identifyGaps({
+    signal,
     userId: options.userId,
     question: options.question,
     locale: options.locale,
@@ -311,6 +332,7 @@ export async function runDeepResearch(options: PipelineOptions): Promise<DeepRes
 
     /* Re-checked against the enlarged set: some gaps will now be closed. */
     gaps = await identifyGaps({
+      signal,
       userId: options.userId,
       question: options.question,
       locale: options.locale,
@@ -335,6 +357,7 @@ export async function runDeepResearch(options: PipelineOptions): Promise<DeepRes
   report('synthesising', 90, { sources: numbered.length });
 
   const written = await synthesiseReport({
+    signal,
     userId: options.userId,
     question: options.question,
     locale: options.locale,

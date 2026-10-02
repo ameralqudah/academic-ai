@@ -116,8 +116,11 @@ export async function runCompletion(input: {
   json?: boolean;
   /** An internal step (planning, extraction for a larger task): metered, not counted as a request. */
   countsAsRequest?: boolean;
+  /** WS4 G3: a cancel, timeout or lost lease stops the call itself, not only the work after it. */
+  signal?: AbortSignal;
 }) {
   return input.provider.complete({
+    ...(input.signal ? { signal: input.signal } : {}),
     task: input.task,
     locale: input.locale,
     system: input.system,
@@ -869,6 +872,8 @@ export async function planResearch(input: {
   question: string;
   locale: 'ar' | 'en';
   maxQuestions: number;
+  /** WS4 G3: stops the model call on cancel, timeout or a lost lease. */
+  signal?: AbortSignal;
 }): Promise<string[]> {
   await assertCanUseAI(input.userId, 300);
 
@@ -894,6 +899,7 @@ Rules:
 
   const result = await runCompletion({
     userId: input.userId,
+    signal: input.signal,
     projectId: '',
     provider,
     task: 'chat',
@@ -925,6 +931,8 @@ export async function extractEvidence(input: {
   subQuestion: string;
   locale: 'ar' | 'en';
   sources: { index: number; title: string; content: string; kind: string }[];
+  /** WS4 G3: stops the model call on cancel, timeout or a lost lease. */
+  signal?: AbortSignal;
 }): Promise<string> {
   await assertCanUseAI(input.userId, 500);
 
@@ -959,6 +967,7 @@ Rules:
 
   const result = await runCompletion({
     userId: input.userId,
+    signal: input.signal,
     projectId: '',
     provider,
     task: 'chat',
@@ -1003,6 +1012,8 @@ export async function identifyGaps(input: {
   question: string;
   locale: 'ar' | 'en';
   evidence: { subQuestion: string; findings: string }[];
+  /** WS4 G3: stops the model call on cancel, timeout or a lost lease. */
+  signal?: AbortSignal;
 }): Promise<string[]> {
   await assertCanUseAI(input.userId, 300);
 
@@ -1032,6 +1043,7 @@ Rules:
 
   const result = await runCompletion({
     userId: input.userId,
+    signal: input.signal,
     projectId: '',
     provider,
     task: 'chat',
@@ -1066,6 +1078,8 @@ export async function synthesiseReport(input: {
   evidence: { subQuestion: string; findings: string }[];
   gaps: string[];
   sources: { index: number; title: string; url: string; kind: string; year?: number; container?: string }[];
+  /** WS4 G3: stops the model call on cancel, timeout or a lost lease. */
+  signal?: AbortSignal;
 }): Promise<string> {
   await assertCanUseAI(input.userId, 1200);
 
@@ -1109,6 +1123,7 @@ Rules:
 
   const result = await runCompletion({
     userId: input.userId,
+    signal: input.signal,
     projectId: '',
     provider,
     task: 'chat',

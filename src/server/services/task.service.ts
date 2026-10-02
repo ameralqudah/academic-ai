@@ -201,9 +201,24 @@ export async function startTask(input: {
  * planning or execution marks the task FAILED with the cause, rather than
  * leaving it RUNNING with nothing driving it.
  */
-export async function executeTask(taskId: string): Promise<void> {
+export async function executeTask(taskId: string, options: { lease?: AbortSignal } = {}): Promise<void> {
+  const { lease } = options;
   const owner = await tasksRepo.findAny(taskId);
   if (!owner) return;
+
+  /*
+   * WS4 G7: an execution that never reached its end was interrupted. Past the
+   * cap the task is failed with that reason instead of being started again, so
+   * a task that keeps bringing its worker down (or keeps losing its lease)
+   * stops being retried — and stops paying for planning — after a bound.
+   */
+  const opened = await tasksRepo.openExecution(taskId);
+  if (opened && opened.interrupted >= tasksRepo.MAX_INTERRUPTED_EXECUTIONS) {
+    logger.warn('task.tooManyInterruptions', { taskId, interrupted: opened.interrupted });
+    await tasksRepo.setStatus(taskId, 'FAILED', { errorReasonKey: 'task.error.interrupted' });
+    await tasksRepo.closeExecution(taskId);
+    return;
+  }
 
   try {
     /*
@@ -214,10 +229,15 @@ export async function executeTask(taskId: string): Promise<void> {
     await runForUser(
       owner.userId,
       /* Every model call inside is metered against this task (P1-B). */
-      () => withCallIds({ taskId, projectId: owner.projectId ?? null }, () => planAndRun(taskId)),
+      () => withCallIds({ taskId, projectId: owner.projectId ?? null }, () => planAndRun(taskId, lease)),
       (owner.context.chosenModel as PreferredModel | undefined) ?? null,
     );
   } catch (error) {
+    /* WS4 G4: with the lease lost, the task is another worker's: nothing is written, not even the failure. */
+    if (lease?.aborted) {
+      logger.warn('task.leaseLost', { taskId, error: String(error).slice(0, 200) });
+      return;
+    }
     logger.error('task.crashed', { taskId, error: String(error) });
 
     /*
@@ -241,13 +261,20 @@ export async function executeTask(taskId: string): Promise<void> {
       })
       .catch(() => undefined);
   }
+
+  /* Reached an end (finished, paused, waiting or failed): not an interruption. A lost lease leaves it open for the next owner to count. */
+  if (lease?.aborted) {
+    logger.warn('task.leaseLost', { taskId });
+    return;
+  }
+  await tasksRepo.closeExecution(taskId).catch(() => undefined);
 }
 
 /**
  * Plans a task and runs it. Called through `executeTask`, by a worker or the
  * in-process fallback (see `server/jobs/dispatch`).
  */
-export async function planAndRun(taskId: string): Promise<void> {
+export async function planAndRun(taskId: string, lease?: AbortSignal): Promise<void> {
   const task = await tasksRepo.findAny(taskId);
   if (!task) return;
 
@@ -267,6 +294,9 @@ export async function planAndRun(taskId: string): Promise<void> {
       locale: (task.locale as 'ar' | 'en') ?? 'en',
       context: task.context,
     });
+
+    /* WS4 G4: a plan made after the lease was lost is not written; the new owner plans (or resumes) itself. */
+    if (lease?.aborted) return;
 
     if (plan.missingInformation.length > 0) {
       /*
@@ -340,6 +370,7 @@ export async function planAndRun(taskId: string): Promise<void> {
   }
 
   await runTask(taskId, {
+    ...(lease ? { lease } : {}),
     shouldStop: async () => (await tasksRepo.findAny(taskId))?.status === 'CANCELLED',
     onSuggestion: async (current, trigger, available) => {
       const steps = await tasksRepo.stepsOf(current.id);

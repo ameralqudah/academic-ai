@@ -22,7 +22,7 @@ export async function dispatchTask(taskId: string): Promise<void> {
    * so a second instance resuming "interrupted" work could run a task that was
    * still running elsewhere, and re-execute its steps.
    */
-  const run = withLease('tasks', taskId, () => executeTask(taskId));
+  const run = withLease('tasks', taskId, (lease) => executeTask(taskId, { lease }));
 
   void Promise.resolve(run).catch((error: unknown) => {
     logger.error('task.crashed', { taskId, error: String(error) });
@@ -46,16 +46,16 @@ export async function dispatchResearchRun(runId: string): Promise<void> {
 export async function dispatchAnalysisJob(jobId: string, kind: 'pls.bootstrap' | 'research.deep' | 'stats.run'): Promise<void> {
   if (jobRunner() !== 'direct' && (await enqueue(QUEUES.analysis, { jobId }, jobId))) return;
 
-  const start = async () => {
+  const start = async (lease?: AbortSignal) => {
     if (kind === 'pls.bootstrap') {
       const { runBootstrapJob } = await import('@/server/services/pls.service');
-      await runBootstrapJob(jobId);
+      await runBootstrapJob(jobId, lease);
     } else if (kind === 'stats.run') {
       const { runStatsJob } = await import('@/server/stats/runs');
       await runStatsJob(jobId);
     } else {
       const { runResearchJob } = await import('@/server/services/deep-research.service');
-      await runResearchJob(jobId);
+      await runResearchJob(jobId, lease);
     }
   };
 

@@ -30,7 +30,8 @@ const actionSchema = z.object({
 type ActionBody = z.infer<typeof actionSchema>;
 
 export const POST = withApi<ActionBody, Params>(
-  { schema: actionSchema },
+  /* WS4: answer, resume and retry each start model work again; limited like starting an agent turn. */
+  { schema: actionSchema, rateLimit: { max: 30, windowSeconds: 300, key: 'task.action' } },
   async ({ user, params, body }) => {
     /*
      * Handlers registered and interrupted work resumed, once per process.

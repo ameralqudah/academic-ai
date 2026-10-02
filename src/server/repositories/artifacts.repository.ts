@@ -7,10 +7,14 @@
  * still reach it.
  */
 
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, sql } from 'drizzle-orm';
 
 import { db } from '@/server/db';
 import { artifacts, type Artifact, type NewArtifact } from '@/server/db/schema';
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+/** The database, or the transaction a store runs in (WS4 G5): every query of one store uses one connection. */
+type Executor = typeof db | Tx;
 
 /**
  * Records the first version of a document.
@@ -20,6 +24,7 @@ import { artifacts, type Artifact, type NewArtifact } from '@/server/db/schema';
  */
 export async function createFirst(
   input: Omit<NewArtifact, 'version' | 'lineageId' | 'parentArtifactId'>,
+  executor: Executor = db,
 ): Promise<Artifact> {
   /*
    * The id is generated here rather than by the database, so the row can be
@@ -29,7 +34,7 @@ export async function createFirst(
    */
   const id = crypto.randomUUID();
 
-  const [row] = await db
+  const [row] = await executor
     .insert(artifacts)
     .values({ ...input, id, version: 1, lineageId: id })
     .returning();
@@ -48,15 +53,16 @@ export async function createFirst(
 export async function createVersion(
   parent: Artifact,
   input: Omit<NewArtifact, 'version' | 'lineageId' | 'parentArtifactId'>,
+  executor: Executor = db,
 ): Promise<Artifact> {
-  const [highest] = await db
+  const [highest] = await executor
     .select({ version: artifacts.version })
     .from(artifacts)
     .where(eq(artifacts.lineageId, parent.lineageId))
     .orderBy(desc(artifacts.version))
     .limit(1);
 
-  const [row] = await db
+  const [row] = await executor
     .insert(artifacts)
     .values({
       ...input,
@@ -69,8 +75,8 @@ export async function createVersion(
   return row as Artifact;
 }
 
-export async function findOwned(id: string, userId: string): Promise<Artifact | undefined> {
-  const [row] = await db
+export async function findOwned(id: string, userId: string, executor: Executor = db): Promise<Artifact | undefined> {
+  const [row] = await executor
     .select()
     .from(artifacts)
     .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId), isNull(artifacts.deletedAt)))
@@ -151,4 +157,47 @@ export async function remove(id: string, userId: string): Promise<boolean> {
     .returning({ id: artifacts.id });
 
   return rows.length > 0;
+}
+
+/**
+ * WS4 G5: runs `work` holding a per-user, per-key transaction lock, so two
+ * identical stores racing each other cannot both write: the second waits, then
+ * finds the first. Every query of the store must run on the transaction it is
+ * given: one connection per store, so stores waiting on the lock can never
+ * exhaust the pool (a serverless pool holds a single connection).
+ */
+export async function withStoreLock<T>(userId: string, key: string, work: (tx: Tx) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`artifact:${userId}:${key}`}))`);
+    return work(tx);
+  });
+}
+
+/** WS4 G5: the user's live artifact stored under this idempotency key, at any time. */
+export async function findByIdempotencyKey(userId: string, key: string, executor: Executor = db): Promise<Artifact | undefined> {
+  const [row] = await executor
+    .select()
+    .from(artifacts)
+    .where(and(eq(artifacts.userId, userId), isNull(artifacts.deletedAt), sql`${artifacts.metadata} ->> 'idempotencyKey' = ${key}`))
+    .orderBy(desc(artifacts.createdAt))
+    .limit(1);
+  return row;
+}
+
+/** WS4 G5: the user's live artifact from the same request (same identity and bytes) stored within the last `withinMinutes`. */
+export async function findRecentRepeat(userId: string, requestKey: string, withinMinutes: number, executor: Executor = db): Promise<Artifact | undefined> {
+  const [row] = await executor
+    .select()
+    .from(artifacts)
+    .where(
+      and(
+        eq(artifacts.userId, userId),
+        isNull(artifacts.deletedAt),
+        sql`${artifacts.metadata} ->> 'requestKey' = ${requestKey}`,
+        gt(artifacts.createdAt, sql`now() - make_interval(mins => ${withinMinutes})`),
+      ),
+    )
+    .orderBy(desc(artifacts.createdAt))
+    .limit(1);
+  return row;
 }

@@ -86,7 +86,9 @@ type Body = z.infer<typeof schema>;
 
 export const POST = withApi<Body>(
   { schema, rateLimit: { max: 30, windowSeconds: 300, key: 'artifact.generate' } },
-  async ({ user, body }) => {
+  async ({ user, body, request }) => {
+    /* WS4 G5: a retried request with the same `Idempotency-Key` gets the artifact the first one stored. */
+    const key = request.headers.get('idempotency-key');
     const formatted = formatReferenceList(body.references as never, body.citationStyle as StyleId);
 
     const content = {
@@ -143,6 +145,7 @@ export const POST = withApi<Body>(
       projectId: body.projectId ?? null,
       conversationId: body.conversationId ?? null,
       previousArtifactId: body.previousArtifactId,
+      idempotencyKey: key && /^[A-Za-z0-9._:-]{8,200}$/.test(key) ? key : null,
       metadata: {
         citationStyle: body.citationStyle,
         sections: body.sections.length,

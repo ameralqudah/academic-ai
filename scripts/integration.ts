@@ -5935,7 +5935,8 @@ async function main() {
      * different process after a deploy, and a stream fed from memory would
      * show a task that had already moved on.
      */
-    const streamSource = await readFile('src/app/api/tasks/[id]/stream/route.ts', 'utf8');
+    /* The route checks sign-in; the stream itself lives in `server/http/task-stream` (WS4). */
+    const streamSource = await readFile('src/server/http/task-stream.ts', 'utf8');
 
     assertTrue('the stream reads from the database', streamSource.includes('tasksRepo.findOwned'));
     assertTrue('and re-reads on an interval', streamSource.includes('setInterval'));

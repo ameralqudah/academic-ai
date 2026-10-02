@@ -17,6 +17,8 @@
  * judge a March export against a bibliography that has since changed.
  */
 
+import { createHash } from 'node:crypto';
+
 import { logger } from '@/lib/logger';
 import { checkQuality, type QualityReport } from '@/server/quality/engine';
 import { isPreviewable, toStoredPreview, withoutPreview } from './artifact-preview';
@@ -69,6 +71,8 @@ export interface StoreInput {
   quality?: { text: string; references: Reference[] };
   /** The version this replaces. Absent for a first version. */
   previousArtifactId?: string;
+  /** WS4 G5: the caller's key for this store; a replay returns the first result. */
+  idempotencyKey?: string | null;
   /**
    * The document as Markdown, kept so it can be read without opening the file.
    * See `artifact-preview.ts`.
@@ -83,6 +87,9 @@ export interface StoreInput {
  * database would appear in the researcher's list and refuse to open, which
  * looks like data loss.
  */
+/** WS4 G5: a repeat of the same request with the same bytes within this many minutes returns the stored artifact. */
+export const REPEAT_WINDOW_MINUTES = 10;
+
 export async function storeArtifact(input: StoreInput): Promise<Artifact> {
   const startedAt = Date.now();
 
@@ -156,59 +163,106 @@ export async function storeArtifact(input: StoreInput): Promise<Artifact> {
     }
   }
 
-  /* 3. Stored under a key scoped to the user, as uploads are. */
-  const storageKey = `artifacts/${input.userId}/${crypto.randomUUID()}.${input.kind}`;
+  /*
+   * WS4 G5: idempotent. An `idempotencyKey` (the artifacts route takes one
+   * from the `Idempotency-Key` header) returns the artifact its first request
+   * stored, at any time; the same key for a different file is refused. With
+   * no key, the same request with the same bytes within REPEAT_WINDOW_MINUTES
+   * returns the artifact already stored instead of a duplicate (and, for a
+   * replacement, instead of an extra version). Before, a double submit, a
+   * client retry or a re-run step stored the file twice. Checked and stored
+   * under one lock, so two identical requests racing each other store once.
+   * No migration: the keys live in the artifact's `metadata`.
+   */
+  const contentSha256 = createHash('sha256').update(input.bytes).digest('hex');
+  const identity = createHash('sha256')
+    .update(JSON.stringify([input.kind, input.filename, input.projectId ?? null, input.conversationId ?? null, input.jobId ?? null, input.previousArtifactId ?? null]))
+    .digest('hex');
+  const requestKey = createHash('sha256').update(`${identity}:${contentSha256}`).digest('hex');
+  const idempotencyKey = input.idempotencyKey ?? null;
 
-  await storageProvider().put(storageKey, input.bytes, CONTENT_TYPES[input.kind]);
-
-  const row = {
-    userId: input.userId,
-    projectId: input.projectId ?? null,
-    jobId: input.jobId ?? null,
-    conversationId: input.conversationId ?? null,
-    kind: input.kind,
-    filename: input.filename,
-    storageKey,
-    byteSize: input.bytes.length,
-    metadata: {
-      ...(input.metadata ?? {}),
-      ...(input.previewMarkdown && isPreviewable(input.kind)
-        ? (toStoredPreview(input.previewMarkdown) ?? {})
-        : {}),
-    },
-    qualityReport: (qualityReport as unknown as Record<string, unknown>) ?? null,
-    validationStatus: qualityReport?.overallStatus ?? 'unchecked',
-  };
-
-  /* 4. A new version when replacing, a new lineage when not. */
-  let artifact: Artifact;
-
-  if (input.previousArtifactId) {
-    const previous = await artifactsRepo.findOwned(input.previousArtifactId, input.userId);
-
-    if (!previous) {
-      throw new AppError(
-        'NOT_FOUND',
-        'The previous version was not found.',
-        'لم يُعثر على الإصدار السابق.',
-      );
+  return artifactsRepo.withStoreLock(input.userId, idempotencyKey ? `key:${idempotencyKey}` : `request:${requestKey}`, async (tx) => {
+    if (idempotencyKey) {
+      const earlier = await artifactsRepo.findByIdempotencyKey(input.userId, idempotencyKey, tx);
+      if (earlier) {
+        if ((earlier.metadata as { identity?: unknown }).identity !== identity) {
+          throw new AppError(
+            'CONFLICT',
+            'This idempotency key was already used for a different file.',
+            'مفتاح عدم التكرار هذا استُخدم لملف مختلف.',
+            { reason: 'idempotency_key_reused' },
+          );
+        }
+        logger.info('artifact.replayed', { id: earlier.id, by: 'idempotencyKey' });
+        return earlier;
+      }
+    } else {
+      const repeat = await artifactsRepo.findRecentRepeat(input.userId, requestKey, REPEAT_WINDOW_MINUTES, tx);
+      if (repeat) {
+        logger.info('artifact.replayed', { id: repeat.id, by: 'repeat' });
+        return repeat;
+      }
     }
 
-    artifact = await artifactsRepo.createVersion(previous, row);
-  } else {
-    artifact = await artifactsRepo.createFirst(row);
-  }
+    /* 3. Stored under a key scoped to the user, as uploads are. */
+    const storageKey = `artifacts/${input.userId}/${crypto.randomUUID()}.${input.kind}`;
 
-  logger.info('artifact.stored', {
-    id: artifact.id,
-    kind: input.kind,
-    version: artifact.version,
-    bytes: input.bytes.length,
-    validation: artifact.validationStatus,
-    ms: Date.now() - startedAt,
+    await storageProvider().put(storageKey, input.bytes, CONTENT_TYPES[input.kind]);
+
+    const row = {
+      userId: input.userId,
+      projectId: input.projectId ?? null,
+      jobId: input.jobId ?? null,
+      conversationId: input.conversationId ?? null,
+      kind: input.kind,
+      filename: input.filename,
+      storageKey,
+      byteSize: input.bytes.length,
+      metadata: {
+        ...(input.metadata ?? {}),
+        /* WS4 G5: what identifies this store, for replays (see above). */
+        contentSha256,
+        identity,
+        requestKey,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(input.previewMarkdown && isPreviewable(input.kind)
+          ? (toStoredPreview(input.previewMarkdown) ?? {})
+          : {}),
+      },
+      qualityReport: (qualityReport as unknown as Record<string, unknown>) ?? null,
+      validationStatus: qualityReport?.overallStatus ?? 'unchecked',
+    };
+
+    /* 4. A new version when replacing, a new lineage when not. */
+    let artifact: Artifact;
+
+    if (input.previousArtifactId) {
+      const previous = await artifactsRepo.findOwned(input.previousArtifactId, input.userId, tx);
+
+      if (!previous) {
+        throw new AppError(
+          'NOT_FOUND',
+          'The previous version was not found.',
+          'لم يُعثر على الإصدار السابق.',
+        );
+      }
+
+      artifact = await artifactsRepo.createVersion(previous, row, tx);
+    } else {
+      artifact = await artifactsRepo.createFirst(row, tx);
+    }
+
+    logger.info('artifact.stored', {
+      id: artifact.id,
+      kind: input.kind,
+      version: artifact.version,
+      bytes: input.bytes.length,
+      validation: artifact.validationStatus,
+      ms: Date.now() - startedAt,
+    });
+
+    return artifact;
   });
-
-  return artifact;
 }
 
 /** The bytes, for a download. */

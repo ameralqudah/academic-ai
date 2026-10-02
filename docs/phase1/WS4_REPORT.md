@@ -48,6 +48,33 @@ No migration: every fix uses columns that already exist. The gateway's architect
 - **Concurrent use of one in-flight key still shares one charge.** Two calls racing on the same `reserved` key share a reservation, and only the first commit writes the ledger. Separating them would need a per-call settlement record (a migration); no caller passes its own key today (the gateway uses a fresh call id, or `callId:repair`).
 - **No usage rows, no recovery.** If the database is down for the attempt rows as well as the commit, nothing durable describes the call; that case is released at expiry, as before.
 
+Merged via #57.
+
+## PR #3 — execution safety (G3, G4, G7)
+
+No migration: the attempt count lives in the task's existing `context` column. No configuration change; `FF_RUNS` and `FF_GRAPH` stay off.
+
+| Finding | Change |
+|---|---|
+| **G3** — cancelling stopped the executor's wait but not the work: long-form writing ran its remaining rounds (each one metered), and deep research ran its model call in flight (cancel was checked only between stages) | A real abort signal reaches the call itself. `generateLongForm` takes `signal`: it is passed to every round, checked before each, and an abort throws `LongFormCancelled` (no partial text offered as a result). The writing and literature-review handlers pass the step's signal. `runDeepResearch` takes `signal`, passes it through `runCompletion` to each stage's model call (plan, extract, gaps, synthesis), treats an aborted signal like `shouldStop`, and reports an aborted call as `ResearchCancelled`. The deep-research handler passes the step's signal. The research job polls for a cancel every 2 s and aborts its controller, so a cancel stops the call in flight. The stats explain route passes the request's own signal, so a client that goes away stops the call. |
+| **G4** — a failed lease renewal only logged a warning, and the work ran on beside its new owner (duplicate execution) | `withLease` hands the work a signal that aborts with `LeaseLost` when a renewal finds another owner, or when renewals have failed so long that the next heartbeat would land after the lease expires. The result is then `lost`. The task executor stops the running steps at once (the step's controller aborts, like a cancel), applies none of their results, starts no further step, and writes nothing: no step state, no task status, no failure, no plan made after the loss. The step is left `RUNNING` for the next owner's `recoverStranded`, which counts the attempt. PLS bootstrap and deep-research jobs take the lease signal too and write no result or failure once it is lost. |
+| **G7** — a task that kept crashing its worker (or losing its lease) was re-queued by the reaper forever, paying for planning and its first steps each time | Each execution opens in the task's `context` (`executionOpen`, `interruptedExecutions`, one atomic `jsonb` update that touches nothing else). An execution that reaches any end (completed, failed, paused or waiting for input) closes. One that never closed (a crash, a redeploy, a lost lease) is counted when the next one opens. At `MAX_INTERRUPTED_EXECUTIONS` (3) the task is failed with `task.error.interrupted` instead of being started again, before any planning or step. Planning loops are covered the same way. The reason has an English and an Arabic message. |
+
+### Tests
+
+- `test:tasks:db`: 104/0, of which 22 are new.
+  - **G3:** long-form runs its rounds without a signal; sends nothing on an aborted signal; stops a round in flight at once with no round after it. Through a real task, a cancelled step's writing stops (the round in flight is aborted and no later round is sent) and the step is set aside. A cancelled research job stops its model call in flight (well before the scripted 6 s reply) and writes no failure; a research job with its lease lost sends nothing and writes nothing. The real handlers pass the step's signal to their long-running work.
+  - **G4:** a lease that keeps renewing never aborts; a lease taken by another worker aborts the work with `LeaseLost` and returns `lost`. Through `executeTask`, the running step stops at once, the next step never starts, the task is neither failed nor finished, and the execution is left open; the next owner then recovers and completes the task, counting one interruption. A bootstrap job with its lease lost writes no result, while one whose lease holds completes.
+  - **G7:** a clean run counts nothing and closes its execution; one interruption is counted and the task still runs; at the cap the task fails with `task.error.interrupted` and runs nothing; a planning loop is capped before any planning call; a task that waits for input counts nothing however often it resumes; the count sits beside the existing context.
+- `test:stats:db`: 172/0, of which 3 are new (G3: an explanation whose client went away is stopped mid-call at once; one asked for after it went away is never sent; the route passes `request.signal`).
+
+### Limitations and decisions
+
+- **Planning is not interrupted mid-call.** The planner's own model call is bounded by the gateway timeout; after a lost lease its plan is discarded, not written.
+- **Statistics jobs (`stats.run`) take no lease signal.** They are deterministic computation with their own run claim (`executeRun(..., { reclaim })`), which already refuses a second writer.
+- **A renewal that fails for a database reason is tolerated** until the lease could have expired (about 90 s with the 120 s lease and 30 s heartbeat), then treated as lost.
+- **The interruption count is cumulative** for the task's lifetime: a clean end closes the execution but does not reset the count.
+
 ### Left for later WS4 PRs
 
-G3, G4, G5 and G7 (cancellation, leases, artifact idempotency, task attempt caps), rate limits on the routes that have none, the cap on concurrent task streams, and the missing `.env.example` entries.
+G5 (artifact idempotency), rate limits on the routes that have none, the cap on concurrent task streams, and the missing `.env.example` entries.

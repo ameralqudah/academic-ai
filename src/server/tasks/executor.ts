@@ -224,6 +224,12 @@ export interface RunOptions {
 
   /** Checked between steps, so cancellation takes effect within one step. */
   shouldStop?: () => Promise<boolean>;
+  /**
+   * WS4 G4: the lease the task runs under (`withLease`). When it aborts, the
+   * running steps are stopped and nothing more is written: another worker
+   * now owns the task, and its recovery picks the steps up.
+   */
+  lease?: AbortSignal;
   onProgress?: (progress: { completed: number; total: number; current?: string }) => void;
   /** Extends the plan when a step suggests more work. */
   /**
@@ -270,6 +276,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
   if (!task) return;
 
   if (task.status === 'CANCELLED' || task.status === 'COMPLETED') return;
+  if (options.lease?.aborted) return;
 
   /*
    * Steps left RUNNING by a stopped process are returned to pending. Nothing
@@ -293,6 +300,10 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
   const startedAt = task.startedAt?.getTime() ?? Date.now();
 
   for (;;) {
+    if (options.lease?.aborted) {
+      logger.warn('task.leaseLost', { taskId });
+      return;
+    }
     if (await options.shouldStop?.()) {
       await tasksRepo.setStatus(taskId, 'CANCELLED');
       return;
@@ -456,7 +467,7 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
         const claimed = await tasksRepo.claimStep(step.id);
         if (!claimed) return null;
 
-        const result = await executeStep(current, claimed, steps, capability.timeoutMs);
+        const result = await executeStep(current, claimed, steps, capability.timeoutMs, options.lease);
         const claim = { startedAt: claimed.startedAt as Date };
         return { step: claimed, capability, result, claim };
       }),
@@ -470,12 +481,21 @@ async function runTaskScoped(taskId: string, options: RunOptions): Promise<void>
      * task that had already moved on. Collecting first means the task's state
      * changes once per batch, from a complete picture.
      */
+    /* WS4 G4: results of steps stopped by a lost lease are never applied; the step is the new owner's to recover. */
+    if (options.lease?.aborted) {
+      logger.warn('task.leaseLost', { taskId, stepsDiscarded: outcomes.filter(Boolean).length });
+      return;
+    }
+
     let needsInput: { question: string } | null = null;
 
     for (const outcome of outcomes) {
       if (!outcome) continue;
 
       const { step, capability, result, claim } = outcome;
+
+      /* Unreachable after the check above; kept so the kinds stay exhaustive. */
+      if (result.kind === 'lost') continue;
 
       if (result.kind === 'cancelled') {
         /* Stopped mid-step because the task was cancelled (P1-D): set aside, never a result. */
@@ -656,6 +676,7 @@ async function pauseAtLimit(taskId: string, limit: LimitReason): Promise<void> {
 
 type Executed =
   | { kind: 'cancelled' }
+  | { kind: 'lost' }
   | { kind: 'completed'; observation: Observation }
   | { kind: 'failed'; reasonKey: string; observation: Observation }
   | { kind: 'needs-input'; question: string; observation: Observation };
@@ -673,6 +694,7 @@ async function executeStep(
   step: TaskStep,
   allSteps: TaskStep[],
   timeoutMs: number,
+  lease?: AbortSignal,
 ): Promise<Executed> {
   const handler = handlers.get(step.capability);
   if (!handler) {
@@ -745,8 +767,8 @@ async function executeStep(
    * the handler to stop, and its late result, if any, is discarded because the
    * step's claim no longer matches.
    */
-  let stop: ((reason: 'timeout' | 'cancelled') => void) | undefined;
-  const stopped = new Promise<'timeout' | 'cancelled'>((resolve) => {
+  let stop: ((reason: 'timeout' | 'cancelled' | 'lost') => void) | undefined;
+  const stopped = new Promise<'timeout' | 'cancelled' | 'lost'>((resolve) => {
     stop = resolve;
   });
   const timeout = setTimeout(() => {
@@ -765,6 +787,14 @@ async function executeStep(
       .catch(() => undefined);
   }, CANCEL_POLL_MS);
   watch.unref?.();
+
+  /* WS4 G4: a lost lease ends the step at once, like a cancel: the handler is told to stop and its result is never used. */
+  const onLeaseLost = () => {
+    controller.abort();
+    stop?.('lost');
+  };
+  if (lease?.aborted) onLeaseLost();
+  else lease?.addEventListener('abort', onLeaseLost, { once: true });
 
   try {
     /*
@@ -787,6 +817,7 @@ async function executeStep(
 
     const raced = await Promise.race([running.then((raw) => ({ raw })), stopped]);
     if (raced === 'cancelled') return { kind: 'cancelled' };
+    if (raced === 'lost') return { kind: 'lost' };
     if (raced === 'timeout') throw new Error('step timed out');
     const raw = raced.raw;
 
@@ -857,6 +888,7 @@ async function executeStep(
   } finally {
     clearTimeout(timeout);
     clearInterval(watch);
+    lease?.removeEventListener('abort', onLeaseLost);
   }
 }
 

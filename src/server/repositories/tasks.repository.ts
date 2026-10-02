@@ -157,6 +157,49 @@ export async function mergeContext(id: string, patch: Record<string, unknown>): 
     .where(eq(tasks.id, id));
 }
 
+/**
+ * WS4 G7: how many interrupted executions a task may have before it is failed
+ * rather than started again. An execution is interrupted when it never reached
+ * its end — the worker crashed or was redeployed mid-run, or lost its lease —
+ * so the reaper re-queued the task; planning interrupted the same way counts
+ * too. Without a cap, a task that brings its worker down was retried forever,
+ * each time paying for planning and its first steps again.
+ */
+export const MAX_INTERRUPTED_EXECUTIONS = 3;
+
+/**
+ * Opens an execution of the task (WS4 G7). If the previous one is still open,
+ * it ended without closing — it was interrupted — and is counted. Atomic, in
+ * one statement on the task's `context` (no migration): the two keys are its
+ * own, and nothing else in the context is touched.
+ *
+ * Returns the interrupted count so far; at the cap the caller fails the task.
+ */
+export async function openExecution(id: string): Promise<{ interrupted: number } | undefined> {
+  const [row] = await db
+    .update(tasks)
+    .set({
+      context: sql`${tasks.context} || jsonb_build_object(
+        'executionOpen', true,
+        'interruptedExecutions', coalesce((${tasks.context} ->> 'interruptedExecutions')::int, 0)
+          + case when coalesce((${tasks.context} ->> 'executionOpen')::boolean, false) then 1 else 0 end
+      )`,
+      updatedAt: new Date(),
+    })
+    .where(eq(tasks.id, id))
+    .returning({ context: tasks.context });
+  if (!row) return undefined;
+  return { interrupted: Number((row.context as { interruptedExecutions?: unknown }).interruptedExecutions ?? 0) };
+}
+
+/** Closes the task's execution: it reached an end, so the next one is not an interruption (WS4 G7). */
+export async function closeExecution(id: string): Promise<void> {
+  await db
+    .update(tasks)
+    .set({ context: sql`${tasks.context} || jsonb_build_object('executionOpen', false)` })
+    .where(eq(tasks.id, id));
+}
+
 export async function recordSpend(id: string, patch: Record<string, number>): Promise<void> {
   const task = await findAny(id);
   if (!task) return;

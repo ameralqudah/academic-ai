@@ -11,23 +11,23 @@ import { withLease } from './leases';
 
 const FINISHED = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'WAITING_FOR_INPUT', 'PAUSED']);
 
-export async function runTaskJob(taskId: string): Promise<'ran' | 'busy' | 'skipped'> {
+export async function runTaskJob(taskId: string): Promise<'ran' | 'busy' | 'lost' | 'skipped'> {
   const task = await tasksRepo.findAny(taskId);
   if (!task || FINISHED.has(task.status)) return 'skipped';
 
   const { executeTask } = await import('@/server/services/task.service');
-  return withLease('tasks', taskId, () => executeTask(taskId));
+  return withLease('tasks', taskId, (lease) => executeTask(taskId, { lease }));
 }
 
-export async function runAnalysisJob(jobId: string): Promise<'ran' | 'busy' | 'skipped'> {
+export async function runAnalysisJob(jobId: string): Promise<'ran' | 'busy' | 'lost' | 'skipped'> {
   const job = await jobsRepo.findOwnedAny(jobId);
   if (!job || job.status !== 'QUEUED') return 'skipped';
 
-  return withLease('analysis_jobs', jobId, async () => {
+  return withLease('analysis_jobs', jobId, async (lease) => {
     switch (job.kind) {
       case 'pls.bootstrap': {
         const { runBootstrapJob } = await import('@/server/services/pls.service');
-        await runBootstrapJob(jobId);
+        await runBootstrapJob(jobId, lease);
         return;
       }
       case 'stats.run': {
@@ -37,7 +37,7 @@ export async function runAnalysisJob(jobId: string): Promise<'ran' | 'busy' | 's
       }
       case 'research.deep': {
         const { runResearchJob } = await import('@/server/services/deep-research.service');
-        await runResearchJob(jobId);
+        await runResearchJob(jobId, lease);
         return;
       }
       default:

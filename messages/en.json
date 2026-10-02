@@ -1627,7 +1627,8 @@
         "crashed": "Stopped by an unexpected error",
         "empty": "Stopped: the model returned no usable text",
         "stepFailed": "Stopped by a failure in this step",
-        "stepThrew": "Stopped by a failure in this step"
+        "stepThrew": "Stopped by a failure in this step",
+        "interrupted": "Stopped: the work was interrupted and was not started again"
       }
     },
     "capability": {

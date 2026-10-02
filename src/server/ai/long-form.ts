@@ -57,6 +57,12 @@ export interface GenerateLongInput {
   prompt: string;
   locale: 'ar' | 'en';
   /**
+   * WS4 G3: a cancel, timeout or lost lease. It stops the round in flight and
+   * any round after it; before, a cancelled step's writing ran on, up to every
+   * remaining round, each one metered.
+   */
+  signal?: AbortSignal;
+  /**
    * How much to ask for per call.
    *
    * Not a limit on the output — a limit on each round. The total is whatever
@@ -74,6 +80,14 @@ export interface GenerateLongInput {
   /** Called after each round, for progress. */
   onProgress?: (round: number, chars: number) => void;
 }
+/** Long-form writing stopped by its signal (WS4 G3). */
+export class LongFormCancelled extends Error {
+  constructor() {
+    super('generation.cancelled');
+    this.name = 'LongFormCancelled';
+  }
+}
+
 export async function generateLongForm(input: GenerateLongInput): Promise<GenerationResult> {
   const tokensPerRound = input.tokensPerRound ?? (input.locale === 'ar' ? 3500 : 2500);
   const maxRounds = input.maxRounds ?? 6;
@@ -85,6 +99,7 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
   let lastStop: string | undefined;
 
   while (round < maxRounds) {
+    if (input.signal?.aborted) throw new LongFormCancelled();
     round += 1;
 
     /*
@@ -139,8 +154,12 @@ export async function generateLongForm(input: GenerateLongInput): Promise<Genera
         countsAsRequest: round === 1,
         continuation: round > 1,
         estimatedWords: Math.round(tokensPerRound * 0.6),
+        ...(input.signal ? { signal: input.signal } : {}),
       });
     } catch (error) {
+      /* Stopped on purpose: not a provider failure, and no partial text is offered as a result. */
+      if (input.signal?.aborted) throw new LongFormCancelled();
+
       const detail = error instanceof Error ? error.message : String(error);
 
       logger.error('generation.providerFailed', {

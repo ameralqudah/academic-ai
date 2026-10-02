@@ -372,6 +372,22 @@ async function main() {
   check('an explanation uses tokens; the numbers are rendered from the stored estimates', [explained.text.startsWith('Higher x goes with higher y (b = '), explained.keys], [true, ['coef:x']]);
   fake.push({ reply: { text: 'The effect is b = 0.25.' } }, { reply: { text: 'Still b = 0.25.' } });
   check('an explanation that keeps typing numbers is refused', await runForUser(owner, () => outcome(() => explainRun(me, P, rerunNew.id))), 'CONFLICT');
+  {
+    /* WS4 G3: the explain route passes the request's signal; a client that goes away stops the model call in flight. */
+    fake.push({ reply: { text: 'Higher x goes with higher y ({{value:coef:x}}).' }, delayMs: 5_000 });
+    const before = fake.calls.length;
+    const leaving = new AbortController();
+    setTimeout(() => leaving.abort(), 100);
+    const started = Date.now();
+    const gone = await runForUser(owner, () => explainRun(me, P, rerunNew.id, 'en', { signal: leaving.signal }).then(() => 'answered', (error: unknown) => (error instanceof Error ? error.name : String(error))));
+    check('WS4 G3: an explanation whose client went away is stopped mid-call, at once', [gone, fake.calls.length - before, fake.calls.at(-1)?.signal.aborted, Date.now() - started < 2_000], ['GatewayError', 1, true, true]);
+    const left = new AbortController();
+    left.abort();
+    const beforeGone = fake.calls.length;
+    const route = readFileSync('src/app/api/v1/projects/[projectId]/analyses/runs/[runId]/explain/route.ts', 'utf8');
+    check('… and the explain route hands its request’s signal to the explanation', route.includes('{ signal: request.signal }'), true);
+    check('… and one asked for after it went away is never sent', [await runForUser(owner, () => explainRun(me, P, rerunNew.id, 'en', { signal: left.signal }).then(() => 'answered', (error: unknown) => (error instanceof Error ? error.name : String(error)))), fake.calls.length - beforeGone], ['GatewayError', 0]);
+  }
   setGatewayForTests(null);
 
   /* ------------------------------------------------------------------ */

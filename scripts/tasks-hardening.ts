@@ -13,7 +13,7 @@
 
 import 'dotenv/config';
 
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -43,11 +43,16 @@ import { startConversation } from '@/server/services/chat.service';
 import { analyseDataRequest } from '@/server/services/data-analysis.service';
 import { saveUpload } from '@/server/services/dataset.service';
 import { startDeepResearch } from '@/server/services/deep-research.service';
-import { runPls, startBootstrap } from '@/server/services/pls.service';
+import { runBootstrapJob, runPls, startBootstrap } from '@/server/services/pls.service';
+import { runResearchJob } from '@/server/services/deep-research.service';
+import { generateLongForm, LongFormCancelled } from '@/server/ai/long-form';
+import type { AIProvider } from '@/ai/provider';
+import { LeaseLost, setLeaseHeartbeatForTests, withLease } from '@/server/jobs/leases';
+import * as jobsRepo from '@/server/repositories/analysis-jobs.repository';
 import { attachRun, runAnalysis } from '@/server/services/statistics.service';
 import { searchWeb } from '@/server/services/web-search.service';
 import { DEFAULT_BUDGET, registerCapability, type CapabilityDefinition } from '@/server/tasks/capabilities';
-import { failed, succeeded } from '@/server/tasks/contracts';
+import { failed, needsInput, succeeded } from '@/server/tasks/contracts';
 import { registerHandler, runTask } from '@/server/tasks/executor';
 import { registerAllHandlers } from '@/server/tasks/handlers';
 import { applyAnswer, isAffirmative, modelHash } from '@/server/tasks/model-confirmation';
@@ -91,6 +96,9 @@ const TEST_CAPABILITIES: CapabilityDefinition[] = [
   { id: 'test.once' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 0, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: true },
   { id: 'test.flaky' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 0, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: true },
   { id: 'test.model' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 1, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: false },
+  { id: 'test.leased' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 0, retryable: false, maxAttempts: 2, requiresDataset: false, parallelSafe: false },
+  { id: 'test.ask' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 0, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: true },
+  { id: 'test.writer' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 6, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: false },
 ];
 
 async function main() {
@@ -122,6 +130,62 @@ async function main() {
   });
   registerHandler('test.model' as never, async (context) => {
     await gateway().generate({ purpose: 'chat', messages: [{ role: 'user', content: `step ${context.stepId}` }] });
+    return succeeded([]);
+  });
+  /* WS4 G4: the first run waits until its signal aborts (or 5 s); later runs finish at once. */
+  const leased = { runs: 0, sawAbort: false, waitedMs: 0 };
+  registerHandler('test.leased' as never, async (context) => {
+    leased.runs += 1;
+    if (leased.runs > 1) return succeeded([]);
+    const started = Date.now();
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5_000);
+      context.signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+    leased.sawAbort = context.signal.aborted;
+    leased.waitedMs = Date.now() - started;
+    return succeeded([]);
+  });
+  registerHandler('test.ask' as never, async () => needsInput('Which one?', 'choice'));
+  /* WS4 G3: a fake writer whose every round takes 600 ms and always asks for more. */
+  const slowRounds: { aborted: boolean }[] = [];
+  const slowWriter = (delayMs: number, rounds: { aborted: boolean }[]) =>
+    ({
+      name: 'anthropic',
+      model: 'fake-writer',
+      isConfigured: () => true,
+      countTokens: () => 1,
+      estimateCostMicroUsd: () => 0,
+      stream: async function* () {},
+      complete: async (request: { signal?: AbortSignal }) => {
+        const round = { aborted: false };
+        rounds.push(round);
+        await new Promise<void>((resolve, reject) => {
+          if (request.signal?.aborted) {
+            round.aborted = true;
+            return reject(new Error('aborted'));
+          }
+          const timer = setTimeout(resolve, delayMs);
+          request.signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            round.aborted = true;
+            reject(new Error('aborted'));
+          }, { once: true });
+        });
+        return { text: 'more words to come '.repeat(10), stopReason: 'max_tokens', usage: { tokensIn: 1, tokensOut: 1 }, provider: 'anthropic', model: 'fake-writer' };
+      },
+    }) as unknown as AIProvider;
+  let writerOutcome = '';
+  registerHandler('test.writer' as never, async (context) => {
+    try {
+      await generateLongForm({ signal: context.signal, provider: slowWriter(600, slowRounds), system: 's', prompt: 'p', locale: 'en', maxRounds: 6 });
+      writerOutcome = 'finished';
+    } catch (error) {
+      writerOutcome = error instanceof LongFormCancelled ? 'cancelled' : `threw:${String(error)}`;
+    }
     return succeeded([]);
   });
   let flakyCalls = 0;
@@ -255,6 +319,178 @@ async function main() {
     check('… nor to someone else’s conversation', await outcome(() => startTask({ userId: owner, request: 'x', locale: 'en', conversationId: conversation.id })), 'NOT_FOUND');
     const before = (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length;
     check('and nothing was created', (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length, before);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G3: long-running work stops when its signal aborts');
+  {
+    const rounds: { aborted: boolean }[] = [];
+    const whole = await generateLongForm({ provider: slowWriter(0, rounds), system: 's', prompt: 'p', locale: 'en', maxRounds: 3 });
+    check('without a signal, long-form writing runs its rounds as before', [rounds.length, whole.rounds], [3, 3]);
+
+    const none: { aborted: boolean }[] = [];
+    const stopped = new AbortController();
+    stopped.abort();
+    check('an aborted signal sends no round at all', [await generateLongForm({ signal: stopped.signal, provider: slowWriter(0, none), system: 's', prompt: 'p', locale: 'en' }).then(() => 'finished', (error: unknown) => (error instanceof LongFormCancelled ? 'cancelled' : String(error))), none.length], ['cancelled', 0]);
+
+    const mid: { aborted: boolean }[] = [];
+    const midway = new AbortController();
+    setTimeout(() => midway.abort(), 100);
+    const started = Date.now();
+    const midOutcome = await generateLongForm({ signal: midway.signal, provider: slowWriter(2_000, mid), system: 's', prompt: 'p', locale: 'en' }).then(() => 'finished', (error: unknown) => (error instanceof LongFormCancelled ? 'cancelled' : String(error)));
+    check('an abort mid-round stops the call in flight, at once, and no round follows', [midOutcome, mid.length, mid[0]?.aborted, Date.now() - started < 1_000], ['cancelled', 1, true, true]);
+
+    /* Through a task: cancelling it stops the step's writing, not just the executor's wait. */
+    slowRounds.length = 0;
+    writerOutcome = '';
+    const writing = await makeTask(['test.writer']);
+    const running = runTask(writing.id);
+    await sleep(200);
+    await cancelTask(writing.id, owner);
+    await running;
+    await sleep(4_500);
+    check('a cancelled task’s writing stops: the round in flight is aborted and no later round is sent', [writerOutcome, slowRounds.length < 6, slowRounds.at(-1)?.aborted], ['cancelled', true, true]);
+    check('… and the step is set aside, never a result', (await tasksRepo.stepsOf(writing.id))[0]?.status, 'SKIPPED');
+    const handlerSource = readFileSync('src/server/tasks/handlers.ts', 'utf8');
+    check('the real writing, literature-review and deep-research handlers pass the step’s signal to their long-running work', [(handlerSource.match(/generateLongForm\(\{\n\s+signal: context\.signal,/g) ?? []).length, /runDeepResearch\(\{[\s\S]{0,300}signal: context\.signal,/.test(handlerSource)], [2, true]);
+
+    /* A research job: a cancel aborts the model call in flight; a lost lease stops it before any call, writing nothing. */
+    const research = new FakeAdapter('google');
+    setGatewayForTests(
+      createGateway({
+        ...productionDeps,
+        adapters: () => ({ google: research }),
+        models: async () => ({ configured: [{ provider: 'google', model: 'gemini-2.5-pro' }], defaultProvider: 'google', siblings: {} }),
+      }),
+    );
+    try {
+      research.push({ reply: { text: '["one"]' }, delayMs: 6_000 });
+      const job = await jobsRepo.create({ userId: owner, kind: 'research.deep', status: 'QUEUED', spec: { question: 'q', locale: 'en', conversationId: null } });
+      const begun = Date.now();
+      const researching = runResearchJob(job.id);
+      await sleep(300);
+      await db.update(analysisJobs).set({ status: 'CANCELLED' }).where(eq(analysisJobs.id, job.id));
+      await researching;
+      const [after] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, job.id));
+      check('a cancelled research job stops its model call in flight (well before the 6 s reply) and writes no failure', [Date.now() - begun < 4_000, research.calls.length, research.calls[0]?.signal.aborted, after?.status], [true, 1, true, 'CANCELLED']);
+
+      const lostJob = await jobsRepo.create({ userId: owner, kind: 'research.deep', status: 'QUEUED', spec: { question: 'q', locale: 'en', conversationId: null } });
+      const gone = new AbortController();
+      gone.abort();
+      const callsBefore = research.calls.length;
+      await runResearchJob(lostJob.id, gone.signal);
+      const [lostRow] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, lostJob.id));
+      check('with its lease lost, a research job sends nothing and writes neither result nor failure', [research.calls.length - callsBefore, lostRow?.status, lostRow?.result ?? null], [0, 'RUNNING', null]);
+      /* Settled here as its next owner would, so it does not count as active work in later tests. */
+      await db.update(analysisJobs).set({ status: 'CANCELLED' }).where(eq(analysisJobs.id, lostJob.id));
+    } finally {
+      setGatewayForTests(null);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G4: a lost lease stops the work at once, and nothing more is written');
+  setLeaseHeartbeatForTests(100);
+  try {
+    const kept = await makeTask(['test.once']);
+    check('a lease that keeps renewing never aborts the work', await withLease('tasks', kept.id, async (lease) => {
+      await sleep(450);
+      if (lease.aborted) throw new Error('aborted while held');
+    }), 'ran');
+
+    const stolen = await makeTask(['test.once']);
+    let reason: unknown = null;
+    const result = await withLease('tasks', stolen.id, async (lease) => {
+      await db.update(tasks).set({ leaseOwner: 'another-worker', leaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(tasks.id, stolen.id));
+      await waitFor(async () => lease.aborted, (aborted) => aborted, 3_000);
+      reason = lease.reason;
+    });
+    check('a lease taken by another worker aborts the work’s signal, with the reason, and the run reports it lost', [result, reason instanceof LeaseLost], ['lost', true]);
+
+    const task = await makeTask(['test.leased', 'test.once']);
+    executions.length = 0;
+    const started = Date.now();
+    const run = withLease('tasks', task.id, (lease) => executeTask(task.id, { lease }));
+    await waitFor(async () => leased.runs, (runs) => runs > 0, 3_000);
+    await db.update(tasks).set({ leaseOwner: 'another-worker', leaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(tasks.id, task.id));
+    const outcome = await run;
+    const afterLoss = await tasksRepo.findAny(task.id);
+    const stepsAfterLoss = await tasksRepo.stepsOf(task.id);
+    check('the running step is told to stop at once (not after its 5 s), and the run is lost', [outcome, leased.sawAbort, leased.waitedMs < 2_000, Date.now() - started < 3_000], ['lost', true, true, true]);
+    check('… nothing more is written: the step is left for the next owner, the next step never starts, the task is not failed or finished', [stepsAfterLoss.map((s) => s.status), executions.length, afterLoss?.status], [['RUNNING', 'PENDING'], 0, 'RUNNING']);
+    check('… and the execution is left open, for the next owner to count as interrupted (G7)', (afterLoss?.context as { executionOpen?: boolean }).executionOpen, true);
+
+    await db.update(tasks).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(tasks.id, task.id));
+    check('the next owner recovers it and finishes it', await withLease('tasks', task.id, (lease) => executeTask(task.id, { lease })), 'ran');
+    const resumed = await tasksRepo.findAny(task.id);
+    check('… the stranded step re-run once, the task completed, and the lost execution counted', [resumed?.status, (await tasksRepo.stepsOf(task.id)).map((s) => s.status), (resumed?.context as { interruptedExecutions?: number }).interruptedExecutions], ['COMPLETED', ['COMPLETED', 'COMPLETED'], 1]);
+
+    /* A bootstrap job: lease lost → no result is written; held → it completes as before. */
+    const lines = ['a1,a2,a3,b1,b2,b3'];
+    for (let i = 0; i < 40; i += 1) {
+      const a = (i % 5) + 1;
+      const b = ((i * 3) % 5) + 1;
+      lines.push([a, Math.min(5, a + (i % 2)), Math.max(1, a - (i % 3 === 0 ? 1 : 0)), b, Math.min(5, b + (i % 2)), Math.max(1, b - (i % 4 === 0 ? 1 : 0))].join(','));
+    }
+    const data = (await saveUpload({ userId: owner, file: { name: 'g4.csv', bytes: new TextEncoder().encode(lines.join('\n')).buffer as ArrayBuffer } })).dataset;
+    const spec = {
+      model: { constructs: [{ name: 'A', indicators: ['a1', 'a2', 'a3'], mode: 'reflective' }, { name: 'B', indicators: ['b1', 'b2', 'b3'], mode: 'reflective' }], paths: [{ from: 'A', to: 'B' }] },
+      resamples: 100,
+      confidenceLevel: 0.95,
+      seed: 7,
+    };
+    const lostBoot = await jobsRepo.create({ userId: owner, kind: 'pls.bootstrap', status: 'QUEUED', datasetId: data.id, spec });
+    const gone = new AbortController();
+    gone.abort();
+    await runBootstrapJob(lostBoot.id, gone.signal);
+    const [lostBootRow] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, lostBoot.id));
+    const heldBoot = await jobsRepo.create({ userId: owner, kind: 'pls.bootstrap', status: 'QUEUED', datasetId: data.id, spec });
+    await runBootstrapJob(heldBoot.id, new AbortController().signal);
+    const [heldBootRow] = await db.select().from(analysisJobs).where(eq(analysisJobs.id, heldBoot.id));
+    check('a bootstrap whose lease is lost writes no result; one whose lease holds completes', [lostBootRow?.status, lostBootRow?.result ?? null, heldBootRow?.status], ['RUNNING', null, 'COMPLETED']);
+    await db.update(analysisJobs).set({ status: 'CANCELLED' }).where(eq(analysisJobs.id, lostBoot.id));
+  } finally {
+    setLeaseHeartbeatForTests(null);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G7: a task is not restarted forever after interruptions');
+  {
+    const contextOf = async (id: string) => (await tasksRepo.findAny(id))?.context as { executionOpen?: boolean; interruptedExecutions?: number };
+    const fresh = await makeTask(['test.once']);
+    await executeTask(fresh.id);
+    check('a task that runs to its end counts no interruption, and closes its execution', [(await tasksRepo.findAny(fresh.id))?.status, await contextOf(fresh.id)], ['COMPLETED', { executionOpen: false, interruptedExecutions: 0 }]);
+
+    const once = await makeTask(['test.once'], { context: { executionOpen: true, interruptedExecutions: 0 } });
+    await executeTask(once.id);
+    check('a task whose last execution never ended (a crash) counts one interruption, and still runs under the cap', [(await tasksRepo.findAny(once.id))?.status, await contextOf(once.id)], ['COMPLETED', { executionOpen: false, interruptedExecutions: 1 }]);
+
+    executions.length = 0;
+    const looping = await makeTask(['test.once'], { context: { executionOpen: true, interruptedExecutions: 2 } });
+    await executeTask(looping.id);
+    const looped = await tasksRepo.findAny(looping.id);
+    check('at the cap it is failed with that reason instead of being started again, and runs nothing', [looped?.status, looped?.errorReasonKey, executions.length, await contextOf(looping.id)], ['FAILED', 'task.error.interrupted', 0, { executionOpen: false, interruptedExecutions: 3 }]);
+
+    /* Planning: a task with no steps, interrupted at the cap, is failed before any planning call. */
+    const planner = new FakeAdapter('google');
+    setGatewayForTests(createGateway({ ...productionDeps, adapters: () => ({ google: planner }), models: async () => ({ configured: [{ provider: 'google', model: 'gemini-2.5-pro' }], defaultProvider: 'google', siblings: {} }) }));
+    try {
+      const unplanned = await tasksRepo.create({ userId: owner, request: 'plan me', locale: 'en', status: 'QUEUED', context: { executionOpen: true, interruptedExecutions: 2 }, budget: DEFAULT_BUDGET as unknown as Record<string, number>, spent: { modelCalls: 0, retries: 0 } });
+      await executeTask(unplanned.id);
+      check('a planning loop is capped the same way: failed before any planning call', [(await tasksRepo.findAny(unplanned.id))?.status, planner.calls.length, (await tasksRepo.stepsOf(unplanned.id)).length], ['FAILED', 0, 0]);
+    } finally {
+      setGatewayForTests(null);
+    }
+
+    const asking = await makeTask(['test.ask']);
+    await executeTask(asking.id);
+    await executeTask(asking.id);
+    check('a task that stops to ask (an end, not an interruption) counts nothing, however often it resumes', [(await tasksRepo.findAny(asking.id))?.status, await contextOf(asking.id)], ['WAITING_FOR_INPUT', { executionOpen: false, interruptedExecutions: 0 }]);
+
+    const counted = await makeTask(['test.once'], { context: { keep: 'me' } });
+    await tasksRepo.openExecution(counted.id);
+    await tasksRepo.openExecution(counted.id);
+    check('the count lives in the task’s context, beside what is already there (no migration)', await contextOf(counted.id), { keep: 'me', executionOpen: true, interruptedExecutions: 1 });
   }
 
   /* ------------------------------------------------------------------ */

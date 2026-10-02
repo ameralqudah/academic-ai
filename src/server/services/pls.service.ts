@@ -453,8 +453,13 @@ export async function startBootstrap(input: {
   return job;
 }
 
-/** Executes a queued bootstrap. Called by a worker, under the job's lease. */
-export async function runBootstrapJob(jobId: string): Promise<void> {
+/**
+ * Executes a queued bootstrap. Called by a worker, under the job's lease.
+ *
+ * WS4 G4: `lease` aborts when the lease is lost; the resampling stops at its
+ * next check and nothing is written, since another worker now holds the job.
+ */
+export async function runBootstrapJob(jobId: string, lease?: AbortSignal): Promise<void> {
   const startedAt = Date.now();
 
   const [job] = await Promise.all([jobsRepo.findOwnedAny(jobId)]);
@@ -509,10 +514,14 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
             cancelled = value;
           });
         }
-        return cancelled;
+        return cancelled || Boolean(lease?.aborted);
       },
     });
 
+    if (lease?.aborted) {
+      logger.warn('pls.bootstrapLeaseLost', { jobId });
+      return;
+    }
     if (cancelled) {
       logger.info('pls.bootstrapCancelled', { jobId });
       return;
@@ -580,6 +589,10 @@ export async function runBootstrapJob(jobId: string): Promise<void> {
       ms: result.durationMs,
     });
   } catch (error) {
+    if (lease?.aborted) {
+      logger.warn('pls.bootstrapLeaseLost', { jobId, error: String(error).slice(0, 200) });
+      return;
+    }
     const reasonKey =
       error instanceof PlsError ? error.reasonKey : 'analysis.job.error.failed';
 

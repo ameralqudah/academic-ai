@@ -92,15 +92,18 @@ export async function startDeepResearch(input: {
  * The Model Gateway refuses calls outside a user scope, and looks the plan up
  * from this user id — the job never carries it, so it cannot lose it.
  */
-export async function runResearchJob(jobId: string): Promise<void> {
+export async function runResearchJob(jobId: string, lease?: AbortSignal): Promise<void> {
   const owner = await jobsRepo.findOwnedAny(jobId);
   if (!owner) return;
   await runForUser(owner.userId, () =>
-    withCallIds({ jobId, projectId: owner.projectId ?? null }, () => runResearchJobAsOwner(jobId)),
+    withCallIds({ jobId, projectId: owner.projectId ?? null }, () => runResearchJobAsOwner(jobId, lease)),
   );
 }
 
-async function runResearchJobAsOwner(jobId: string): Promise<void> {
+/** WS4 G3: how often a running research job looks for a cancel, so it can abort the call in flight. */
+const CANCEL_POLL_MS = 2_000;
+
+async function runResearchJobAsOwner(jobId: string, lease?: AbortSignal): Promise<void> {
   const startedAt = Date.now();
   const runId = jobId;
   const job = await jobsRepo.findOwnedAny(jobId);
@@ -119,7 +122,25 @@ async function runResearchJobAsOwner(jobId: string): Promise<void> {
     let cancelled = false;
     let lastCheck = 0;
 
+    /*
+     * WS4 G3/G4: a real abort. A cancel (polled) or a lost lease stops the
+     * model call in flight, not only the next stage; before, a cancelled
+     * research ran its current call, and possibly the whole synthesis, to the end.
+     */
+    const cancel = new AbortController();
+    const signal = lease ? AbortSignal.any([cancel.signal, lease]) : cancel.signal;
+    const poll = setInterval(() => {
+      void jobsRepo
+        .isCancelled(jobId)
+        .then((value) => {
+          if (value) cancel.abort();
+        })
+        .catch(() => undefined);
+    }, CANCEL_POLL_MS);
+    poll.unref?.();
+
     const report = await runDeepResearch({
+      signal,
       userId: job.userId,
       question: spec.question,
       locale: spec.locale,
@@ -143,7 +164,13 @@ async function runResearchJobAsOwner(jobId: string): Promise<void> {
         }
         return cancelled;
       },
-    });
+    }).finally(() => clearInterval(poll));
+
+    /* Another worker holds the job now: nothing of this run is written. */
+    if (lease?.aborted) {
+      logger.warn('deepResearch.leaseLost', { jobId });
+      return;
+    }
 
     await jobsRepo.complete(
       jobId,
@@ -184,6 +211,10 @@ async function runResearchJobAsOwner(jobId: string): Promise<void> {
       () => undefined,
     );
   } catch (error) {
+    if (lease?.aborted) {
+      logger.warn('deepResearch.leaseLost', { jobId, error: String(error).slice(0, 200) });
+      return;
+    }
     if (error instanceof ResearchCancelled) {
       logger.info('deepResearch.cancelled', { jobId });
       return;

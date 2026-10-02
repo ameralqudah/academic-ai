@@ -390,6 +390,8 @@ export const POST = withApi<Body>(
      * thing.
      */
     let contextPrompt = '';
+    /* Context V2 (P1-E): the message with its claim references rendered; undefined in v1. */
+    let contextRequest: string | undefined;
 
     try {
       const built = await buildContextPrompt({
@@ -403,6 +405,7 @@ export const POST = withApi<Body>(
       });
 
       contextPrompt = built.prompt;
+      contextRequest = built.request;
     } catch (error) {
       /*
        * A failed context build must not fail the answer. The assistant can
@@ -419,7 +422,7 @@ export const POST = withApi<Body>(
       history: [],
       chosenModel,
       /* Already built above — passed on rather than built a second time. */
-      ...(contextPrompt ? { contextPrompt } : {}),
+      ...(contextPrompt ? { contextPrompt, contextRequest } : {}),
       /* A reader that goes away stops the model instead of letting it write to no one (P1-B). */
       signal: request.signal,
     };

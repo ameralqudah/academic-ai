@@ -44,17 +44,24 @@ export interface SourceScope {
 }
 
 /**
+ * Collectors a caller replaces with its own (P1-E): Context V2 builds the
+ * project from member-scoped data (`v2/snapshot.ts`), so the creator-only
+ * project reader below is left out rather than run alongside it.
+ */
+export type ReplacedSource = 'project';
+
+/**
  * Turns each source into fragments, tolerating every kind of absence.
  *
  * Collected in parallel because they are independent reads, and a context build
  * that took the sum of six queries would be felt on every message.
  */
-export async function collectFragments(scope: SourceScope): Promise<ContextFragment[]> {
+export async function collectFragments(scope: SourceScope, replaced: ReadonlySet<ReplacedSource> = new Set()): Promise<ContextFragment[]> {
   const [conversation, earlier, taskResults, project, task, file, artifacts] = await Promise.all([
     conversationFragments(scope).catch(recover('conversation')),
     earlierWorkFragments(scope).catch(recover('earlier-work')),
     taskResultFragments(scope).catch(recover('task-results')),
-    projectFragments(scope).catch(recover('project')),
+    replaced.has('project') ? Promise.resolve([]) : projectFragments(scope).catch(recover('project')),
     taskFragments(scope).catch(recover('task')),
     fileFragments(scope).catch(recover('file')),
     artifactFragments(scope).catch(recover('artifact')),

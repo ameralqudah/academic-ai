@@ -31,6 +31,7 @@
     "test:stats": "tsx scripts/stats-engine.ts",
     "test:stats:db": "tsx scripts/stats-integration.ts",
     "test:memory:db": "tsx scripts/memory-integration.ts",
+    "test:context:db": "tsx scripts/context-v2-integration.ts",
     "test:gateway:db": "tsx scripts/gateway-integration.ts",
     "test:gateway:live": "tsx scripts/gateway-live.ts"
   },

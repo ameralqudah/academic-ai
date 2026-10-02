@@ -106,6 +106,12 @@ export interface ContextFragment {
 export interface ContextEnvelope {
   purpose: ContextPurpose;
   fragments: ContextFragment[];
+  /**
+   * Context V2 (P1-E): the conversation turns, oldest first, kept apart from
+   * `fragments` so no relevance score or authority rank can reorder them.
+   * Absent in v1, where turns are ordinary fragments.
+   */
+  turns?: ContextFragment[];
   budget: { maxTokens: number; usedTokens: number };
   /**
    * What did not fit, by kind and authority.

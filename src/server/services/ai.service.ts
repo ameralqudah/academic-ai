@@ -28,7 +28,9 @@ import type { AIChatMessage, AITask, ProjectContext } from '@/ai/types';
 import { SECTION_BY_KEY, type SectionKey } from '@/config/research';
 import { countWords } from '@/lib/text';
 import { logger } from '@/lib/logger';
+import { contextV2Enabled } from '@/server/context/flags';
 import { buildContextPrompt } from '@/server/context/manager';
+import { scrubClaimTokens } from '@/server/context/v2/claims';
 import { looksTruncated, stripTrailingArtefact } from '@/server/services/output-cleanup';
 import type { ResearchProject, ResearchSection, TitleCandidate } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
@@ -563,6 +565,12 @@ export async function answerGeneralQuestion(input: {
    */
   contextPrompt?: string;
   /**
+   * The message as the caller's Context V2 build rendered it (P1-E): its
+   * `{{claim:id}}` references replaced by claim text or the marker. Given with
+   * `contextPrompt`; `message` stays the user's own words for everything else.
+   */
+  contextRequest?: string;
+  /**
    * Extra material for this answer alone, placed after the context.
    *
    * What an earlier step of a task found, for instance. Kept separate from
@@ -631,6 +639,7 @@ async function prepareGeneralAnswer(input: GeneralAnswerInput) {
    * against, and nothing has to change in the same commit.
    */
   let contextPrompt = input.contextPrompt ?? '';
+  let message = input.contextPrompt ? (input.contextRequest ?? input.message) : input.message;
 
   if (!contextPrompt && input.context) {
     try {
@@ -644,6 +653,7 @@ async function prepareGeneralAnswer(input: GeneralAnswerInput) {
       });
 
       contextPrompt = built.prompt;
+      message = built.request ?? message;
     } catch (error) {
       /*
        * A failed context build must not fail the answer. The assistant can
@@ -655,9 +665,17 @@ async function prepareGeneralAnswer(input: GeneralAnswerInput) {
 
   const base = generalPrompt({ locale: input.locale, projectTitle: input.projectTitle ?? null });
 
+  /*
+   * P1-E: with Context V2 on, no raw `{{claim:id}}` reaches the model by any
+   * part of the call — the material, the history slice of the path without
+   * context, or a message no build rendered. Off, nothing changes.
+   */
+  const v2 = contextV2Enabled();
+  const said = (text: string) => (v2 ? scrubClaimTokens(text, input.locale) : text);
+
   return {
     provider,
-    system: [base, contextPrompt, input.material ?? ''].filter((part) => part.trim()).join('\n\n'),
+    system: said([base, contextPrompt, input.material ?? ''].filter((part) => part.trim()).join('\n\n')),
     /*
      * With context assembled, the message array carries only the question:
      * the conversation is already in the envelope, selected and ordered by
@@ -665,8 +683,8 @@ async function prepareGeneralAnswer(input: GeneralAnswerInput) {
      * appear once as history and once as evidence.
      */
     messages: contextPrompt
-      ? [{ role: 'user' as const, content: input.message }]
-      : [...(input.history ?? []).slice(-6), { role: 'user' as const, content: input.message }],
+      ? [{ role: 'user' as const, content: said(message) }]
+      : [...(input.history ?? []).slice(-6).map((turn) => ({ ...turn, content: said(turn.content) })), { role: 'user' as const, content: said(message) }],
   };
 }
 

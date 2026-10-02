@@ -101,6 +101,8 @@ jobs:
           STORAGE_LOCAL_DIR: /tmp/academic-ai-storage
       - name: Memory and thread-summary suite with RLS (P1-E)
         run: npm run test:memory:db
+      - name: Context Assembler V2 suite (P1-E)
+        run: npm run test:context:db
 
   build-and-e2e:
     name: Production build and browser tests

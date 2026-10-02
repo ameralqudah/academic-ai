@@ -12,7 +12,8 @@
  *    member of is treated as no project at all: it reaches no other collector
  *    either, so a legacy creator-only record filed under it is not shown.
  * 3. **Claim references are rendered before assembly** (`claims.ts`): the
- *    claim's stored text, or `[unresolved claim]`; never the raw token.
+ *    claim's stored text, or `[unresolved claim]`; never the raw token. This
+ *    needs only `FF_CONTEXT_V2` and project membership, not `FF_GRAPH`.
  * 4. **Budgets are measured by a `TokenCounter`** (`../token-count.ts`), the
  *    conservative offline estimate until an exact counter is registered.
  *
@@ -26,7 +27,6 @@ import { logger } from '@/lib/logger';
 
 import { BUDGETS } from '../budgets';
 import { renderEnvelope, type ContextEnvelope, type ContextFragment } from '../envelope';
-import { graphContextEnabled } from '../flags';
 import type { BuildContextInput } from '../manager';
 import { deduplicate, fitToBudget, scoreRelevance } from '../select';
 import { collectFragments } from '../sources';
@@ -91,7 +91,8 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
 
   /* Claim references, rendered before anything is measured or assembled. */
   const ids = claimIdsAcross([snapshot.fragment.content, input.request, ...all.map((entry) => entry.content)]);
-  const rendered = await resolveClaimTexts(ids, { projectId: snapshot.projectId, userId: input.userId, graph: graphContextEnabled() });
+  /* Independent of FF_GRAPH: an explicit reference is resolved whenever the caller may read the project. */
+  const rendered = await resolveClaimTexts(ids, { projectId: snapshot.projectId, userId: input.userId });
   const measure = (entry: ContextFragment): ContextFragment => {
     const content = renderClaims(entry.content, rendered, locale);
     return { ...entry, content, tokens: counter.count(content) };

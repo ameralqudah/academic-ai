@@ -87,7 +87,7 @@ PR #1 merged as `0d7225b`; migration 0018 applied on the Render deploy `dep-davt
 1. **Token counting.** The `TokenCounter` interface from PR #1, with the existing conservative deterministic estimate (`estimateCounter`) for every provider. No external tokenizer packages yet; the interface stays provider-neutral, so an exact counter can be registered later without changing the assembler.
 2. **Turn order.** Chronological. The assembler never reorders turns by relevance or authority; over budget it keeps the newest turns and drops the oldest.
 3. **Project snapshot.** Always present with `FF_CONTEXT_V2=true`; member-scoped project data only; legacy creator-only records are no authorization shortcut. With `FF_GRAPH=false` it carries the non-graph summary only; graph-derived content needs both flags.
-4. **Claim rendering.** `{{claim:id}}` resolved before assembly; readable claim text, or the visible marker `[unresolved claim]`; nothing reconstructed; no raw token reaches a model.
+4. **Claim rendering.** `{{claim:id}}` resolved before assembly; readable claim text, or the visible marker `[unresolved claim]`; nothing reconstructed; no raw token reaches a model. **Revised in review:** resolution does not depend on `FF_GRAPH`. With `FF_CONTEXT_V2=true`, a referenced claim resolves whenever it belongs to the same project, is current and verified, and the caller is a member of that project; `FF_GRAPH` controls graph-derived context only (the snapshot's graph section, the focus-graph slice). With `FF_CONTEXT_V2=false`, v1 is unchanged.
 5. **Scope.** Assembler core, chronological turns, snapshot, claim rendering, TokenCounter integration and `FF_CONTEXT_V2` gating only. No graph context, thread summaries, memories or UI.
 6. **Flags.** `FF_CONTEXT_V2`, `FF_GRAPH` and `FF_RUNS` stay `false`; no production configuration change.
 
@@ -100,7 +100,7 @@ With `FF_CONTEXT_V2` off (the default) `buildContextPrompt` runs the v1 builder 
 | Turns (`v2/turns.ts`) | Conversation turns are taken out of relevance scoring and authority sorting and kept as one block, ordered by time with ties in the order given. They are fitted newest first until the next older turn does not fit, then stop (no gap), and rendered oldest first under one heading; the number of dropped turns is recorded and stated. The conversation may take `TURN_SHARE` (half) of the room left after pinned fragments; what it does not use goes to the other fragments. |
 | Snapshot (`v2/snapshot.ts`) | Pinned, first, always present. Access is the project role (`requireProjectRole`, VIEWER and up, the rank the database policies use); the v1 creator-only project reader (`findOwned`) is replaced. Content: the project's fields, the caller's role, and the sections' keys and status (never their bodies). A non-member, or a project that does not exist, gets the same no-project snapshot. No graph content. |
 | Membership gate for other sources | Only a project the caller is a member of reaches the other collectors. A legacy record (an artifact, say) a non-member filed under the project is therefore not shown with it; a member's own legacy records still appear, and another person's do not (legacy stays creator-only, WS4 A2). |
-| Claims (`v2/claims.ts`) | Every `{{claim:id}}` in the snapshot, the fragments, the turns and the request is rendered before anything is measured: a claim that passes the export checks (`claimTraceability`: this project, current, verified) becomes its stored text, anything else `[unresolved claim]` (Arabic `[ادعاء غير محلول]`). Claims are read only when `FF_CONTEXT_V2` and `FF_GRAPH` are both on; with the graph off every reference is the marker. The finished prompt is scrubbed once more for any claim-shaped token (spacing and case variants). |
+| Claims (`v2/claims.ts`) | Every `{{claim:id}}` in the snapshot, the fragments, the turns and the request is rendered before anything is measured: a claim that passes the export checks (`claimTraceability`: this project, current, verified) becomes its stored text, anything else `[unresolved claim]` (Arabic `[ادعاء غير محلول]`). Resolution needs `FF_CONTEXT_V2` and membership of the project, and is independent of `FF_GRAPH`: an explicitly referenced claim is a direct lookup, not graph-derived context. With no project, or one the caller is not a member of, every reference is the marker. The finished prompt is scrubbed once more for any claim-shaped token (spacing and case variants). |
 | Budget | Every fragment and turn is measured by the `TokenCounter` (the caller's, or the provider's, defaulting to the estimate). |
 | Model calls | The rendered request is returned with the prompt. The general answer uses it for the message (`contextRequest` from the chat route, or its own build), and with V2 on scrubs the system prompt, history and message of every general answer; the diagram extractor does the same. |
 
@@ -108,14 +108,14 @@ Files: `server/context/v2/{assembler,turns,snapshot,claims}.ts`, `server/context
 
 ### Tests
 
-`test:context:db` (new, in CI): 48/0. It covers:
+`test:context:db` (new, in CI): 63/0. It covers:
 
 - **Turn order:** chronological whatever order turns arrive in; relevance scores (and a request matching only the newest turn) do not move them; ties keep their order; one block, not split by authority.
 - **Budget:** over budget the oldest turns are dropped and the newest kept, in order, with no gap; the drop is recorded and stated; a budget too small for anything still carries the snapshot.
 - **TokenCounter:** the same turns and budget fit all or none depending on the counter; the envelope's used tokens are the counter's.
 - **Snapshot:** present, first and pinned, with or without a project; fields and section keys, never section bodies; a VIEWER member (not the creator) gets it; a non-member gets exactly what a missing project gets; a removed member loses it at once; the v1 creator-only project reader is not used.
 - **Legacy records:** a non-member's own artifact filed under the project is not shown with it (v1 did show it); a member sees their own legacy records and not another person's.
-- **Claims:** a valid reference renders as the claim's text; unverified, another project's and missing claims become the marker, with neither their text nor their ids shown; loosely spelled tokens are caught; Arabic marker; with `FF_GRAPH` off every reference is the marker; a non-member's reference is the marker; no raw token in the context or in what the scripted model receives (system, message, history and material), and the chat route hands on the rendered message.
+- **Claims, across the flag matrix:** with `FF_CONTEXT_V2=true` and `FF_GRAPH` both off and on, a valid, current, verified claim of the project resolves to its text (for the owner and for a VIEWER member), while an unverified, another project's, a missing and a non-current claim each become the marker, with neither their text nor their ids shown; a non-member, or a request with no project, gets the marker; the snapshot carries no graph-derived content; with `FF_CONTEXT_V2=false` v1 is unchanged. Loosely spelled tokens are caught; Arabic marker; no raw token in the context or in what the scripted model receives (system, message, history and material), and the chat route hands on the rendered message.
 - **V2 off:** the v1 envelope and prompt, unchanged (no snapshot, no turn block, claim references as before, the general answer's message as before).
 
 ### Regression (on this branch, base `0d7225b`)
@@ -124,7 +124,7 @@ All green: typecheck, lint, `git diff --check`, production audit (0 vulnerabilit
 
 ### Mutation testing
 
-Nineteen mutations of the critical guards, each run against `test:context:db`; all nineteen were killed.
+Twenty-four mutations of the critical guards, each run against `test:context:db` (re-run after the claim-resolution revision). Twenty-two were killed; the two survivors are equivalent mutants, each stopped by a second layer that the suite then proves (R2b).
 
 | # | Mutation | Result |
 |---|---|---|
@@ -137,7 +137,6 @@ Nineteen mutations of the critical guards, each run against `test:context:db`; a
 | A3 | the snapshot left out of the envelope | killed (the suite stops: no snapshot to read) |
 | A4 | a non-member's project reaches the other collectors | killed (1) |
 | A5 | the creator-only v1 project reader kept | killed (1) |
-| A6 | claims resolved with the graph off | killed (1) |
 | A7 | the final claim scrub removed | killed (2) |
 | A8 | rendering ignores the resolved claims | killed (5) |
 | A9 | the request returned raw | killed (4) |
@@ -147,10 +146,16 @@ Nineteen mutations of the critical guards, each run against `test:context:db`; a
 | G2 | V2 used with the flag off | killed (3) |
 | I1 | the general answer's scrub removed | killed (1) |
 | I2 | the general answer ignores the rendered request | killed (1) |
+| R1 | claim resolution gated on `FF_GRAPH` again | killed (3) |
+| R2 | claims resolved for the named project with the assembler's membership check ignored | survived: equivalent — `claimTraceability` reads currency through `graph.assess`, which requires the VIEWER role, so a non-member still gets the marker |
+| R2b | membership ignored in both layers (the assembler and `graph.assess`) | killed (2) |
+| R3 | currency and verification ignored (both the context check and the trace's) | killed (6) |
+| R4 | claims looked up across projects | killed (8) |
+| R5 | claims resolved with no project | survived: equivalent — with no project id the claim lookup matches no node |
 
 ## Remaining decisions (later PRs)
 
-- **Graph context (PR #3).** Which graph reads build the snapshot's graph section and the focus-graph slice, behind both flags. Whether claim text, now resolved only with the graph on, also renders for a section when the graph is off.
+- **Graph context (PR #3).** Which graph reads build the snapshot's graph section and the focus-graph slice, behind both flags.
 - **Exact token counters.** Whether and when to register an exact offline counter per provider (bundle size, licence).
 - **Summary refresh.** Cadence, model, and metering through the gateway with an idempotency key per version.
 - **Memory API, UI and proposal flow.** Routes and limits, the "What Academic AI remembers" page, and when an agent may propose.

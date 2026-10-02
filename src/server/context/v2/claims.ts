@@ -13,12 +13,14 @@
  * - anything else becomes the visible marker `[unresolved claim]`. Nothing is
  *   reconstructed, and the raw token is never kept.
  *
- * Claims live in the Research Graph, so they are resolved only when graph
- * context is on (`FF_CONTEXT_V2` and `FF_GRAPH`); with the graph off every
- * reference is the marker. After assembly the whole prompt is scrubbed once
- * more (`scrubClaimTokens`), so a reference that arrived inside a claim's own
- * text, or in a spelling the strict pattern does not match, still never
- * reaches a model.
+ * Resolution needs only Context V2 and a project the caller may read (the
+ * snapshot's membership check); it does not depend on `FF_GRAPH`. An
+ * explicitly referenced claim is a direct lookup, not graph-derived context,
+ * which stays behind `FF_GRAPH` (the snapshot's graph section, the focus-graph
+ * slice). After assembly the whole prompt is scrubbed once more
+ * (`scrubClaimTokens`), so a reference that arrived inside a claim's own text,
+ * or in a spelling the strict pattern does not match, still never reaches a
+ * model.
  */
 
 import { logger } from '@/lib/logger';
@@ -42,15 +44,16 @@ export function claimIdsAcross(texts: readonly string[]): string[] {
 }
 
 /**
- * The stored text of each referenced claim that resolves, by id. Empty when
- * graph context is off, when there is no project, or when the lookup fails —
- * every reference then renders as the marker, which is the safe outcome.
+ * The stored text of each referenced claim that resolves, by id. `projectId`
+ * is a project the caller is a member of (null otherwise). Empty when there is
+ * none or when the lookup fails — every reference then renders as the marker,
+ * which is the safe outcome.
  */
 export async function resolveClaimTexts(
   ids: readonly string[],
-  scope: { projectId: string | null; userId: string; graph: boolean },
+  scope: { projectId: string | null; userId: string },
 ): Promise<Map<string, string>> {
-  if (!scope.graph || !scope.projectId || ids.length === 0) return new Map();
+  if (!scope.projectId || ids.length === 0) return new Map();
   try {
     const traces = await claimTraceability(scope.projectId, scope.userId, ids);
     return new Map(traces.flatMap((trace) => (trace.status === 'current' && trace.text ? [[trace.id, trace.text] as const] : [])));

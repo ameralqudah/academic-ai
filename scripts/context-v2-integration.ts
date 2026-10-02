@@ -141,12 +141,32 @@ async function main() {
   check('no raw {{claim:…}} is left in the context', [hasClaimToken(built.prompt), built.prompt.includes('{{claim')], [false, false]);
   check('the request is rendered the same way, for the message the model reads', built.request, 'Explain Earlier studies report the same direction. again.');
 
-  setFlags({ v2: true, graph: false });
-  const graphOff = await buildContextV2({ purpose: 'answer', request: `Explain {{claim:${literature.id}}}.`, userId: owner, conversationId: conversation.id, projectId: project.id, locale: 'en', counter: perChar, maxTokens: 20_000 });
-  check('with FF_GRAPH off no claim is read from the graph: every reference is the marker', [graphOff.prompt.includes('Earlier studies report'), graphOff.prompt.includes(`what does ${UNRESOLVED_CLAIM_MARKER.en} mean?`), graphOff.request, hasClaimToken(graphOff.prompt)], [false, true, `Explain ${UNRESOLVED_CLAIM_MARKER.en}.`, false]);
+
+  /* The flag matrix (P1-E review): claim resolution depends on FF_CONTEXT_V2 and membership, never on FF_GRAPH. */
+  const superseded = await graph.createNode(project.id, me, { type: 'claim', data: { text: 'A claim that was later replaced.' } });
+  await db.update(graphNodes).set({ status: 'superseded' }).where(eq(graphNodes.id, superseded.id));
+  const matrixRequest = [literature.id, untraced.id, theirs.id, missing, superseded.id].map((id) => `{{claim:${id}}}`).join(' | ');
+  const resolvedRequest = ['Earlier studies report the same direction.', ...Array(4).fill(UNRESOLVED_CLAIM_MARKER.en)].join(' | ');
+  for (const graphOn of [false, true]) {
+    setFlags({ v2: true, graph: graphOn });
+    const label = `FF_CONTEXT_V2=true, FF_GRAPH=${graphOn}`;
+    const asOwner = await buildContextV2({ purpose: 'answer', request: matrixRequest, userId: owner, conversationId: conversation.id, projectId: project.id, locale: 'en', counter: perChar, maxTokens: 20_000 });
+    check(`${label}: a valid, current, verified claim of the project resolves to its readable text`, [asOwner.request.startsWith('Earlier studies report the same direction.'), asOwner.prompt.includes('what does Earlier studies report the same direction. mean?')], [true, true]);
+    check(`${label}: an unverified, another project’s, a missing and a non-current claim each become the marker`, asOwner.request, resolvedRequest);
+    check(`${label}: … nothing is reconstructed for them (neither their text nor their ids)`, [asOwner.prompt + asOwner.request].map((text) => [text.includes('b = 0.42'), text.includes('Another project'), text.includes('later replaced'), text.includes(untraced.id), text.includes(missing), text.includes(superseded.id)])[0], [false, false, false, false, false, false]);
+    check(`${label}: no raw {{claim:…}} in the context or the request`, [hasClaimToken(asOwner.prompt), hasClaimToken(asOwner.request)], [false, false]);
+    const asMember = await buildContextV2({ purpose: 'answer', request: `Explain {{claim:${literature.id}}}.`, userId: viewer, projectId: project.id, locale: 'en', counter: perChar });
+    check(`${label}: an authorized member who is not the creator (VIEWER) gets the claim’s text`, asMember.request, 'Explain Earlier studies report the same direction..');
+    const asOutsider = await buildContextV2({ purpose: 'answer', request: `Explain {{claim:${literature.id}}}.`, userId: stranger, projectId: project.id, locale: 'en', counter: perChar });
+    check(`${label}: an unauthorized caller (not a member) gets the marker, and nothing about the claim`, [asOutsider.request, asOutsider.prompt.includes('Earlier studies')], [`Explain ${UNRESOLVED_CLAIM_MARKER.en}.`, false]);
+    const noProject = await buildContextV2({ purpose: 'answer', request: `Explain {{claim:${literature.id}}}.`, userId: owner, locale: 'en', counter: perChar });
+    check(`${label}: with no project named, even the owner’s claim is the marker (it is resolved only within its project)`, noProject.request, `Explain ${UNRESOLVED_CLAIM_MARKER.en}.`);
+    check(`${label}: the snapshot carries no graph-derived content in this PR`, /graph|claim/i.test(asOwner.envelope.fragments[0]!.content), false);
+  }
+  setFlags({ v2: false, graph: true });
+  const v1Claims = await buildContextPrompt({ purpose: 'answer', request: matrixRequest, userId: owner, conversationId: conversation.id, projectId: project.id, locale: 'en' });
+  check('FF_CONTEXT_V2=false: v1 behaviour, unchanged (no rendered request; references left as v1 left them)', [v1Claims.request, v1Claims.prompt.includes(`{{claim:${literature.id}}}`)], [undefined, true]);
   setFlags({ v2: true, graph: true });
-  const outsider = await buildContextV2({ purpose: 'answer', request: `Explain {{claim:${literature.id}}}.`, userId: stranger, projectId: project.id, locale: 'en', counter: perChar });
-  check('a non-member’s reference to the project’s claim is the marker (nothing about it is revealed)', [outsider.request, outsider.prompt.includes('Earlier studies')], [`Explain ${UNRESOLVED_CLAIM_MARKER.en}.`, false]);
 
   /* ------------------------------------------------------------------ */
   console.log('\nturn order and budgeting in the assembled context');

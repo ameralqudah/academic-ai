@@ -307,7 +307,7 @@ async function main() {
     check('… and words estimated from the output tokens (the text was never seen)', wordRow?.amount, Math.round(40 * RECOVERED_WORDS_PER_TOKEN));
     const again = await settleExpired();
     const late = await commit({ reservation: held!, countsAsRequest: true, outputText: 'one two three four', projectId: null, provider: 'google', model: 'x', tokensIn: 1, tokensOut: 1, costMicroUsd: 1 });
-    check('sweeping again, or the call’s own late commit, never charges twice', [(await ledger(d)).requests, (await db.select().from(usageTracking).where(eq(usageTracking.userId, d))).length, late], [1, 2, false]);
+    check('sweeping again, or the call’s own late commit, never charges twice', [again.recovered, (await ledger(d)).requests, (await db.select().from(usageTracking).where(eq(usageTracking.userId, d))).length, late], [0, 1, 2, false]);
 
     /* An attempt that consumed tokens but failed: charged its tokens and cost, never a request or words (as the call's own settlement would). */
     const f = await user('g2-failed');

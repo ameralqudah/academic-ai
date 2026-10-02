@@ -16,11 +16,16 @@
  *    needs only `FF_CONTEXT_V2` and project membership, not `FF_GRAPH`.
  * 4. **Budgets are measured by a `TokenCounter`** (`../token-count.ts`), the
  *    conservative offline estimate until an exact counter is registered.
+ * 5. **Graph context (PR #3), only with `FF_CONTEXT_V2` and `FF_GRAPH` both
+ *    on** and only for a project the caller is a member of
+ *    (`graph-context.ts`): a graph section appended to the snapshot, and a
+ *    bounded focus-graph slice as an ordinary project-data fragment (it is
+ *    budgeted like any other). With either flag off, nothing is read from
+ *    the graph except an explicitly referenced claim (rule 3).
  *
  * Everything else — the collectors, relevance, deduplication and the
  * authority headings for the non-conversation fragments — is v1's, unchanged.
- * No graph context is added here: graph-derived content is a later PR and
- * needs `FF_CONTEXT_V2` and `FF_GRAPH` both on. Nothing here calls a model.
+ * Nothing here calls a model.
  */
 
 import { logger } from '@/lib/logger';
@@ -29,10 +34,12 @@ import { BUDGETS } from '../budgets';
 import { renderEnvelope, type ContextEnvelope, type ContextFragment } from '../envelope';
 import type { BuildContextInput } from '../manager';
 import { deduplicate, fitToBudget, scoreRelevance } from '../select';
+import { graphContextEnabled } from '../flags';
 import { collectFragments } from '../sources';
 import { estimateCounter, tokenCounterFor, type TokenCounter, type TokenProvider } from '../token-count';
 
 import { claimIdsAcross, renderClaims, resolveClaimTexts, scrubClaimTokens } from './claims';
+import { focusSlice, graphSummary } from './graph-context';
 import { projectSnapshot } from './snapshot';
 import { fitTurns } from './turns';
 
@@ -48,6 +55,8 @@ export interface BuildContextV2Input extends BuildContextInput {
   tokenProvider?: TokenProvider;
   /** Overrides the counter (tests, or a caller that already has one). */
   counter?: TokenCounter;
+  /** Graph nodes the caller is focused on, for the focus-graph slice (graph context only). */
+  focusNodeIds?: string[];
 }
 
 export interface ContextV2 {
@@ -89,8 +98,20 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
   const collected = await collectFragments({ ...input, projectId: snapshot.projectId }, new Set(['project']));
   const all = [...collected, ...(input.additional ?? [])];
 
+  /*
+   * Graph-derived context (PR #3): only with FF_CONTEXT_V2 and FF_GRAPH both
+   * on, and only for a project the caller is a member of. Built before the
+   * claim pass, so the claims it names are rendered by the same rules.
+   */
+  let snapshotBase = snapshot.fragment;
+  if (graphContextEnabled() && snapshot.projectId) {
+    const graphed = await graphContext(snapshot.projectId, input, all);
+    if (graphed.summary.length > 0) snapshotBase = { ...snapshotBase, content: `${snapshotBase.content}\n${graphed.summary.join('\n')}` };
+    if (graphed.slice) all.push(graphed.slice);
+  }
+
   /* Claim references, rendered before anything is measured or assembled. */
-  const ids = claimIdsAcross([snapshot.fragment.content, input.request, ...all.map((entry) => entry.content)]);
+  const ids = claimIdsAcross([snapshotBase.content, input.request, ...all.map((entry) => entry.content)]);
   /* Independent of FF_GRAPH: an explicit reference is resolved whenever the caller may read the project. */
   const rendered = await resolveClaimTexts(ids, { projectId: snapshot.projectId, userId: input.userId });
   const measure = (entry: ContextFragment): ContextFragment => {
@@ -98,7 +119,7 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
     return { ...entry, content, tokens: counter.count(content) };
   };
 
-  const snapshotFragment = measure(snapshot.fragment);
+  const snapshotFragment = measure(snapshotBase);
   const turns = all.filter((entry) => entry.kind === 'conversation').map(measure);
   const others = all.filter((entry) => entry.kind !== 'conversation').map(measure);
 
@@ -148,6 +169,38 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
   });
 
   return { prompt, envelope, request: renderClaims(input.request, rendered, locale) };
+}
+
+export const FOCUS_SLICE_ID = 'graph-focus-slice';
+
+/** The snapshot's graph section and the focus-graph slice. A failing read costs only its own part. */
+async function graphContext(projectId: string, input: BuildContextV2Input, fragments: readonly ContextFragment[]) {
+  const referenced = claimIdsAcross([input.request, ...fragments.map((entry) => entry.content)]);
+  const [summary, slice] = await Promise.all([
+    graphSummary(projectId, input.userId).catch((error: unknown) => {
+      logger.warn('context.graphSummaryFailed', { error: String(error).slice(0, 200) });
+      return [] as string[];
+    }),
+    focusSlice(projectId, input.userId, { focusIds: [...(input.focusNodeIds ?? []), ...referenced], request: input.request }).catch((error: unknown) => {
+      logger.warn('context.focusSliceFailed', { error: String(error).slice(0, 200) });
+      return null;
+    }),
+  ]);
+  return {
+    summary,
+    slice: slice?.content
+      ? ({
+          id: FOCUS_SLICE_ID,
+          kind: 'project',
+          authority: 'project-data',
+          content: slice.content,
+          provenance: { source: 'graph.focus', id: projectId },
+          relevance: 0.8,
+          pinned: false,
+          tokens: 0,
+        } satisfies ContextFragment)
+      : null,
+  };
 }
 
 /**

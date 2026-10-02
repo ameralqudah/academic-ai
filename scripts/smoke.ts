@@ -5293,11 +5293,13 @@ console.log('\nwhat a model costs');
 
   const offenders: string[] = [];
   for (const file of files) {
-    if (file.endsWith('conversations.repository.ts')) continue;
     const text = await readFile(file, 'utf8');
     if (/\.listMessages\(/.test(text)) offenders.push(file);
   }
   check('no module reads conversation messages without the owner', offenders, []);
+  /* P1-E PR #1: the unscoped reader itself is gone, not only its callers. */
+  const repository = await readFile('src/server/repositories/conversations.repository.ts', 'utf8');
+  check('the unscoped message reader no longer exists', /export async function listMessages\(/.test(repository), false);
 
   const route = await readFile('src/app/api/chat/route.ts', 'utf8');
   check('the chat route refuses a conversation that is not the caller\'s', route.includes('await requireOwned(body.conversationId, user.id)'), true);

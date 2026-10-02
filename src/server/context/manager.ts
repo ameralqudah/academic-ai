@@ -21,24 +21,11 @@ import {
   type ContextFragment,
   type ContextPurpose,
 } from './envelope';
+import { BUDGETS } from './budgets';
+import { contextV2Enabled } from './flags';
 import { deduplicate, fitToBudget, scoreRelevance } from './select';
 import { collectFragments, type SourceScope } from './sources';
-
-/**
- * How much room each kind of call gets.
- *
- * A routing decision needs almost nothing and is made on every message, so it
- * is cheap by design. A verification pass needs the claim and every source
- * behind it. Giving them the same budget means either the router is expensive
- * or the verifier is starved.
- */
-const BUDGETS: Record<ContextPurpose, number> = {
-  route: 800,
-  plan: 3000,
-  execute: 4000,
-  answer: 5000,
-  verify: 6000,
-};
+import { buildContextV2 } from './v2/assembler';
 
 export interface BuildContextInput extends SourceScope {
   purpose: ContextPurpose;
@@ -128,7 +115,16 @@ export async function buildContext(input: BuildContextInput): Promise<ContextEnv
  */
 export async function buildContextPrompt(
   input: BuildContextInput & { locale?: 'ar' | 'en' },
-): Promise<{ prompt: string; envelope: ContextEnvelope }> {
+): Promise<{ prompt: string; envelope: ContextEnvelope; request?: string }> {
+  /*
+   * P1-E: with `FF_CONTEXT_V2` on, the Context V2 assembler builds it instead
+   * (chronological turns, the project snapshot, rendered claim references).
+   * With it off — the default — nothing below changes. `request` is then the
+   * request with its claim references rendered, for the message the model
+   * reads; absent in v1.
+   */
+  if (contextV2Enabled()) return buildContextV2(input);
+
   const envelope = await buildContext(input);
 
   return {

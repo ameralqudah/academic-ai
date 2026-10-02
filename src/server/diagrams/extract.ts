@@ -13,7 +13,9 @@ import { z } from 'zod';
 import { gateway, GatewayError, toAppError } from '@/server/ai/gateway';
 import { requirementsFor } from '@/server/ai/model-router';
 import { currentPreferredModel } from '@/server/ai/request-scope';
+import { contextV2Enabled } from '@/server/context/flags';
 import { buildContextPrompt } from '@/server/context/manager';
+import { scrubClaimTokens } from '@/server/context/v2/claims';
 import { logger } from '@/lib/logger';
 
 import { parseSpec, type DiagramKind, type DiagramSpec } from './spec';
@@ -54,18 +56,20 @@ export async function extractDiagramSpec(input: {
   taskId?: string | null;
 }): Promise<{ spec: DiagramSpec } | { missing: 'constructs' | 'paths' }> {
   let context = '';
+  /* Context V2 (P1-E): the request with its claim references rendered. */
+  let request = input.request;
 
   try {
-    context = (
-      await buildContextPrompt({
-        purpose: 'answer',
-        request: input.request,
-        userId: input.userId,
-        conversationId: input.conversationId ?? null,
-        taskId: input.taskId ?? null,
-        locale: input.language,
-      })
-    ).prompt;
+    const built = await buildContextPrompt({
+      purpose: 'answer',
+      request: input.request,
+      userId: input.userId,
+      conversationId: input.conversationId ?? null,
+      taskId: input.taskId ?? null,
+      locale: input.language,
+    });
+    context = built.prompt;
+    request = built.request ?? request;
   } catch (error) {
     logger.warn('diagram.contextFailed', { error: String(error).slice(0, 200) });
   }
@@ -82,7 +86,7 @@ export async function extractDiagramSpec(input: {
       {
         purpose: 'diagram.extract',
         system: [extractionPrompt(input.kind, input.language), context].filter(Boolean).join('\n\n'),
-        messages: [{ role: 'user', content: input.request }],
+        messages: [{ role: 'user', content: contextV2Enabled() ? scrubClaimTokens(request, input.language) : request }],
         maxOutputTokens: 2000,
         temperature: 0,
         needsReasoning: requirements.needsReasoning,

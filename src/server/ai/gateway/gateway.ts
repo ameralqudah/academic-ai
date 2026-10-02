@@ -77,7 +77,7 @@ export interface GatewayDeps {
   checkProject(projectId: string, userId: string): Promise<void>;
   quota: {
     reserve(input: ReserveInput): Promise<Reservation>;
-    commit(input: import('./quota').CommitInput): Promise<void>;
+    commit(input: import('./quota').CommitInput): Promise<unknown>;
     release(reservation: Reservation): Promise<void>;
   };
   meter: Meter;
@@ -132,6 +132,10 @@ interface AttemptLog {
 }
 
 type Target = { provider: Provider; model: string; modelClass: ModelClass };
+
+/** WS4 G2: tries at settling a reservation before it is left to the reaper, and the pause between them. */
+export const SETTLE_ATTEMPTS = 3;
+const SETTLE_BACKOFF_MS = 200;
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimated: false };
 
@@ -304,16 +308,24 @@ export function createGateway(deps: GatewayDeps) {
       });
   }
 
-  /** Settles the reservation from what actually happened. */
+  /**
+   * Settles the reservation from what actually happened.
+   *
+   * WS4 G2: a failed settlement is retried, and never thrown at the caller (a
+   * delivered answer stays delivered). If every try fails, the reservation is
+   * left `reserved`: it stops counting at expiry, and the reaper then commits
+   * it from this call's durable usage rows (`quota.settleExpired`) — so usage
+   * that reached a provider is never released unbilled.
+   */
   async function settle(prepared: Prepared, logs: AttemptLog[], result: { text: string; target: Target } | null, countsAsRequest: boolean) {
     const usage = sumUsage(logs);
     const consumed = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens > 0;
-    try {
+    const target = result?.target ?? prepared.decision.chosen;
+    const once = async () => {
       if (!result && !consumed) {
         await deps.quota.release(prepared.reservation);
         return;
       }
-      const target = result?.target ?? prepared.decision.chosen;
       await deps.quota.commit({
         reservation: prepared.reservation,
         countsAsRequest: Boolean(result) && countsAsRequest,
@@ -325,8 +337,23 @@ export function createGateway(deps: GatewayDeps) {
         tokensOut: usage.outputTokens,
         costMicroUsd: logs.reduce((sum, log) => sum + log.cost, 0),
       });
-    } catch (error) {
-      logger.error('ai.gateway.settleFailed', { callId: prepared.callId, error: String(error).slice(0, 200) });
+    };
+    for (let attempt = 1; attempt <= SETTLE_ATTEMPTS; attempt += 1) {
+      try {
+        await once();
+        return;
+      } catch (error) {
+        const final = attempt === SETTLE_ATTEMPTS;
+        logger[final ? 'error' : 'warn']('ai.gateway.settleFailed', {
+          callId: prepared.callId,
+          reservationId: prepared.reservation.id,
+          attempt,
+          /* Left for the reaper, which commits it from the usage rows once it expires. */
+          recoverable: final,
+          error: String(error).slice(0, 200),
+        });
+        if (!final) await deps.clock.sleep(SETTLE_BACKOFF_MS * attempt).catch(() => undefined);
+      }
     }
   }
 
@@ -655,20 +682,41 @@ export function createGateway(deps: GatewayDeps) {
     if (!provider) throw new GatewayError('not_configured', 'No embedding provider is configured.');
     const adapter = adapters[provider]!;
     const model = request.requested?.model ?? adapter.embeddingModel!;
+    let plan: PlanInfo;
+    try {
+      plan = await deps.plan(scope.userId);
+    } catch (error) {
+      throw new GatewayError('internal', 'The plan could not be resolved; the call is refused.', { detail: String(error) });
+    }
     const decision: RoutingDecision = {
-      tier: (await deps.plan(scope.userId)).tier,
+      tier: plan.tier,
       requested: request.requested ?? null,
       chosen: { provider, model, modelClass: modelClass(provider, model) },
       fallbacks: [],
       reason: 'embedding',
     };
+    const callId = randomUUID();
+    /*
+     * WS4 G6: a real reservation, like every other call. An embedding is an
+     * internal step — no request, no words — so it reserves nothing against the
+     * plan but is refused once the plan is used up (the quota's rule for
+     * internal steps), and its tokens and cost are committed to the ledger.
+     */
+    const reservation = await deps.quota.reserve({
+      userId: scope.userId,
+      idempotencyKey: callId,
+      requests: 0,
+      words: 0,
+      limits: plan.limits,
+      unlimited: plan.unlimited,
+    });
     const prepared: Prepared = {
-      callId: randomUUID(),
+      callId,
       kind: 'embed',
       request: requestSchema.parse({ purpose: request.purpose, messages: [{ role: 'user', content: '(embedding)' }], countsAsRequest: false }),
       scope,
       decision,
-      reservation: { id: '', userId: scope.userId, periodKey: '', requests: 0, words: 0, status: 'committed' },
+      reservation,
       startedAt: deps.clock.now(),
     };
     const logs: AttemptLog[] = [];
@@ -679,12 +727,22 @@ export function createGateway(deps: GatewayDeps) {
         const out = await adapter.embed!({ inputs: request.inputs, model, signal: signalFor(timeout, options.signal) });
         const usage = out.usage.estimated ? { ...out.usage, inputTokens: request.inputs.reduce((sum, text) => sum + estimateTokens(text), 0) } : out.usage;
         await record(prepared, attempt, decision.chosen, { status: 'succeeded', usage, latencyMs: deps.clock.now() - started }, logs);
+        await settle(prepared, logs, { text: '', target: decision.chosen }, false);
         return { callId: prepared.callId, vectors: out.vectors, provider, model: out.model, usage };
       } catch (thrown) {
         const error = reclassify(decision.chosen, thrown, options.signal);
         await record(prepared, attempt, decision.chosen, { status: error.errorClass === 'cancelled' ? 'cancelled' : 'failed', usage: ZERO_USAGE, errorClass: error.errorClass, latencyMs: deps.clock.now() - started }, logs);
-        if (!shouldRetry(error, attempt)) throw error;
-        await deps.clock.sleep(backoffMs(attempt + 1, error, deps.clock), options.signal);
+        if (!shouldRetry(error, attempt)) {
+          await settle(prepared, logs, null, false);
+          throw error;
+        }
+        try {
+          await deps.clock.sleep(backoffMs(attempt + 1, error, deps.clock), options.signal);
+        } catch (cancelled) {
+          /* Cancelled while waiting to retry: settled like any other ending. */
+          await settle(prepared, logs, null, false);
+          throw cancelled;
+        }
       }
     }
   }

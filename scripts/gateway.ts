@@ -543,6 +543,51 @@ async function main() {
     const r = await createGateway(h.deps).embed({ purpose: 'retrieval', inputs: ['a', 'b'] });
     check('embeddings are returned and metered', [r.vectors.length, h.meter[0]?.kind, h.meter[0]?.status], [2, 'embed', 'succeeded']);
   }
+  {
+    const o = new FakeAdapter('openai');
+    const h = harness({ openai: o }, { models: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai' });
+    const r = await createGateway(h.deps).embed({ purpose: 'retrieval', inputs: ['a', 'b'] });
+    const [held] = h.reservations;
+    check(
+      'WS4 G6: an embedding reserves as an internal step (no request, no words), under its call id',
+      [h.reservations.length, held?.idempotencyKey === r.callId, held?.requests, held?.words],
+      [1, true, 0, 0],
+    );
+    check('… its usage row names that reservation, and it is committed with its tokens, never as a request', [h.meter[0]?.reservationId === held?.id, held?.status, held?.committed?.countsAsRequest, held?.committed?.tokensIn], [true, 'committed', false, 3]);
+  }
+  {
+    const o = new FakeAdapter('openai');
+    const h = harness({ openai: o }, { models: [{ provider: 'openai', model: 'gpt-4.1' }], defaultProvider: 'openai' });
+    h.deps.quota.reserve = async () => {
+      throw new GatewayError('quota', 'used up');
+    };
+    check('… and a refused reservation stops it before the provider', [await errorClass(() => createGateway(h.deps).embed({ purpose: 'retrieval', inputs: ['a'] })), h.meter.length], ['quota', 0]);
+  }
+
+  /* ========================= settlement (WS4 G2) ========================= */
+  console.log('\nSettlement retries');
+  {
+    const settleWith = async (failures: number) => {
+      const g = new FakeAdapter('google');
+      const h = harness({ google: g });
+      const commit = h.deps.quota.commit;
+      let left = failures;
+      let tries = 0;
+      h.deps.quota.commit = async (input) => {
+        tries += 1;
+        if (left > 0) {
+          left -= 1;
+          throw new Error('database unavailable');
+        }
+        return commit(input);
+      };
+      const outcome = await createGateway(h.deps).generate(ask()).then((r) => r.text, (error: unknown) => `threw: ${String(error)}`);
+      return { outcome, tries, status: h.reservations[0]?.status, sleeps: h.sleeps };
+    };
+    check('a commit that fails twice is retried until it lands', await settleWith(2), { outcome: 'ok', tries: 3, status: 'committed', sleeps: [200, 400] });
+    check('a commit that keeps failing is tried three times, the answer still delivered, the reservation left for the reaper', await settleWith(99), { outcome: 'ok', tries: 3, status: 'reserved', sleeps: [200, 400] });
+    check('a commit that works is tried once, with no pause', await settleWith(0), { outcome: 'ok', tries: 1, status: 'committed', sleeps: [] });
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

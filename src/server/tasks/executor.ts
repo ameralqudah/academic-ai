@@ -39,7 +39,7 @@ import {
   type ProducerContext,
 } from './contracts';
 import { blockedSteps, readySteps } from './planner';
-import { runForUser, type PreferredModel } from '@/server/ai/request-scope';
+import { runForUser, withCallIds, type PreferredModel } from '@/server/ai/request-scope';
 
 /**
  * What a capability handler receives and returns.
@@ -253,10 +253,14 @@ export async function runTask(taskId: string, options: RunOptions = {}): Promise
   /*
    * Scoped to the task's owner. A task runs outside any request, so without
    * this the router could not tell a paying researcher's task from anyone's.
+   *
+   * WS4 G1: with the task's ids as well. `runForUser` starts a fresh scope, so
+   * the ids `executeTask` set around planning were dropped here, and every
+   * step's model call was metered with no task (and no project).
    */
   return runForUser(
     owner.userId,
-    () => runTaskScoped(taskId, options),
+    () => withCallIds({ taskId, projectId: owner.projectId ?? null }, () => runTaskScoped(taskId, options)),
     (owner.context.chosenModel as PreferredModel | undefined) ?? null,
   );
 }
@@ -763,7 +767,11 @@ async function executeStep(
   watch.unref?.();
 
   try {
-    const running = handler({
+    /*
+     * WS4 G1: every model call the step makes is metered against the step, as
+     * well as the task the surrounding scope already names (`executeTask`).
+     */
+    const running = withCallIds({ stepId: step.id }, () => handler({
       taskId: task.id,
       stepId: step.id,
       userId: task.userId,
@@ -774,7 +782,7 @@ async function executeStep(
       dependencies,
       context: task.context,
       signal: controller.signal,
-    });
+    }));
     running.catch(() => undefined);
 
     const raced = await Promise.race([running.then((raw) => ({ raw })), stopped]);

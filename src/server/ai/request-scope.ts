@@ -28,7 +28,10 @@ export interface CallIds {
   taskId?: string | null;
   jobId?: string | null;
   runId?: string | null;
-  /** P1-D: the research-run step, recorded with the run on every call and tool call. */
+  /**
+   * The step: of a research run (P1-D, with `runId`) or of a task (WS4 G1,
+   * with `taskId`), recorded on every call and tool call.
+   */
   stepId?: string | null;
 }
 

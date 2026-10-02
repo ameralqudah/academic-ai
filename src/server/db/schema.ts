@@ -1477,7 +1477,7 @@ export const aiUsageEvents = pgTable(
     taskId: text('task_id'),
     jobId: text('job_id'),
     runId: text('run_id'),
-    /** P1-D: the research-run step this call belongs to. */
+    /** The step this call belongs to: a research-run step (P1-D, with `run_id`) or a task step (WS4 G1, with `task_id`). */
     stepId: text('step_id'),
     purpose: varchar('purpose', { length: 64 }).notNull(),
     /** generate | stream | structured | tools | embed */

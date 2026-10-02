@@ -26,14 +26,18 @@ import { count, eq } from 'drizzle-orm';
 
 import { resetEnvCache } from '@/config/env';
 import { db } from '@/server/db';
-import { agentTasks, aiConversations, analysisJobs, analysisRuns, artifacts, projectMembers, taskSteps, tasks } from '@/server/db/schema';
+import { agentTasks, aiConversations, aiUsageEvents, analysisJobs, analysisRuns, artifacts, projectMembers, taskSteps, tasks } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import * as conversationsRepo from '@/server/repositories/conversations.repository';
 import * as projectsRepo from '@/server/repositories/projects.repository';
 import * as tasksRepo from '@/server/repositories/tasks.repository';
 import { register } from '@/server/services/account.service';
-import { answerTask, cancelTask, retryTask, startTask } from '@/server/services/task.service';
+import { answerTask, cancelTask, executeTask, retryTask, startTask } from '@/server/services/task.service';
 import { runAgent } from '@/agents/orchestrator';
+import { gateway, productionDeps, setGatewayForTests } from '@/server/ai/gateway';
+import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
+import { createGateway } from '@/server/ai/gateway/gateway';
+import { runForUser, withCallIds } from '@/server/ai/request-scope';
 import { storeArtifact } from '@/server/services/artifact.service';
 import { startConversation } from '@/server/services/chat.service';
 import { analyseDataRequest } from '@/server/services/data-analysis.service';
@@ -86,6 +90,7 @@ const TEST_CAPABILITIES: CapabilityDefinition[] = [
   { id: 'test.hang' as never, labelKey: 'x', timeoutMs: 400, estimatedModelCalls: 0, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: true },
   { id: 'test.once' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 0, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: true },
   { id: 'test.flaky' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 0, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: true },
+  { id: 'test.model' as never, labelKey: 'x', timeoutMs: 30_000, estimatedModelCalls: 1, retryable: false, maxAttempts: 1, requiresDataset: false, parallelSafe: false },
 ];
 
 async function main() {
@@ -113,6 +118,10 @@ async function main() {
   });
   registerHandler('test.once' as never, async (context) => {
     executions.push(`once:${context.stepId}`);
+    return succeeded([]);
+  });
+  registerHandler('test.model' as never, async (context) => {
+    await gateway().generate({ purpose: 'chat', messages: [{ role: 'user', content: `step ${context.stepId}` }] });
     return succeeded([]);
   });
   let flakyCalls = 0;
@@ -246,6 +255,38 @@ async function main() {
     check('… nor to someone else’s conversation', await outcome(() => startTask({ userId: owner, request: 'x', locale: 'en', conversationId: conversation.id })), 'NOT_FOUND');
     const before = (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length;
     check('and nothing was created', (await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.userId, owner))).length, before);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G1: a task step’s model calls are metered against the step');
+  {
+    setGatewayForTests(
+      createGateway({
+        ...productionDeps,
+        adapters: () => ({ google: new FakeAdapter('google') }),
+        models: async () => ({ configured: [{ provider: 'google', model: 'gemini-2.5-pro' }], defaultProvider: 'google', siblings: {} }),
+      }),
+    );
+    try {
+      const task = await makeTask(['test.model', 'test.model']);
+      await executeTask(task.id);
+      const steps = await tasksRepo.stepsOf(task.id);
+      const rows = await db.select().from(aiUsageEvents).where(eq(aiUsageEvents.taskId, task.id));
+      check('the task ran its two model steps', [(await tasksRepo.findAny(task.id))?.status, rows.length], ['COMPLETED', 2]);
+      check('each call names its own step, as well as the task', rows.map((row) => row.stepId).sort(), steps.map((step) => step.id).sort());
+      check('… and is a task call, not a research-run call', rows.map((row) => [row.runId, row.userId === owner]), [[null, true], [null, true]]);
+      await runForUser(owner, () => withCallIds({ taskId: task.id }, () => gateway().generate({ purpose: 'chat', messages: [{ role: 'user', content: 'between steps' }] })));
+      const outside = (await db.select().from(aiUsageEvents).where(eq(aiUsageEvents.taskId, task.id))).find((row) => !steps.some((step) => step.id === row.stepId));
+      check('a call in the task but outside any step names no step (the step id does not leak into the task scope)', [Boolean(outside), outside?.stepId ?? null], [true, null]);
+      const filed = await projectsRepo.create({ userId: owner, title: 'WS4 G1', academicField: 'x', degree: 'MASTER', researchType: 'QUANTITATIVE' });
+      const projectTask = await makeTask(['test.model'], { projectId: filed.id });
+      await executeTask(projectTask.id);
+      const [projectRow] = await db.select().from(aiUsageEvents).where(eq(aiUsageEvents.taskId, projectTask.id));
+      const [projectStep] = await tasksRepo.stepsOf(projectTask.id);
+      check('… and a step of a project’s task is metered against the project too', [projectRow?.projectId, projectRow?.stepId], [filed.id, projectStep?.id]);
+    } finally {
+      setGatewayForTests(null);
+    }
   }
 
   /* ------------------------------------------------------------------ */

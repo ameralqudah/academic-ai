@@ -24,7 +24,7 @@ import { forgetPlan, productionDeps, recordToolExecution, setGatewayForTests } f
 import { FakeAdapter } from '@/server/ai/gateway/adapters/fake';
 import { GatewayError, toAppError } from '@/server/ai/gateway/errors';
 import { createGateway, type GatewayDeps } from '@/server/ai/gateway/gateway';
-import { releaseExpired, reserve } from '@/server/ai/gateway/quota';
+import { commit, RECOVERED_WORDS_PER_TOKEN, reserve, settleExpired } from '@/server/ai/gateway/quota';
 import { defineTool } from '@/server/ai/gateway/tools';
 import { requirementsFor, selectModel } from '@/server/ai/model-router';
 import { runForUser, withCallIds } from '@/server/ai/request-scope';
@@ -225,9 +225,10 @@ async function main() {
 
     const u = await user('idem');
     await runForUser(u, () => gw.generate(ask('a', { idempotencyKey: 'task-1:step-2' })));
-    await runForUser(u, () => gw.generate(ask('a', { idempotencyKey: 'task-1:step-2' })));
+    const again = await runForUser(u, () => outcome(() => gw.generate(ask('a', { idempotencyKey: 'task-1:step-2' }))));
     const reservations = await db.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.userId, u));
     check('a retried step with the same key reserves and counts once', [reservations.length, (await ledger(u)).requests], [1, 1]);
+    check('WS4 G8: … and once its call has completed and been charged, the key is refused, before any provider is called', [again, (await events(u)).length], ['gateway:invalid_request', 1]);
 
     const w = await user('words');
     await db.insert(usageTracking).values({ userId: w, periodKey: period, metric: 'GENERATED_WORD', amount: 5000 });
@@ -236,9 +237,120 @@ async function main() {
     const x = await user('expiry');
     await db.insert(aiQuotaReservations).values({ userId: x, periodKey: period, idempotencyKey: 'crashed-worker', requests: 20, words: 0, expiresAt: new Date(Date.now() - 1000) });
     check('a reservation left by a crashed worker stops counting at expiry', await runForUser(x, () => outcome(() => gw.generate(ask('x')))), 'ok');
-    const released = await releaseExpired();
+    const swept = await settleExpired();
     const [stale] = await db.select().from(aiQuotaReservations).where(and(eq(aiQuotaReservations.userId, x), eq(aiQuotaReservations.idempotencyKey, 'crashed-worker')));
-    check('and the reaper settles it', [released >= 1, stale?.status], [true, 'released']);
+    check('and the reaper settles it: released, since it never reached a provider', [swept.released >= 1, stale?.status], [true, 'released']);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G8. An idempotency key never buys an uncharged call');
+  {
+    const period = periodKeyFor();
+    const u = await user('g8');
+    const keyed = (key: string) => runForUser(u, () => outcome(() => gw.generate(ask('k', { idempotencyKey: key }))));
+    check('a fresh key runs and is charged', [await keyed('g8-a'), (await ledger(u)).requests], ['ok', 1]);
+    check('the same key after completion is refused, and nothing more is charged or sent', [await keyed('g8-a'), (await ledger(u)).requests, (await events(u)).length], ['gateway:invalid_request', 1, 1]);
+    check('… however often it is asked', [await keyed('g8-a'), await keyed('g8-a'), (await ledger(u)).requests, (await events(u)).length], ['gateway:invalid_request', 'gateway:invalid_request', 1, 1]);
+    await db.insert(aiQuotaReservations).values({ userId: u, periodKey: period, idempotencyKey: 'g8-inflight', requests: 1, words: 0, expiresAt: new Date(Date.now() + 60_000) });
+    const [shared] = await db.select().from(aiQuotaReservations).where(and(eq(aiQuotaReservations.userId, u), eq(aiQuotaReservations.idempotencyKey, 'g8-inflight')));
+    check('a key still reserved (a retry of unfinished work) shares that reservation, and is charged once when it completes', [await keyed('g8-inflight'), (await ledger(u)).requests, (await db.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.id, shared!.id)))[0]?.status], ['ok', 2, 'committed']);
+    await db.insert(aiQuotaReservations).values({ userId: u, periodKey: period, idempotencyKey: 'g8-released', requests: 1, words: 0, status: 'released', expiresAt: new Date(Date.now() - 60_000), settledAt: new Date() });
+    check('a released key (it consumed nothing) is reserved afresh and charged', [await keyed('g8-released'), (await ledger(u)).requests], ['ok', 3]);
+    check('the refusal is the plan-neutral invalid_request, not a quota error, and names the cause', await runForUser(u, () => gw.generate(ask('k', { idempotencyKey: 'g8-a' })).catch((error: GatewayError) => [error.errorClass, error.detail])), ['invalid_request', 'idempotency_key_committed']);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G2. A failed settlement is retried, and never leaves provider usage unbilled');
+  {
+    const sleeps: number[] = [];
+    const flaky = (failures: number) => {
+      let left = failures;
+      const tries: number[] = [];
+      const gateway = createGateway({
+        ...deps,
+        clock: { ...deps.clock, sleep: async (ms: number) => void sleeps.push(ms) },
+        quota: {
+          ...deps.quota,
+          commit: async (input) => {
+            tries.push(1);
+            if (left > 0) {
+              left -= 1;
+              throw new Error('database unavailable');
+            }
+            return deps.quota.commit(input);
+          },
+        },
+      });
+      return { gateway, tries };
+    };
+    const reservationsOf = (userId: string) => db.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.userId, userId));
+
+    const t = await user('g2-transient');
+    const transient = flaky(1);
+    check('a settlement that fails once is retried: the answer is delivered and charged at once', [await runForUser(t, () => outcome(() => transient.gateway.generate(ask('x')))), transient.tries.length, (await ledger(t)).requests, (await reservationsOf(t))[0]?.status], ['ok', 2, 1, 'committed']);
+
+    const d = await user('g2-down');
+    const down = flaky(99);
+    gemini.push({ reply: { text: 'one two three four', usage: { inputTokens: 120, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0, estimated: false } } });
+    const answer = await runForUser(d, () => outcome(() => down.gateway.generate(ask('x'))));
+    const [held] = await reservationsOf(d);
+    check('a settlement that keeps failing is tried three times, never fails the delivered answer, and leaves the reservation for the reaper', [answer, down.tries.length, (await ledger(d)).requests, held?.status], ['ok', 3, 0, 'reserved']);
+    await db.update(aiQuotaReservations).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(aiQuotaReservations.id, held!.id));
+    const usageRows = await events(d);
+    const swept = await settleExpired();
+    const [settled] = await reservationsOf(d);
+    const ledgerRows = await db.select().from(usageTracking).where(eq(usageTracking.userId, d));
+    const requestRow = ledgerRows.find((row) => row.metric === 'AI_REQUEST');
+    const wordRow = ledgerRows.find((row) => row.metric === 'GENERATED_WORD');
+    check('at expiry the reaper commits it from the usage rows instead of releasing it', [swept.recovered >= 1, settled?.status], [true, 'committed']);
+    check('… charging the request, the tokens and the cost the provider reported', [requestRow?.amount, requestRow?.tokensIn, requestRow?.tokensOut, requestRow?.costMicroUsd, requestRow?.provider], [1, usageRows[0]?.inputTokens, usageRows[0]?.outputTokens, usageRows.reduce((s, r) => s + r.costMicroUsd, 0), usageRows[0]?.provider]);
+    check('… and words estimated from the output tokens (the text was never seen)', wordRow?.amount, Math.round(40 * RECOVERED_WORDS_PER_TOKEN));
+    const again = await settleExpired();
+    const late = await commit({ reservation: held!, countsAsRequest: true, outputText: 'one two three four', projectId: null, provider: 'google', model: 'x', tokensIn: 1, tokensOut: 1, costMicroUsd: 1 });
+    check('sweeping again, or the call’s own late commit, never charges twice', [again.recovered, (await ledger(d)).requests, (await db.select().from(usageTracking).where(eq(usageTracking.userId, d))).length, late], [0, 1, 2, false]);
+
+    /* An attempt that consumed tokens but failed: charged its tokens and cost, never a request or words (as the call's own settlement would). */
+    const f = await user('g2-failed');
+    const [orphan] = await db.insert(aiQuotaReservations).values({ userId: f, periodKey: periodKeyFor(), idempotencyKey: 'g2-orphan', requests: 1, words: 0, expiresAt: new Date(Date.now() - 1000) }).returning();
+    const routing = { tier: 'free', requested: null, chosen: { provider: 'google', model: 'gemini-2.5-pro', modelClass: 'standard' }, fallbacks: [], reason: 'test' };
+    await db.insert(aiUsageEvents).values([
+      { callId: 'g2-orphan-call', attempt: 1, userId: f, purpose: 'chat', kind: 'stream', provider: 'google', model: 'gemini-2.5-pro', modelClass: 'standard', status: 'failed', errorClass: 'network', inputTokens: 90, outputTokens: 30, totalTokens: 120, costMicroUsd: 77, reservationId: orphan!.id, routing },
+      { callId: 'g2-orphan-call', attempt: 2, userId: f, purpose: 'chat', kind: 'stream', provider: 'google', model: 'gemini-2.5-pro', modelClass: 'standard', status: 'failed', errorClass: 'network', inputTokens: 0, outputTokens: 0, totalTokens: 0, costMicroUsd: 0, reservationId: orphan!.id, routing },
+    ]);
+    await settleExpired();
+    const failedRows = await db.select().from(usageTracking).where(eq(usageTracking.userId, f));
+    check('a consumed but failed call is committed with its tokens and cost, and no request or words', [(await reservationsOf(f))[0]?.status, failedRows.map((r) => [r.metric, r.amount, r.tokensIn, r.tokensOut, r.costMicroUsd])], ['committed', [['AI_REQUEST', 0, 90, 30, 77]]]);
+
+    const n = await user('g2-nothing');
+    const [unused] = await db.insert(aiQuotaReservations).values({ userId: n, periodKey: periodKeyFor(), idempotencyKey: 'g2-nothing', requests: 1, words: 0, expiresAt: new Date(Date.now() - 1000) }).returning();
+    await db.insert(aiUsageEvents).values({ callId: 'g2-nothing-call', attempt: 1, userId: n, purpose: 'chat', kind: 'generate', provider: 'google', model: 'gemini-2.5-pro', modelClass: 'standard', status: 'failed', errorClass: 'auth', reservationId: unused!.id, routing });
+    await settleExpired();
+    check('a call that reached no usage is released, as before, and nothing is charged', [(await reservationsOf(n))[0]?.status, (await db.select().from(usageTracking).where(eq(usageTracking.userId, n))).length], ['released', 0]);
+  }
+
+  /* ------------------------------------------------------------------ */
+  console.log('\nWS4 G6. Embeddings reserve, are refused on a used-up plan, and are committed');
+  {
+    const e = await user('g6');
+    const out = await runForUser(e, () => gw.embed({ purpose: 'memory', inputs: ['alpha', 'beta'] }));
+    const [row] = (await events(e)).filter((r) => r.kind === 'embed');
+    const [held] = await db.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.userId, e));
+    const ledgerRows = await db.select().from(usageTracking).where(eq(usageTracking.userId, e));
+    check('an embedding takes a real reservation, which its usage row names', [Boolean(out.callId), held?.idempotencyKey === out.callId, row?.reservationId === held?.id, held?.status], [true, true, true, 'committed']);
+    check('… committed as an internal step: its tokens and cost, but no request and no words', ledgerRows.map((r) => [r.metric, r.amount, r.tokensIn]), [['AI_REQUEST', 0, 3]]);
+    check('… so it does not use up the plan', (await ledger(e)).requests, 0);
+
+    const full = await user('g6-full');
+    await db.insert(usageTracking).values({ userId: full, periodKey: periodKeyFor(), metric: 'AI_REQUEST', amount: 20 });
+    check('on a used-up plan an embedding is refused before the provider is called', [await runForUser(full, () => outcome(() => gw.embed({ purpose: 'memory', inputs: ['alpha'] }))), (await events(full)).length], ['gateway:quota', 0]);
+
+    const broken = new FakeAdapter('google');
+    broken.embed = async () => {
+      throw new GatewayError('invalid_request', 'rejected');
+    };
+    const failing = createGateway({ ...deps, adapters: () => ({ anthropic: claude, google: broken }) });
+    const b = await user('g6-broken');
+    check('a failed embedding is released, and charges nothing', [await runForUser(b, () => outcome(() => failing.embed({ purpose: 'memory', inputs: ['alpha'] }))), (await db.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.userId, b)))[0]?.status, (await db.select().from(usageTracking).where(eq(usageTracking.userId, b))).length], ['gateway:invalid_request', 'released', 0]);
   }
 
   /* ------------------------------------------------------------------ */

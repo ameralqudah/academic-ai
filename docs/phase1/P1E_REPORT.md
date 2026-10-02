@@ -153,9 +153,58 @@ Twenty-four mutations of the critical guards, each run against `test:context:db`
 | R4 | claims looked up across projects | killed (8) |
 | R5 | claims resolved with no project | survived: equivalent — with no project id the claim lookup matches no node |
 
+## PR #3 — Graph context
+
+PR #2 merged as `2f9efdb` (Render deploy `dep-davugeoae00c73e1jh0g` live; no migration). PR #3 adds the graph-derived context, in `server/context/v2/graph-context.ts`, called by the assembler only when **`FF_CONTEXT_V2` and `FF_GRAPH` are both on** (`graphContextEnabled()`) **and** the caller is a member of the project (the snapshot's `projectId`). With either flag off, or for a non-member, nothing is read from the graph for context, except an explicitly referenced claim (PR #2's rule, independent of `FF_GRAPH`).
+
+| Part | Design |
+|---|---|
+| Snapshot graph section (`graphSummary`) | Appended to the pinned snapshot: live node counts by type (superseded nodes not counted), the research questions and hypotheses by label (five each, then "+N more"), and the number of open review marks. Labels only, truncated at 120 characters; no payload (definitions, statements, claim text, values). |
+| Focus-graph slice (`focusSlice`) | The one-step neighbourhood (both directions) of the focus nodes. Focus: the nodes a caller names (`focusNodeIds`) and the claims the request and the collected context reference; when none resolve, the research questions, hypotheses, constructs, variables and objectives whose labels share words (four letters or more) with the request. Bounded: at most `MAX_FOCUS` (4) focus nodes, `MAX_SLICE_NODES` (12) nodes and `MAX_SLICE_EDGES` (20) edges; superseded neighbours left out. Rendered as `- [type] label —rel→ [type] label` lines. An ordinary, unpinned `project-data` fragment, budgeted like any other, so turn order and the budget rules of PR #2 are unchanged. |
+| Authorization | Every read goes through the graph service (`listNodes`, `listStale`, `trace`), which requires the VIEWER role and reads that project only: a second, independent layer behind the assembler's membership gate. A focus node of another project, or one that does not exist, is skipped and says nothing. No legacy creator-only record is read. |
+| Claims | A claim node in the slice is written as its `{{claim:id}}` reference and then rendered by PR #2's claim pass: a current, verified claim of the project as its text, anything else `[unresolved claim]`; never raw, never reconstructed. |
+| Failures | A failing graph read costs only its own part (logged); the snapshot and the rest of the context are built as usual. |
+
+No migration, no new dependency, no change to storage or production configuration.
+
+### Regression (on this branch, base `2f9efdb`)
+
+All green: typecheck, lint, `git diff --check`, production audit (0 vulnerabilities), smoke, gateway 93, stats 361, runs 116, analysis 1329, knowledge, migrate and seed on a fresh database, integration 958, jobs 22, tasks 122, runs-db 221, graph 195, gateway-db 57, stats-db 172, memory-db 53, context-db 63, graphctx-db 31, `drizzle-kit generate` (no schema changes), build, and end-to-end 71/71 under four flag combinations (`FF_CONTEXT_V2`/`FF_GRAPH`/`FF_RUNS`): off/off/off, off/on/on, on/off/off, on/on/off.
+
+### Tests
+
+`test:graphctx:db` (new, in CI): 31/0. `test:context:db` stays 63/0; its snapshot check now expects the graph section exactly when `FF_GRAPH` is on.
+
+- **Flag matrix:** both off, and `FF_GRAPH` alone, run v1 with no graph-derived data; Context V2 on with `FF_GRAPH` off has no graph section and no slice even with a focus node named, while an explicitly referenced claim still resolves; both on carries the section and the slice.
+- **Snapshot section:** live counts by type (the superseded construct not counted); research questions and hypotheses by label; no payload of any node (definitions, statements, direction, claim text, values); nothing of another project; still the pinned snapshot.
+- **Slice boundaries:** one step around a named focus node, nothing two steps away; superseded neighbours left out; lexical focus when none is named, no slice when nothing matches; at most 12 nodes out of 19 and at most 4 focus nodes.
+- **Membership and isolation:** a VIEWER member gets both; a non-member gets neither and no graph label at all, even naming a focus node; a removed member loses graph context at once; a focus node of another project is skipped, and this project's nodes never appear in the other's context; a missing focus id yields no slice and no error.
+- **Claims:** a current, verified claim in the slice shows as its text, an unverified one as the marker with its numbers never shown; no raw `{{claim:…}}` or claim id in the prompt; a claim referenced in the request is a focus node.
+- **Unchanged budget rules:** turns stay one chronological block; the slice is unpinned, measured by the counter, and dropped before the snapshot when room runs out.
+
+### Mutation testing (PR #3)
+
+Thirteen mutations of the authorization, flag and boundary guards, each run against `test:graphctx:db`: eleven killed; the two survivors are equivalent mutants, each layer of authorization holding on its own (F2b, removing both, is killed). F12 first survived (the payload check covered only unlisted nodes); the check was extended and F12 is now killed.
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 | graph context without `FF_GRAPH` | killed (1) |
+| F2 | the assembler's membership gate removed | survived: equivalent — the graph service still requires the VIEWER role |
+| F2b | membership removed in both layers | killed (2) |
+| F3 | the graph service's authorization removed | survived: equivalent — the assembler's membership gate still holds |
+| F4 | the slice two steps deep | killed (1) |
+| F5 | the slice's node cap removed | killed (1) |
+| F6 | the focus cap removed | killed (1) |
+| F7 | superseded neighbours kept in the slice | killed (1) |
+| F8 | superseded nodes counted in the summary | killed (1) |
+| F9 | a claim's stored text written into the slice | killed (1) |
+| F10 | the slice pinned (never dropped by the budget) | killed (2) |
+| F11 | an unmatched request still gets a slice | killed (1) |
+| F12 | the summary copies payloads | killed (1, after the check was extended) |
+
 ## Remaining decisions (later PRs)
 
-- **Graph context (PR #3).** Which graph reads build the snapshot's graph section and the focus-graph slice, behind both flags.
+- **Graph context, later.** A relevance-ranked (rather than lexical) focus choice, and an API or UI for a caller to name focus nodes; today only the assembler's `focusNodeIds` input does.
 - **Exact token counters.** Whether and when to register an exact offline counter per provider (bundle size, licence).
 - **Summary refresh.** Cadence, model, and metering through the gateway with an idempotency key per version.
 - **Memory API, UI and proposal flow.** Routes and limits, the "What Academic AI remembers" page, and when an agent may propose.

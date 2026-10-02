@@ -103,6 +103,8 @@ jobs:
         run: npm run test:memory:db
       - name: Context Assembler V2 suite (P1-E)
         run: npm run test:context:db
+      - name: Context V2 graph context suite (P1-E)
+        run: npm run test:graphctx:db
 
   build-and-e2e:
     name: Production build and browser tests

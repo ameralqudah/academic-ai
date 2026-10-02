@@ -161,7 +161,7 @@ async function main() {
     check(`${label}: an unauthorized caller (not a member) gets the marker, and nothing about the claim`, [asOutsider.request, asOutsider.prompt.includes('Earlier studies')], [`Explain ${UNRESOLVED_CLAIM_MARKER.en}.`, false]);
     const noProject = await buildContextV2({ purpose: 'answer', request: `Explain {{claim:${literature.id}}}.`, userId: owner, locale: 'en', counter: perChar });
     check(`${label}: with no project named, even the owner’s claim is the marker (it is resolved only within its project)`, noProject.request, `Explain ${UNRESOLVED_CLAIM_MARKER.en}.`);
-    check(`${label}: the snapshot carries no graph-derived content in this PR`, /graph|claim/i.test(asOwner.envelope.fragments[0]!.content), false);
+    check(`${label}: the snapshot carries graph-derived content only with FF_GRAPH on (PR #3)`, asOwner.envelope.fragments[0]!.content.includes('Research graph:'), graphOn);
   }
   setFlags({ v2: false, graph: true });
   const v1Claims = await buildContextPrompt({ purpose: 'answer', request: matrixRequest, userId: owner, conversationId: conversation.id, projectId: project.id, locale: 'en' });

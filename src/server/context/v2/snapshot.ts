@@ -13,10 +13,10 @@
  * used, and no legacy creator-only record (datasets, analysis runs, tasks,
  * artifacts) is read here or stands in for membership.
  *
- * **No graph content.** The snapshot is built from v1 project data only: the
- * project's fields and its sections' keys and status (never their bodies).
- * Graph-derived content is a later PR and needs `FF_CONTEXT_V2` and
- * `FF_GRAPH` both on.
+ * **No graph content here.** The snapshot is built from v1 project data only:
+ * the project's fields and its sections' keys and status (never their
+ * bodies). Its graph section is appended by the assembler, only with
+ * `FF_CONTEXT_V2` and `FF_GRAPH` both on (`graph-context.ts`).
  */
 
 import { eq } from 'drizzle-orm';

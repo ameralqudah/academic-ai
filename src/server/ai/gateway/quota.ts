@@ -13,14 +13,21 @@
  *   again with the same key returns the same reservation, so a retried job step
  *   does not reserve twice.
  * - **Crash-safe.** An unsettled reservation stops counting at `expires_at`
- *   and is released by the reaper.
+ *   and is settled by the reaper: committed from the call's durable usage
+ *   rows when the provider was reached, released when it was not (WS4 G2).
+ * - **Completed work is not redone for free (WS4 G8).** A key whose
+ *   reservation is already committed names finished work: asking again is
+ *   refused before any provider is contacted, rather than sharing the settled
+ *   reservation (whose commit would then be a no-op, leaving the new call
+ *   unbilled). A key still `reserved` is a retry of unfinished work and shares
+ *   it, as before; a `released` key consumed nothing and is reserved afresh.
  */
 
 import { and, eq, gt, lt, sql } from 'drizzle-orm';
 
 import { countWords } from '@/lib/text';
 import { db } from '@/server/db';
-import { aiQuotaReservations, usageTracking } from '@/server/db/schema';
+import { aiQuotaReservations, aiUsageEvents, usageTracking } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
 import { periodKeyFor } from '@/server/repositories/usage.repository';
 
@@ -95,6 +102,11 @@ export async function reserve(input: ReserveInput): Promise<Reservation> {
       .from(aiQuotaReservations)
       .where(and(eq(aiQuotaReservations.userId, input.userId), eq(aiQuotaReservations.idempotencyKey, input.idempotencyKey)))
       .limit(1);
+    if (existing?.status === 'committed') {
+      throw new GatewayError('invalid_request', 'This idempotency key belongs to a call that has already completed and been charged; the call is refused.', {
+        detail: 'idempotency_key_committed',
+      });
+    }
     if (existing && existing.status !== 'released') return existing;
 
     const used = await inUse(tx, input.userId, periodKey);
@@ -150,18 +162,21 @@ export interface CommitInput {
   tokensIn: number;
   tokensOut: number;
   costMicroUsd: number;
+  /** Generated words, when the text itself is not at hand (reaper recovery); otherwise counted from `outputText`. */
+  words?: number;
 }
 
 /**
  * Writes the actual usage to the ledger and settles the reservation, in one
  * transaction under the same lock, so no reader ever sees both or neither.
- * Committing an already-settled reservation is a no-op (idempotent).
+ * Committing an already-settled reservation is a no-op (idempotent); the
+ * result says whether this call wrote the ledger.
  */
-export async function commit(input: CommitInput): Promise<void> {
-  await db.transaction(async (tx) => {
+export async function commit(input: CommitInput): Promise<boolean> {
+  return db.transaction(async (tx) => {
     await lockUser(tx, input.reservation.userId);
     const [current] = await tx.select().from(aiQuotaReservations).where(eq(aiQuotaReservations.id, input.reservation.id)).for('update');
-    if (!current || current.status === 'committed') return;
+    if (!current || current.status === 'committed') return false;
 
     const base = {
       userId: current.userId,
@@ -178,10 +193,11 @@ export async function commit(input: CommitInput): Promise<void> {
       tokensOut: input.tokensOut,
       costMicroUsd: input.costMicroUsd,
     });
-    const words = countWords(input.outputText);
+    const words = input.words ?? countWords(input.outputText);
     if (words > 0) await tx.insert(usageTracking).values({ ...base, metric: 'GENERATED_WORD', amount: words });
 
     await tx.update(aiQuotaReservations).set({ status: 'committed', settledAt: new Date() }).where(eq(aiQuotaReservations.id, current.id));
+    return true;
   });
 }
 
@@ -193,12 +209,62 @@ export async function release(reservation: Reservation): Promise<void> {
     .where(and(eq(aiQuotaReservations.id, reservation.id), eq(aiQuotaReservations.status, 'reserved')));
 }
 
-/** Reaper: reservations whose worker died stop counting at expiry; this settles them. */
-export async function releaseExpired(): Promise<number> {
-  const rows = await db
-    .update(aiQuotaReservations)
-    .set({ status: 'released', settledAt: new Date() })
+/** Words per output token, for a recovered call whose text was never seen (the ledger's estimate, not a count). */
+export const RECOVERED_WORDS_PER_TOKEN = 0.75;
+
+/**
+ * Reaper (WS4 G2): settles reservations that expired unsettled — the worker
+ * died, or the gateway's own commit failed after its retries.
+ *
+ * Every attempt's usage row is written before settlement and names its
+ * reservation, so a reservation whose call reached a provider is committed
+ * from those rows (tokens, cost, the project; a request when an attempt
+ * succeeded and the call counted as one; words estimated from the output
+ * tokens) instead of being released unbilled. One that consumed nothing is
+ * released, as before. `commit` is idempotent under the user lock, so a
+ * concurrent sweep, or a late commit by the call itself, never charges twice.
+ */
+export async function settleExpired(limit = 200): Promise<{ released: number; recovered: number }> {
+  const expired = await db
+    .select()
+    .from(aiQuotaReservations)
     .where(and(eq(aiQuotaReservations.status, 'reserved'), lt(aiQuotaReservations.expiresAt, sql`now()`)))
-    .returning({ id: aiQuotaReservations.id });
-  return rows.length;
+    .limit(limit);
+
+  let released = 0;
+  let recovered = 0;
+  for (const reservation of expired) {
+    const attempts = await db
+      .select()
+      .from(aiUsageEvents)
+      .where(eq(aiUsageEvents.reservationId, reservation.id))
+      .orderBy(aiUsageEvents.attempt);
+    const tokens = (row: (typeof attempts)[number]) => row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens;
+    const consumed = attempts.filter((row) => tokens(row) > 0);
+    if (consumed.length === 0) {
+      const rows = await db
+        .update(aiQuotaReservations)
+        .set({ status: 'released', settledAt: new Date() })
+        .where(and(eq(aiQuotaReservations.id, reservation.id), eq(aiQuotaReservations.status, 'reserved')))
+        .returning({ id: aiQuotaReservations.id });
+      released += rows.length;
+      continue;
+    }
+    const served = attempts.filter((row) => row.status === 'succeeded').at(-1);
+    const last = served ?? consumed.at(-1)!;
+    const wrote = await commit({
+      reservation,
+      countsAsRequest: Boolean(served) && reservation.requests > 0,
+      outputText: '',
+      words: served ? Math.round(served.outputTokens * RECOVERED_WORDS_PER_TOKEN) : 0,
+      projectId: attempts.find((row) => row.projectId)?.projectId ?? null,
+      provider: last.provider,
+      model: last.model,
+      tokensIn: consumed.reduce((sum, row) => sum + row.inputTokens + row.cacheReadTokens + row.cacheWriteTokens, 0),
+      tokensOut: consumed.reduce((sum, row) => sum + row.outputTokens, 0),
+      costMicroUsd: attempts.reduce((sum, row) => sum + row.costMicroUsd, 0),
+    });
+    if (wrote) recovered += 1;
+  }
+  return { released, recovered };
 }

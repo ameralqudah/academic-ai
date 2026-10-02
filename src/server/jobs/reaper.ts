@@ -111,15 +111,17 @@ export async function reap(): Promise<ReapResult> {
   }
 
   /*
-   * Model Gateway quota reservations left by a worker that died (P1-B). They
-   * already stopped counting at expiry; this settles them. Best effort: a
-   * failure here must not stop tasks and jobs being recovered.
+   * Model Gateway quota reservations left unsettled (P1-B): the worker died,
+   * or the gateway's own commit failed (WS4 G2). They already stopped counting
+   * at expiry; this settles them — committed from their usage rows when a
+   * provider was reached, released when not. Best effort: a failure here must
+   * not stop tasks and jobs being recovered.
    */
-  const reservationsReleased = await import('@/server/ai/gateway/quota')
-    .then(({ releaseExpired }) => releaseExpired())
+  const { released: reservationsReleased, recovered: reservationsRecovered } = await import('@/server/ai/gateway/quota')
+    .then(({ settleExpired }) => settleExpired())
     .catch((error: unknown) => {
       logger.warn('jobs.reservationSweepFailed', { error: String(error).slice(0, 200) });
-      return 0;
+      return { released: 0, recovered: 0 };
     });
 
   /* P1-C: statistics runs whose job failed, or whose inline process died, are settled (never left running). */
@@ -139,8 +141,8 @@ export async function reap(): Promise<ReapResult> {
     });
 
   const result = { tasksRequeued, jobsRequeued, jobsFailed };
-  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased + statRunsSettled + runsReaped > 0) {
-    logger.info('jobs.reaped', { ...result, reservationsReleased, statRunsSettled, runsReaped });
+  if (tasksRequeued + jobsRequeued + jobsFailed + reservationsReleased + reservationsRecovered + statRunsSettled + runsReaped > 0) {
+    logger.info('jobs.reaped', { ...result, reservationsReleased, reservationsRecovered, statRunsSettled, runsReaped });
   }
   return result;
 }

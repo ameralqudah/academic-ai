@@ -65,7 +65,9 @@ export type ContextKind =
   | 'tool-result'
   | 'artifact'
   | 'instruction'
-  | 'decision';
+  | 'decision'
+  /** Context V2 (P1-E): a conversation's rolling summary. */
+  | 'summary';
 
 /**
  * Why a context package is being built.
@@ -112,6 +114,8 @@ export interface ContextEnvelope {
    * Absent in v1, where turns are ordinary fragments.
    */
   turns?: ContextFragment[];
+  /** Context V2 (P1-E): the thread summary standing in for older turns, shown before `turns`. */
+  summary?: ContextFragment;
   budget: { maxTokens: number; usedTokens: number };
   /**
    * What did not fit, by kind and authority.

@@ -105,6 +105,8 @@ jobs:
         run: npm run test:context:db
       - name: Context V2 graph context suite (P1-E)
         run: npm run test:graphctx:db
+      - name: Thread summary suite (P1-E)
+        run: npm run test:summary:db
 
   build-and-e2e:
     name: Production build and browser tests

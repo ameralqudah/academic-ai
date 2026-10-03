@@ -649,6 +649,8 @@ async function prepareGeneralAnswer(input: GeneralAnswerInput) {
         userId: input.userId,
         projectId: input.projectId ?? null,
         locale: input.locale,
+        /* P1-E: the routed provider's counter measures the budget (Context V2; v1 ignores it). */
+        tokenProvider: provider.name,
         ...input.context,
       });
 

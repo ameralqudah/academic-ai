@@ -67,6 +67,8 @@ export async function extractDiagramSpec(input: {
       conversationId: input.conversationId ?? null,
       taskId: input.taskId ?? null,
       locale: input.language,
+      /* P1-E: the preferred provider's counter, when there is one (Context V2; v1 ignores it). */
+      ...(currentPreferredModel() ? { tokenProvider: currentPreferredModel()!.provider } : {}),
     });
     context = built.prompt;
     request = built.request ?? request;

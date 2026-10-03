@@ -22,6 +22,9 @@
  *    bounded focus-graph slice as an ordinary project-data fragment (it is
  *    budgeted like any other). With either flag off, nothing is read from
  *    the graph except an explicitly referenced claim (rule 3).
+ * 6. **The thread summary (PR #4)** stands in for dropped turns, before the
+ *    chronological block, never covering a turn that is shown
+ *    (`summary-context.ts`).
  *
  * Everything else — the collectors, relevance, deduplication and the
  * authority headings for the non-conversation fragments — is v1's, unchanged.
@@ -41,7 +44,7 @@ import { estimateCounter, tokenCounterFor, type TokenCounter, type TokenProvider
 import { claimIdsAcross, renderClaims, resolveClaimTexts, scrubClaimTokens } from './claims';
 import { focusSlice, graphSummary } from './graph-context';
 import { projectSnapshot } from './snapshot';
-import { fitTurns } from './turns';
+import { fitTurnsWithSummary, loadSummary } from './summary-context';
 
 /**
  * The share of the room left after pinned fragments that the conversation may
@@ -110,8 +113,11 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
     if (graphed.slice) all.push(graphed.slice);
   }
 
+  /* The thread summary (PR #4), loaded before the claim pass so its references are rendered too. */
+  const summary = await loadSummary(input.userId, input.conversationId, locale);
+
   /* Claim references, rendered before anything is measured or assembled. */
-  const ids = claimIdsAcross([snapshotBase.content, input.request, ...all.map((entry) => entry.content)]);
+  const ids = claimIdsAcross([snapshotBase.content, input.request, ...all.map((entry) => entry.content), ...(summary ? [summary.fragment.content] : [])]);
   /* Independent of FF_GRAPH: an explicit reference is resolved whenever the caller may read the project. */
   const rendered = await resolveClaimTexts(ids, { projectId: snapshot.projectId, userId: input.userId });
   const measure = (entry: ContextFragment): ContextFragment => {
@@ -127,7 +133,7 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
   const pinnedTokens = snapshotFragment.tokens + others.filter((entry) => entry.pinned).reduce((total, entry) => total + entry.tokens, 0);
   const room = Math.max(0, maxTokens - pinnedTokens);
 
-  const fittedTurns = fitTurns(turns, Math.floor(room * TURN_SHARE), counter);
+  const fittedTurns = fitTurnsWithSummary(turns, Math.floor(room * TURN_SHARE), counter, summary ? { ...summary, fragment: measure(summary.fragment) } : null);
 
   const scored = others.map((entry) => ({ ...entry, relevance: scoreRelevance(entry, input.request, { purpose: input.purpose }) }));
   const unique = deduplicate(scored);
@@ -147,6 +153,7 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
     purpose: input.purpose,
     fragments: [snapshotFragment, ...fitted.kept],
     turns: fittedTurns.kept,
+    ...(fittedTurns.summary ? { summary: fittedTurns.summary } : {}),
     budget: { maxTokens, usedTokens: snapshotFragment.tokens + fitted.usedTokens + fittedTurns.usedTokens },
     omitted,
   };
@@ -159,6 +166,7 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
     collected: all.length,
     turns: turns.length,
     turnsKept: fittedTurns.kept.length,
+    summary: fittedTurns.summary ? { covered: fittedTurns.covered } : null,
     kept: fitted.kept.length,
     claims: ids.length,
     claimsRendered: rendered.size,
@@ -216,8 +224,10 @@ export function renderContextV2(envelope: ContextEnvelope, locale: 'ar' | 'en', 
   if (groups) parts.push(groups);
 
   const turns = envelope.turns ?? [];
-  if (turns.length > 0 || droppedTurns > 0) {
+  if (turns.length > 0 || droppedTurns > 0 || envelope.summary) {
     parts.push(`## ${TURNS_HEADING[locale]}`);
+    /* Oldest first: what the summary covers, then turns that fit nowhere, then the turns shown. */
+    if (envelope.summary) parts.push(envelope.summary.content);
     if (droppedTurns > 0) parts.push(earlierTurns(droppedTurns, locale));
     for (const turn of turns) parts.push(turn.content);
   }

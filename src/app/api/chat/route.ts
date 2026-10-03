@@ -402,6 +402,8 @@ export const POST = withApi<Body>(
         projectId: body.projectId ?? null,
         datasetId,
         locale: requestLanguage,
+        /* P1-E: the chosen provider's counter, when the user chose one (Context V2; v1 ignores it). */
+        ...(chosenModel ? { tokenProvider: chosenModel.provider } : {}),
       });
 
       contextPrompt = built.prompt;

@@ -25,6 +25,7 @@ import { BUDGETS } from './budgets';
 import { contextV2Enabled } from './flags';
 import { deduplicate, fitToBudget, scoreRelevance } from './select';
 import { collectFragments, type SourceScope } from './sources';
+import type { TokenProvider } from './token-count';
 import { buildContextV2 } from './v2/assembler';
 
 export interface BuildContextInput extends SourceScope {
@@ -114,7 +115,7 @@ export async function buildContext(input: BuildContextInput): Promise<ContextEnv
  * keeps a draft from becoming evidence — in six places instead of one.
  */
 export async function buildContextPrompt(
-  input: BuildContextInput & { locale?: 'ar' | 'en' },
+  input: BuildContextInput & { locale?: 'ar' | 'en'; tokenProvider?: TokenProvider },
 ): Promise<{ prompt: string; envelope: ContextEnvelope; request?: string }> {
   /*
    * P1-E: with `FF_CONTEXT_V2` on, the Context V2 assembler builds it instead

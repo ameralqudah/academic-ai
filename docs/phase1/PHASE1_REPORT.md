@@ -11,6 +11,7 @@ Each step gets a section when it is merged.
 | P1-B Model Gateway | ✅ merged (`P1B_PLAN.md`, `P1B_REPORT.md`) | [#31](https://github.com/ameralqudah/academic-ai/pull/31) |
 | P1-C Deterministic statistics engine + graph integration (re-scoped) | ✅ merged (`P1C_PLAN.md`, `P1C_REPORT.md`); CI green on the merged head | [#32](https://github.com/ameralqudah/academic-ai/pull/32) |
 | P1-D Research run engine, tool registry, policy engine, approvals, RLS on run paths | ✅ merged (`P1D_PLAN.md`, `P1D_REPORT.md`, `P1D_NEON_VERIFICATION.md`); CI green on the merged head; **verification closed for security and deployment** (2026-09-24). `FF_RUNS` off; gate before enabling it: app-level `test:runs:db` on a Neon branch (postgres-js via the pooled host, PostgreSQL 18). *2026-10-01: gate met (WS3-C Gate 4, direct and pooled 214/0); `FF_RUNS` still off, see `WS3_REPORT.md`* | [#33](https://github.com/ameralqudah/academic-ai/pull/33) |
+| P1-E Context and memory | ✅ implemented and verified; closure pending the final PR's review (`P1E_REPORT.md`). Ready for development use; **not** yet for production flag enablement. `FF_CONTEXT_V2`, `FF_GRAPH` and `FF_RUNS` off in production | [#60](https://github.com/ameralqudah/academic-ai/pull/60)–[#64](https://github.com/ameralqudah/academic-ai/pull/64), and PR #6 (final batch) |
 
 ---
 
@@ -231,3 +232,13 @@ The canonical report is `WS3_REPORT.md`. WS3 is graph provenance plus `FF_RUNS` 
 - **WS3-C, readiness gates: closed 2026-10-01.** Gates 1–5 pass. Gate 4, the app-level `test:runs:db` on Neon, ran from the project owner's machine against the temporary branch `ws3c-gate4` with `main` at `fc9f4d7`: **direct 214 passed, 0 failed; pooled 214 passed, 0 failed.** The branch was deleted afterwards. The cloud session could not reach Neon and did not run it. No production database test was performed (`P1D_NEON_VERIFICATION.md` §7).
 - **WS3-D (N7 claim-to-section linking) and WS3-E (M2 full tracing):** not started, deferred pending a decision.
 - **Flags and migrations:** `FF_RUNS` and `FF_GRAPH` remain off. Enabling them is a separate decision. WS3 added no migration; the latest is still `0017_ws2_section_integrity.sql`.
+
+## P1-E Context and memory (status 2026-10-03)
+
+The canonical report is `P1E_REPORT.md` (closure section and readiness checklist at its end).
+
+- **Merged:** [#60](https://github.com/ameralqudah/academic-ai/pull/60) schema and security (`0d7225b`, migration `0018_p1e_memory.sql`); [#61](https://github.com/ameralqudah/academic-ai/pull/61) Context Assembler V2 core (`2f9efdb`); [#62](https://github.com/ameralqudah/academic-ai/pull/62) graph context (`2fb8a39`); [#63](https://github.com/ameralqudah/academic-ai/pull/63) thread summaries (`24d48af`); [#64](https://github.com/ameralqudah/academic-ai/pull/64) memories end to end (`10501b9`).
+- **Final batch (PR #6):** snapshot completeness (R7: integrity counts from stored records, untested hypotheses and the latest analysis run behind `FF_GRAPH`, no active dataset), the slice depth fixed at one hop (R8), and this closure (R14). Not merged at the time of writing.
+- **Deferred:** R10, retiring the legacy `src/ai/context/*` builder, to P1-F; R11, the thread focus node and project state endpoint, to later workspace work (P1-I or later); R12, the Project Brief. Intentionally excluded: the active dataset in the member-scoped snapshot (legacy datasets are creator-only) and a k=2 slice.
+- **Readiness:** ready for development use. Not yet for production flag enablement; the gates are listed in `P1E_REPORT.md`.
+- **Flags and storage:** `FF_CONTEXT_V2`, `FF_GRAPH` and `FF_RUNS` remain off in production. The production storage provider's status 540 ("Project paused") remains an external blocker for a future `FF_RUNS` enablement; P1-E does not touch storage. The latest migration is `0018_p1e_memory.sql`.

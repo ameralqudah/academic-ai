@@ -380,7 +380,157 @@ Typecheck, lint, `git diff --check` (worktree and against base), production audi
 - Over HTTP, the browser suite covers owner and stranger. The VIEWER, EDITOR, demoted and removed rows of the matrix are covered at the service and RLS layers (`test:memories:db`), which the routes call directly.
 - The capability is named `proposeMemory`, not `memory.propose`, because tool names may not contain dots.
 
-## Remaining decisions (later PRs)
+## PR #6 — Snapshot completeness, slice depth, closure (R7, R8, R14)
+
+PR #5 merged as `10501b9` (Render deploy `dep-db0csd8ae00c73eflcc0` live; no migration). PR #6 is the last P1-E implementation batch. No migration, no new dependency, no change to storage, `render.yaml`, environment or production configuration; `src/ai/context/*` is untouched.
+
+### R7 — Snapshot completeness
+
+| Part | Where | Design |
+|---|---|---|
+| Per-section integrity counts | `v2/snapshot.ts` (`FF_CONTEXT_V2`; no graph needed) | For each section, the counts the numeric guard **stored** with its latest saved version (`section_versions.integrity`, WS2 D2): `quarantined` (model text) and `manual`, shown as *untraced* (a person's research numbers that trace to no analysis). Rendered as `RESULTS (DRAFT; 2 quarantined numbers; 1 untraced number)`. Counts only, accepted only as non-negative integers: nothing is recomputed from the text, and no finding, number, source or section text is copied in. A version saved before the guard (no record) shows its status only. |
+| Untested hypotheses | `v2/graph-context.ts` (`FF_CONTEXT_V2` + `FF_GRAPH`) | Live hypotheses that no live result decides through a `tests` link, by label (at most five listed, the rest counted, in creation order): `Untested hypotheses (2 of 3): H2 …; H3 …`. A result that was superseded no longer counts as a test; a superseded hypothesis is not counted. The `tests` links are read by a new member-scoped graph read, `graph.testedHypothesisIds` (VIEWER and up, this project only, ids only). |
+| Latest analysis run | `v2/graph-context.ts` (`FF_CONTEXT_V2` + `FF_GRAPH`) | The most recently recorded live `analysis_run` node of the project's graph: its label, status, engine and date (`Latest analysis run: PLS run (succeeded; pls-sem; recorded 2026-09-20)`). Never its results, method, seed, engine version or hashes. Read from the graph only; the legacy, creator-only analysis-run and dataset tables are not read. |
+| Active dataset | — | **Not added.** Datasets are legacy creator-only records (WS4 A2), so the member-scoped snapshot does not name one; the legacy authorization is unchanged. |
+
+The snapshot's invariants are unchanged: always present with Context V2 on, first and pinned (never dropped by the budget), `project-data`, member-scoped (VIEWER and up; anyone else gets the no-project snapshot), no raw research values, no graph payloads.
+
+### R8 — Slice depth: k=1
+
+`SLICE_DEPTH = 1` (`v2/graph-context.ts`) is now the named, documented depth of the focus-graph slice; the two `trace` calls use it. The target architecture's k=2 (§F.4) is intentionally not used in P1-E; nodes further away stay reachable through the graph tools. The caps are unchanged: `MAX_FOCUS` 4, `MAX_SLICE_NODES` 12, `MAX_SLICE_EDGES` 20. Focus selection is unchanged.
+
+### Tests
+
+`test:snapshot:db` (new, in CI): 31/0. `test:graphctx:db` 31/0, `test:context:db` 63/0, `test:memories:db` 55/0, `test:summary:db` 35/0, `test:memory:db` 53/0 and the graph suite 195/0 unchanged.
+
+- **Integrity counts:** the latest record's counts per section; an older record of the same section not used; a record with nothing untraced, or a version with none, shows the status only, even though the section text holds numbers (nothing recounted); no finding, number, source or text copied in; no `FF_GRAPH` needed; a VIEWER sees the same; a non-member gets the no-project snapshot.
+- **Active dataset:** a creator's legacy dataset attached to the project is never named, with both flags on.
+- **Untested hypotheses and latest run:** an untested hypothesis and one tested only by a superseded result are listed, a tested one is not; a superseded hypothesis is neither counted nor listed; the latest live run by recording time with label, status, engine and date; a newer superseded run and an older run are not shown; no result value, hash, seed, method, engine version or statement copied in; nothing of another project; the same lines for a VIEWER; none for a non-member, with `FF_GRAPH` off, or in v1; the new graph read is member-scoped and per project.
+- **Snapshot invariants:** first, pinned and `project-data`, with its counts and graph lines, under a budget with no room, while the focus slice is dropped.
+- **R8:** depth 1 and the caps 4/12/20; one-hop neighbours included; a second-hop node and a superseded neighbour excluded; a focus node of another project yields nothing; a non-member gets no slice; `FF_GRAPH` required; the slice is unpinned `project-data` (droppable).
+
+### Mutation testing (PR #6)
+
+Eighteen mutations, each run against `test:snapshot:db`: all eighteen killed.
+
+| # | Mutation | Result |
+|---|---|---|
+| I1 | quarantined count omitted | killed (4) |
+| I2 | untraced count omitted | killed (2) |
+| I3 | the wrong stored field read as untraced | killed (3) |
+| I4 | the record's findings copied into the snapshot | killed (4) |
+| U1 | a non-member treated as a VIEWER (unauthorized snapshot) | killed (1) |
+| U2 | the tested-hypotheses read without authorization | killed (1) |
+| D1 | the active dataset included | killed (1) |
+| F1 | graph lines without `FF_GRAPH` | killed (2) |
+| F2 | the `FF_CONTEXT_V2` gate removed | killed (1) |
+| K1 | slice depth k=2 | killed (2) |
+| K2 | slice node cap raised | killed (1) |
+| S1 | superseded nodes in the graph section | killed (5) |
+| S2 | a superseded result counts as testing a hypothesis | killed (2) |
+| X1 | tested hypotheses read across projects | killed (1) |
+| P1 | the snapshot unpinned (droppable) | killed (1) |
+| R1 | the run's payload copied in | killed (2) |
+| R2 | the oldest run shown as the latest | killed (3) |
+| H1 | tested hypotheses listed as untested | killed (2) |
+
+**Fixed while testing:** the untested list first followed the graph's last-updated order, which changes whenever a node is edited; it is now in creation order, so the snapshot reads the same every time.
+
+### Regression (on this branch, base `10501b9`)
+
+PR6_REGRESSION_PLACEHOLDER
+
+### Known limitations
+
+- The integrity counts are those stored with each section's **latest saved version**. If a section's text is changed without a new version being saved, the counts describe the last saved version.
+- The graph section reads at most 1000 nodes (the existing `listNodes` bound); in a larger graph the untested list and the latest run are taken from those.
+
+## P1-E closure
+
+### Pull requests
+
+| PR | Batch | Merged | Render deploy | Migration |
+|---|---|---|---|---|
+| [#60](https://github.com/ameralqudah/academic-ai/pull/60) | PR #1 — schema and security (`memories`, `thread_summaries`, RLS, fail-closed scope) | `0d7225b` | `dep-davtejjm8hqs73cfvp6g` (live at the time) | `0018_p1e_memory.sql` |
+| [#61](https://github.com/ameralqudah/academic-ai/pull/61) | PR #2 — Context Assembler V2 core (chronological turns, snapshot, claim rendering, token counting, flag) | `2f9efdb` | `dep-davugeoae00c73e1jh0g` | none |
+| [#62](https://github.com/ameralqudah/academic-ai/pull/62) | PR #3 — graph context (snapshot graph section, focus-graph slice) | `2fb8a39` | `dep-db00bmlg1s2s738888lg` | none |
+| [#63](https://github.com/ameralqudah/academic-ai/pull/63) | PR #4 — thread summaries, routed token counter (R1, R2, R9) | `24d48af` | `dep-db0b930ae00c73eecdug` | none |
+| [#64](https://github.com/ameralqudah/academic-ai/pull/64) | PR #5 — memories end to end (R3–R6) | `10501b9` | `dep-db0csd8ae00c73eflcc0` (live) | none |
+| PR #6 (this PR) | snapshot completeness, k=1, closure (R7, R8, R14) | not merged | — | none |
+
+Each merged PR passed CI on its head, a full local regression (all suites, the production build, and the browser tests under the four flag combinations), and a post-merge regression on `main` with a Render check (deploy live, migrations applied, no new errors besides the known S3 status 540).
+
+### Status by item
+
+| Item | Status | Where |
+|---|---|---|
+| Context V2 behind `FF_CONTEXT_V2` (v1 unchanged when off) | implemented, verified | PR #2 |
+| Chronological turns; newest kept; dropped turns noted | implemented, verified | PR #2 |
+| Project snapshot, always present, member-scoped | implemented, verified | PR #2, PR #6 (R7) |
+| Claim rendering (`{{claim:id}}` → text or `[unresolved claim]`) | implemented, verified | PR #2 |
+| Graph context (snapshot graph section, focus slice; both flags) | implemented, verified | PR #3, PR #6 (R7, R8) |
+| Thread summaries (R1, R2) and routed token counter (R9) | implemented, verified | PR #4 |
+| Memory API (R3), UI (R4), agent proposals (R5), memories in context (R6) | implemented, verified | PR #5 |
+| Snapshot completeness (R7) | implemented, verified (active dataset intentionally excluded) | PR #6 |
+| Slice depth (R8) | k=1 intentionally retained, verified | PR #6 |
+| R10 — retire the legacy `src/ai/context/*` builder | **deferred to P1-F** (not modified) | — |
+| R11 — thread focus node and `/projects/:p/state` | **deferred** to later workspace work (P1-I or later) | — |
+| R12 — Project Brief | **deferred** | — |
+| R13 — account deletion | closed (memories and summaries cascade with the user) | audit |
+| Active dataset in the snapshot | **intentionally excluded** (legacy datasets are creator-only, WS4 A2) | PR #6 |
+| k=2 slice | **intentionally excluded** for P1-E | PR #6 |
+| Exact per-provider token counters | deferred (the estimate is used for every provider) | PR #2 decision |
+| Production enablement of `FF_CONTEXT_V2`, `FF_GRAPH`, `FF_RUNS` | **not done**; all three remain off in production | — |
+
+### Readiness checklist
+
+"Verified" means covered by the named suites in CI and in the local and post-merge regressions; nothing here was run against production data.
+
+| Area | State |
+|---|---|
+| Flag gating | `FF_CONTEXT_V2` off → v1 byte-for-byte unchanged (context, summary and memory suites); memory API and pages 404 when off; graph-derived context needs `FF_GRAPH` too. Verified. |
+| Chronological turns | Turns in the order said; over budget the newest are kept and the oldest dropped, with a note of how many. Verified (`test:context:db`). |
+| Dropped turns and summaries | A summary is used only when turns were dropped (or it covers only older history); no turn is both summarised and shown. Verified (`test:summary:db`). |
+| Thread summaries | Background refresh behind the flag; never summarises the most recent turns; numeric guard applied before storing. Verified. |
+| Memory authority | Own memories `user-instruction`; project memories `project-data`, never pinned, never under the instructions heading. Verified (`test:memories:db`). |
+| Proposal and confirmation safety | Agents propose only (`proposed`, guarded in the database too); only a person who may change the memory confirms it. Verified. |
+| Project snapshot | Always present, first and pinned; member-scoped; integrity counts from stored records; no active dataset; no raw values or payloads. Verified (`test:context:db`, `test:snapshot:db`). |
+| Graph context | Both flags, members only, one hop, caps 4/12/20, superseded and cross-project nodes excluded, droppable. Verified (`test:graphctx:db`, `test:snapshot:db`). |
+| Claim rendering | Text of a current, verified claim of the project, else `[unresolved claim]`; no raw token reaches a model; independent of `FF_GRAPH`. Verified. |
+| Numeric integrity | Snapshot carries stored counts only; summaries go through the numeric guard; claims in memories and summaries go through the claim pass. Verified. |
+| Provenance | Proposals keep run, step and tool in their origin; summaries record their guard result; graph context reads labels and a few run fields only. Verified. |
+| Project and member authorization | `requireProjectRole` (database rank) everywhere in Context V2 and the memory service; strangers, removed members and missing projects get nothing (NOT_FOUND). Verified. |
+| RLS | `memories` and `thread_summaries` under `academic_app` with per-user and per-project policies; the scope fails closed when RLS cannot be enforced; context omits memories and summaries then. Verified (`test:memory:db`, `test:memories:db`, `test:summary:db`). |
+| Token budgeting | One counter per build (the routed provider's; today the estimate for all); the snapshot never dropped; other fragments fitted by authority and relevance. Verified. Exact counters deferred. |
+| Metering | Context assembly makes no model call. A summary is one gateway call (`thread.summary`) charged in tokens, no request, no words; a refused reservation means no call. Verified. |
+| Idempotency | Summary key `thread-summary:{conversation}:v{version}`, one version per key; proposals keyed on the run step. Verified. |
+| Failure and cancellation | A failing graph, memory or summary read costs only its own part and the context still builds; a failed or refused summary writes nothing; a retried run step proposes nothing new. Verified. A summary charged but not written blocks that version (PR #4 known limitation). |
+| Browser matrix | Four combinations (V2/GRAPH/RUNS): false/false/false, false/true/true, true/false/false, true/true/false, on every P1-E PR and post-merge. Verified. |
+| Migrations and schema | One migration in P1-E (`0018`, PR #1); `drizzle-kit generate` reports no drift. Verified. |
+| Production flags | `FF_CONTEXT_V2`, `FF_GRAPH`, `FF_RUNS` remain off (not set in `render.yaml`; default false). Render's dashboard environment is not readable with the tools used here. |
+| Render | Every P1-E merge deployed and went live; migration 0018 applied. The production storage provider still fails writes with status 540 ("Project paused") — an external blocker for a future `FF_RUNS` enablement; not touched by P1-E. |
+
+**Ready for development use: yes.** With `FF_CONTEXT_V2` (and, for graph context, `FF_GRAPH`) turned on in a development or staging environment, every P1-E behaviour above is implemented and verified by CI and the regressions.
+
+**Ready for production flag enablement: not yet.** Before `FF_CONTEXT_V2` is turned on in production:
+
+1. verify on a staging deployment with production-like configuration: the `academic_app` role exists and the memory scope's RLS probe passes there (otherwise memories and summaries fail closed);
+2. confirm summary metering against a real provider (charge, no request, no words) and the gateway's routed default model for `thread.summary`;
+3. confirm the background queue (`thread-summary`) runs on the deployed worker;
+4. decide whether graph context ships too: that needs `FF_GRAPH` in production, which is a separate decision;
+5. `FF_RUNS` (agent proposals run only inside research runs) stays blocked by the storage status 540 until that is resolved.
+
+### Known limitations (P1-E as a whole)
+
+- Token counts are the conservative estimate for every provider; exact counters are deferred.
+- Focus selection is lexical (shared words), and only the assembler's `focusNodeIds` input names focus nodes; there is no API or UI for it.
+- The slice is one hop; deeper context stays behind the graph tools.
+- A summary charged but not written blocks that version (PR #4).
+- The project page's link to its memories is on the creator-only project page; other members open `/projects/:id/memories` by URL (PR #5).
+- The integrity counts describe each section's latest saved version (PR #6).
+- The legacy context builder (`src/ai/context/*`) still serves the legacy paths (R10, P1-F).
+
+## Remaining decisions (after P1-E)
 
 - **Graph context, later.** A relevance-ranked (rather than lexical) focus choice, and an API or UI for a caller to name focus nodes; today only the assembler's `focusNodeIds` input does.
 - **Exact token counters.** Whether and when to register an exact offline counter per provider (bundle size, licence).

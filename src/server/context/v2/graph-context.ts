@@ -7,10 +7,12 @@
  *
  * 1. **The snapshot's graph section** (`graphSummary`): what the project's
  *    graph holds — node counts by type, the research questions and hypotheses
- *    by label, and how many objects are flagged for review. Superseded nodes
- *    are not counted. Labels only, never payloads.
+ *    by label, the hypotheses no live result tests yet (by label), the latest
+ *    analysis run (its label, status, engine and date only, never its results
+ *    or hashes), and how many objects are flagged for review. Superseded nodes
+ *    are not counted. Labels and those few run fields only, never payloads.
  * 2. **The focus-graph slice** (`focusSlice`): the immediate neighbourhood
- *    (one hop, both directions) of the focus nodes — the claims the request
+ *    (`SLICE_DEPTH` = one hop, both directions) of the focus nodes — the claims the request
  *    and the context reference, nodes a caller names, or, when there are none,
  *    the research questions, hypotheses, constructs and variables whose labels
  *    share words with the request. Bounded: at most `MAX_FOCUS` focus nodes,
@@ -33,9 +35,17 @@ import { logger } from '@/lib/logger';
 import type { GraphNode } from '@/server/db/schema';
 import * as graph from '@/server/graph/service';
 
+/**
+ * R8: the slice's depth. P1-E deliberately keeps it at one hop (k=1); the
+ * target architecture's k=2 (§F.4) is not used. Anything further away stays
+ * reachable through the graph tools, not the prompt.
+ */
+export const SLICE_DEPTH = 1 as const;
 export const MAX_FOCUS = 4;
 export const MAX_SLICE_NODES = 12;
 export const MAX_SLICE_EDGES = 20;
+/** Untested hypotheses listed by label (the rest are counted). */
+const MAX_UNTESTED = 5;
 const MAX_LISTED = 5;
 const MAX_LABEL = 120;
 
@@ -83,8 +93,36 @@ export async function graphSummary(projectId: string, userId: string): Promise<s
     `Research graph: ${ordered.map(([type, count]) => `${count} ${plural(type, count)}`).join(', ')}`,
     listed('research_question', 'Research questions'),
     listed('hypothesis', 'Hypotheses'),
+    await untested(projectId, actor, nodes),
+    latestRun(nodes),
     stale > 0 ? `Flagged for review: ${stale} open mark${stale === 1 ? '' : 's'}` : '',
   ].filter(Boolean);
+}
+
+/** The live hypotheses no live result decides yet, by label. Empty when there are no hypotheses. */
+async function untested(projectId: string, actor: { userId: string }, nodes: readonly GraphNode[]): Promise<string> {
+  const hypotheses = nodes.filter((node) => node.type === 'hypothesis');
+  if (hypotheses.length === 0) return '';
+  const tested = await graph.testedHypothesisIds(projectId, actor);
+  /* In the order they were created, so the list reads the same every time. */
+  const open = hypotheses.filter((node) => !tested.has(node.id)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+  if (open.length === 0) return 'Untested hypotheses: none';
+  const shown = open.slice(0, MAX_UNTESTED).map(label);
+  return `Untested hypotheses (${open.length} of ${hypotheses.length}): ${shown.join('; ')}${open.length > shown.length ? ` (+${open.length - shown.length} more)` : ''}`;
+}
+
+const RUN_STATUS = new Set(['queued', 'running', 'succeeded', 'failed']);
+
+/** The most recently recorded live analysis run: label, status, engine, date. Never its results, method, seed or hashes. */
+function latestRun(nodes: readonly GraphNode[]): string {
+  const runs = nodes.filter((node) => node.type === 'analysis_run');
+  if (runs.length === 0) return '';
+  const [run] = [...runs].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id));
+  const data = (run!.data ?? {}) as { status?: unknown; engine?: unknown };
+  const status = typeof data.status === 'string' && RUN_STATUS.has(data.status) ? data.status : null;
+  const engine = typeof data.engine === 'string' ? data.engine.replace(/[^\p{L}\p{N} ._-]/gu, '').trim().slice(0, 40) : '';
+  const facts = [status, engine, `recorded ${run!.createdAt.toISOString().slice(0, 10)}`].filter(Boolean);
+  return `Latest analysis run: ${label(run!)} (${facts.join('; ')})`;
 }
 
 /** The distinctive words of a text, for matching a request to node labels. */
@@ -134,7 +172,7 @@ export async function focusSlice(projectId: string, userId: string, input: { foc
   for (const id of focus) {
     if (roots.length >= MAX_FOCUS) break;
     try {
-      const [up, down] = await Promise.all([graph.trace(projectId, actor, id, 'up', 1), graph.trace(projectId, actor, id, 'down', 1)]);
+      const [up, down] = await Promise.all([graph.trace(projectId, actor, id, 'up', SLICE_DEPTH), graph.trace(projectId, actor, id, 'down', SLICE_DEPTH)]);
       roots.push(id);
       for (const node of [...up.nodes, ...down.nodes]) if (node.projectId === projectId) nodes.set(node.id, node);
       for (const edge of [...up.edges, ...down.edges]) if (edge.projectId === projectId) edges.set(edge.id, edge);

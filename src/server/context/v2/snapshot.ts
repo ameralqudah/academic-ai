@@ -17,6 +17,15 @@
  * the project's fields and its sections' keys and status (never their
  * bodies). Its graph section is appended by the assembler, only with
  * `FF_CONTEXT_V2` and `FF_GRAPH` both on (`graph-context.ts`).
+ *
+ * **Integrity counts (R7).** Per section, the counts the numeric guard
+ * recorded with the section's latest saved version (WS2 D2): numbers it
+ * quarantined in model text, and research numbers in a person's text that
+ * trace to no analysis (untraced). Counts only, read from the stored record:
+ * nothing is recomputed, and no number, finding or source is copied in.
+ *
+ * **No active dataset.** Datasets are legacy creator-only records (WS4 A2),
+ * so the member-scoped snapshot does not mention them.
  */
 
 import { eq } from 'drizzle-orm';
@@ -67,6 +76,30 @@ function snapshotFragment(content: string, projectId: string | null): ContextFra
   };
 }
 
+/** A count the guard stored, or 0 when the record has none (never trusted beyond a non-negative integer). */
+const counted = (value: unknown) => (typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0);
+
+const numbers = (count: number, what: string) => `${count} ${what} number${count === 1 ? '' : 's'}`;
+
+/** Per section id, the quarantined and untraced counts recorded with its latest saved version. */
+async function integrityCounts(sectionIds: readonly string[]): Promise<Map<string, { quarantined: number; untraced: number }>> {
+  const counts = new Map<string, { quarantined: number; untraced: number }>();
+  for (const version of await projectsRepo.latestVersions(sectionIds)) {
+    if (!version.integrity) continue;
+    counts.set(version.sectionId, { quarantined: counted(version.integrity.quarantined), untraced: counted(version.integrity.manual) });
+  }
+  return counts;
+}
+
+function describeSection(section: { sectionKey: string; status: string | null }, integrity?: { quarantined: number; untraced: number }): string {
+  const facts = [
+    section.status ?? '',
+    integrity?.quarantined ? numbers(integrity.quarantined, 'quarantined') : '',
+    integrity?.untraced ? numbers(integrity.untraced, 'untraced') : '',
+  ].filter(Boolean);
+  return facts.length > 0 ? `${section.sectionKey} (${facts.join('; ')})` : section.sectionKey;
+}
+
 /** The snapshot for `userId`, member-scoped. Never throws for a project the caller cannot read. */
 export async function projectSnapshot(input: { userId: string; projectId?: string | null; locale: 'ar' | 'en' }): Promise<ProjectSnapshot> {
   const none = (): ProjectSnapshot => ({ projectId: null, role: null, fragment: snapshotFragment(NONE[input.locale], null) });
@@ -83,6 +116,7 @@ export async function projectSnapshot(input: { userId: string; projectId?: strin
   const [project] = await db.select().from(researchProjects).where(eq(researchProjects.id, input.projectId)).limit(1);
   if (!project) return none();
   const sections = await projectsRepo.listSections(project.id);
+  const integrity = await integrityCounts(sections.map((section) => section.id));
 
   const lines = [
     'Project snapshot:',
@@ -92,7 +126,7 @@ export async function projectSnapshot(input: { userId: string; projectId?: strin
     `Type: ${project.docType} (${project.degree}), language ${project.language}`,
     `Your role: ${role}`,
     sections.length > 0
-      ? `Sections (${sections.length}): ${sections.map((section) => `${section.sectionKey}${section.status ? ` (${section.status})` : ''}`).join(', ')}`
+      ? `Sections (${sections.length}): ${sections.map((section) => describeSection(section, integrity.get(section.id))).join(', ')}`
       : 'Sections: none written yet',
   ].filter(Boolean);
 

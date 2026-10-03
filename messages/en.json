@@ -1807,5 +1807,45 @@
       "EXPIRED": "Expired",
       "CONSUMED": "Used"
     }
+  },
+  "memories": {
+    "title": "What Academic AI remembers",
+    "intro": "These memories are used in your conversations. Only confirmed memories are used; proposals wait for you.",
+    "projectTitle": "What Academic AI remembers about this project",
+    "projectIntro": "Project memories are shared with the project's members and are used as project data, never as instructions.",
+    "add": "Add a memory",
+    "content": "What should be remembered?",
+    "contentPlaceholder": "For example: cite in APA 7th edition.",
+    "kind": "Kind",
+    "pinned": "Pin it (always used)",
+    "save": "Save",
+    "saving": "Saving…",
+    "edit": "Edit",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "restore": "Restore",
+    "archive": "Archive",
+    "delete": "Delete",
+    "deleteConfirm": "Delete this memory? This cannot be undone.",
+    "proposed": "Proposals waiting for you",
+    "confirmed": "Remembered",
+    "archived": "Archived",
+    "none": "Nothing here yet.",
+    "proposedBy": "Proposed by a research run",
+    "readOnly": "You can view these memories; changing them needs the editor or owner role.",
+    "unavailable": "Memories are unavailable right now.",
+    "error": "Something went wrong. Please try again.",
+    "kinds": {
+      "preference": "Preference",
+      "fact": "Fact",
+      "instruction": "Instruction",
+      "style": "Style",
+      "decision": "Decision"
+    },
+    "status": {
+      "proposed": "Proposed",
+      "confirmed": "Confirmed",
+      "archived": "Archived"
+    }
   }
 }

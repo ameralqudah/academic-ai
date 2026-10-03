@@ -5647,17 +5647,20 @@ console.log('\nwhat a model costs');
   for (const file of routeFiles) {
     const source = await readFile(file, 'utf8');
     const handlers = source.match(/export const (GET|POST|PATCH|PUT|DELETE)\b/g) ?? [];
-    const flaggedCount = source.match(/= flagged\(/g)?.length ?? 0;
-    /* The graph's limits, the statistics API's (P1-C), or the research runs' (P1-D), which follow the same read/write split. */
-    const limitedCount = source.match(/rateLimit: (GRAPH_(READ|WRITE)|STATS_(READ|WRITE|RUN|AI)|RUNS_(READ|WRITE))_LIMIT/g)?.length ?? 0;
+    /* P1-E: the memory API is behind FF_CONTEXT_V2 through `memoriesFlagged`. */
+    const flaggedCount = source.match(/= (flagged|memoriesFlagged)\(/g)?.length ?? 0;
+    /* The graph's limits, the statistics API's (P1-C), the research runs' (P1-D), or the memories' (P1-E), which follow the same read/write split. */
+    const limitedCount = source.match(/rateLimit: (GRAPH_(READ|WRITE)|STATS_(READ|WRITE|RUN|AI)|RUNS_(READ|WRITE)|MEMORY_(READ|WRITE))_LIMIT/g)?.length ?? 0;
     if (handlers.length === 0 || flaggedCount !== handlers.length || limitedCount !== handlers.length) unguarded.push(file);
-    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !/GRAPH_WRITE_LIMIT|STATS_(WRITE|RUN|AI)_LIMIT|RUNS_WRITE_LIMIT/.test(source) && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
+    if (/export const (POST|PATCH|PUT|DELETE)\b/.test(source) && !/GRAPH_WRITE_LIMIT|STATS_(WRITE|RUN|AI)_LIMIT|RUNS_WRITE_LIMIT|MEMORY_WRITE_LIMIT/.test(source) && !file.includes('/impact/')) unguarded.push(`${file} (write limit)`);
     /* P1-D: run routes are behind the runs flag, and every run-creating or deciding handler has a per-user limit. */
     if (/\/projects\/\[projectId\]\/(runs|tools)\//.test(file)) {
       const runsFlagged = source.match(/'runs',?\s*\)/g)?.length ?? 0;
       if (runsFlagged !== handlers.length) unguarded.push(`${file} (runs flag)`);
       if (/export const POST\b/.test(source) && !/userRateLimit: RUNS_(CREATE|DECIDE)_USER_LIMIT/.test(source)) unguarded.push(`${file} (per-user limit)`);
     }
+    /* P1-E: every memory handler also has a per-user limit. */
+    if (/\/memories\//.test(file) && (source.match(/userRateLimit: MEMORY_(READ|WRITE)_USER_LIMIT/g)?.length ?? 0) !== handlers.length) unguarded.push(`${file} (per-user limit)`);
   }
   check(`every /api/v1 handler (${routeFiles.length} routes) is behind the flag and rate-limited`, unguarded, []);
 }

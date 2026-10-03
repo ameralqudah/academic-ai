@@ -25,6 +25,10 @@
  * 6. **The thread summary (PR #4)** stands in for dropped turns, before the
  *    chronological block, never covering a turn that is shown
  *    (`summary-context.ts`).
+ * 7. **Confirmed memories (PR #5)** (`memories.ts`): your own as
+ *    `user-instruction`, the project's as `project-data`; proposals and
+ *    archived memories never; read through the memory scope, left out if it
+ *    cannot be enforced.
  *
  * Everything else — the collectors, relevance, deduplication and the
  * authority headings for the non-conversation fragments — is v1's, unchanged.
@@ -43,6 +47,7 @@ import { estimateCounter, tokenCounterFor, type TokenCounter, type TokenProvider
 
 import { claimIdsAcross, renderClaims, resolveClaimTexts, scrubClaimTokens } from './claims';
 import { focusSlice, graphSummary } from './graph-context';
+import { memoryFragments } from './memories';
 import { projectSnapshot } from './snapshot';
 import { fitTurnsWithSummary, loadSummary } from './summary-context';
 
@@ -99,7 +104,9 @@ export async function buildContextV2(input: BuildContextV2Input): Promise<Contex
 
   /* Only a project the caller is a member of reaches the collectors. */
   const collected = await collectFragments({ ...input, projectId: snapshot.projectId }, new Set(['project']));
-  const all = [...collected, ...(input.additional ?? [])];
+  /* Confirmed memories (PR #5): own ones as instructions, project ones as data; only for a project the caller is a member of. */
+  const remembered = await memoryFragments({ userId: input.userId, projectId: snapshot.projectId, locale });
+  const all = [...collected, ...remembered, ...(input.additional ?? [])];
 
   /*
    * Graph-derived context (PR #3): only with FF_CONTEXT_V2 and FF_GRAPH both

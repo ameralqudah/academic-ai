@@ -11,7 +11,7 @@ import type { z } from 'zod';
 
 import type { Tier } from './limits';
 
-export type ToolCategory = 'data' | 'statistics' | 'research' | 'writing' | 'graph';
+export type ToolCategory = 'data' | 'statistics' | 'research' | 'writing' | 'graph' | 'memory';
 
 /**
  * - read: reads project data;

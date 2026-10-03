@@ -267,9 +267,118 @@ Nineteen mutations of the idempotency, duplicate, numeric, ownership, overlap, o
 
 If a process stops after the gateway has committed a summary's charge but before the row is written, that version's key is committed and is refused from then on (never charged twice), so the conversation's summary stays at the previous version. Recovering would need a key that also names the summary's last message; not done, to keep the approved key format.
 
+## PR #5 — Memories end to end (R3–R6)
+
+All behind `FF_CONTEXT_V2`. With it off, the memory API answers 404 before the session is checked, the memories page is a 404, settings shows no panel, and no memory reaches the v1 context. No migration (0018's tables, policies and guard trigger are enough), no new dependency, and no change to storage or production configuration.
+
+### API (R3)
+
+| Method and path | Does |
+|---|---|
+| `GET /api/v1/me/memories?status=` | your own memories (proposed, confirmed, archived; optional filter) |
+| `POST /api/v1/me/memories` | add one: `{kind, content, pinned?}`; always `source: user`, `confirmed` (201) |
+| `PATCH /api/v1/me/memories/:id` | edit `content`, `kind`, `pinned` (never status, scope, owner or project) |
+| `DELETE /api/v1/me/memories/:id` | delete |
+| `POST /api/v1/me/memories/:id/confirm` | confirm a proposal, or restore an archived memory |
+| `POST /api/v1/me/memories/:id/archive` | archive |
+| `… /api/v1/projects/:projectId/memories…` | the same six operations for a project's memories |
+
+Every handler: the flag gate (`memoriesFlagged`), then `withApi` with an address limit and a per-user limit (reads 300/min, writes 60/min), a strict zod schema and an 8 KiB body cap where there is a body. Errors use the existing codes: NOT_FOUND (stranger, removed member, missing project, a memory addressed through the wrong path), FORBIDDEN (`memory_policy` when the role may not change it), VALIDATION (422), UNAVAILABLE (`rls_unavailable` / `infra_unavailable`), RATE_LIMITED (429).
+
+**Defence in depth.** (1) The route: flag, session, limits, schema. (2) The service (`memory/service.ts`): the project role from `requireProjectRole` (the same rank the database uses), and the memory must belong to the path it is addressed through. (3) The database: every statement through `withMemoryScope` (`SET LOCAL ROLE academic_app`, transaction-local `app.user_id`), so the 0018 policies decide again, and the scope fails closed when RLS cannot be enforced. There is no owner-connection path. The existing memory and thread-summary storage is unchanged.
+
+### Authorization matrix
+
+| Caller | List | Create | Edit / archive / confirm / delete own | … someone else's |
+|---|---|---|---|---|
+| user memories: the owner | yes | yes | yes | n/a |
+| user memories: anyone else | sees none | (creates their own) | n/a | NOT_FOUND |
+| project: OWNER | yes | yes | yes | yes |
+| project: EDITOR | yes | yes | yes | FORBIDDEN `memory_policy` |
+| project: COMMENTER / VIEWER | yes (read-only) | FORBIDDEN | FORBIDDEN `memory_policy` | FORBIDDEN `memory_policy` |
+| demoted to VIEWER | yes | FORBIDDEN | FORBIDDEN `memory_policy` | FORBIDDEN `memory_policy` |
+| removed member, stranger, missing project | NOT_FOUND | NOT_FOUND | NOT_FOUND | NOT_FOUND |
+| a memory through another project or through `/me` | not listed | n/a | NOT_FOUND | NOT_FOUND |
+
+### UI (R4)
+
+"What Academic AI remembers": a panel in settings (your memories) and a page per project (`/projects/:id/memories`, member-scoped: any member may open it; a VIEWER sees it read-only). Proposals waiting for you, remembered, archived; add, edit, confirm, archive or restore, delete, each offered only where the server marked the memory `editable`. The API decides every action again. English and Arabic (`memories` namespace), RTL, user text `dir="auto"`. Hidden when the flag is off.
+
+### Agent proposals (R5)
+
+`memory.propose` is the run tool `proposeMemory` (the registry's names are identifiers, so no dot): category `memory`, a write, low risk, needs EDITOR, run context only, keyed on the step, no approval (the user's confirmation is the approval). Input `{scope, kind, content}` (strict: no status, no source). It always writes `source: agent, status: proposed` as the run's user through the memory scope, with the run, step and tool in the memory's origin; a retried step returns the same proposal. The database guard refuses an agent memory in any other status, even if this code were changed. A proposal becomes confirmed only when a person who may change it confirms it through the API. Runs stay behind `FF_RUNS`.
+
+### Memories in Context V2 (R6)
+
+`v2/memories.ts`, read only through the memory scope:
+
+- only **confirmed** memories; proposed and archived never (filtered in the query and again in code);
+- your own user memories: `user-instruction` (one you pinned stays pinned in the envelope);
+- project memories, only for the project the snapshot resolved for you as a member: `project-data`, never pinned, labelled as recorded by a member (data, not an instruction), so they never appear under the instructions heading;
+- at most 8 of each, pinned first, then the most recently updated, then id;
+- their text goes through the same claim pass as every fragment (`{{claim:id}}` → the claim's text or `[unresolved claim]`; the final scrub stays);
+- if the scope cannot be enforced or a read fails: no memories, and the context still builds.
+
+### Tests
+
+`test:memories:db` (new, in CI): 55/0. `test:memory:db` 53/0, `test:context:db` 63/0, `test:graphctx:db` 31/0, `test:summary:db` 35/0 and `scripts/runs.ts` 116/0 (with `proposeMemory` in the pinned tool list) unchanged.
+
+- **Schemas and wiring:** strict bodies (no status, source, scope, owner or project; content 1–2000); the 12 handlers are all behind the flag gate, all carry an address and a per-user limit (writes the write limits), and those with a body have the schema and the cap; with the flag off the gate answers 404 before the handler.
+- **User memories:** owner only; another user lists none, and cannot edit, confirm, archive or delete (NOT_FOUND); not addressable through a project.
+- **Project role matrix:** EDITOR adds; VIEWER cannot (FORBIDDEN); a stranger or a missing project is NOT_FOUND; every member reads; the author and the OWNER change, another EDITOR and a VIEWER cannot; a demoted author keeps reading but cannot change; a removed member loses access at once; cross-project and `/me` addressing are NOT_FOUND.
+- **RLS:** unenforceable → reads and writes UNAVAILABLE (no application-only fallback); a direct repository update by another EDITOR changes nothing.
+- **Proposals:** registered with the required policy; input refuses status and source; a run proposes `proposed`/`agent` with run and step; a retry adds nothing; a VIEWER's run is refused by the database; an agent memory can never be stored confirmed; another EDITOR or a VIEWER cannot confirm someone else's proposal; a user proposal is private.
+- **Context:** proposals absent until confirmed; authority by scope; no project memory under the instructions heading; a pinned project memory stays unpinned data; archived absent; another user's absent; a non-member gets none; no project → own only; cap and order deterministic; claim references in a memory rendered, never raw; RLS unavailable → none, context still builds; flag off → none in the v1 context.
+- **Browser (`e2e/memories.spec.ts`):** flag off → API and page 404, no panel; flag on → 401 without a session, full HTTP lifecycle, 422 for bad bodies, a stranger reaches nothing (404), project memories on the project page, settings add/archive/restore persisted, Arabic RTL, the write limit returns 429.
+
+### Mutation testing (PR #5)
+
+Twenty-eight mutations, each run against `test:memories:db`: twenty-five killed. Three survive only because the database hides the rows (equivalent under RLS). To show each layer holds by itself, they were re-run on a scratch database with the `memories_read` policy opened to `USING (true)`. The unmutated suite still passed (55/0, the application layer alone), and all three were killed. R1 (the RLS role not taken) is killed on its own, so the database layer is checked by itself as well.
+
+| # | Mutation | Result |
+|---|---|---|
+| A1 | a VIEWER may create project memories (service) | killed (1; the database still refused) |
+| A2 | memory not checked against the path it is addressed through | killed (2) |
+| A3 | service change check removed | killed (3; the database still refused) |
+| A4 | any EDITOR may change another member's memory | killed (2) |
+| A5 | a demoted author may still change their memory | killed (1) |
+| A6 | confirm/archive skip the change check (proposal confirmation) | killed (2) |
+| A7 | user list not filtered to the caller (service) | equivalent under RLS; killed (2) with the read policy opened |
+| R1 | RLS role not taken (owner connection) | killed (2) |
+| R2 | fail-closed RLS probe skipped | killed (2) |
+| P1 | agent writes `confirmed` | killed (suite stops: the guard refuses, VALIDATION `memory_invalid`) |
+| P2 | agent writes as `user`, `confirmed` (escalation) | killed (3) |
+| P3 | tool needs only VIEWER | killed (1) |
+| P4 | retry idempotency removed | killed (1) |
+| X1 | context status filter removed | killed (2) |
+| X2 | archived memories included | killed (1) |
+| X3 | project memory becomes a user instruction | killed (3) |
+| X4 | pinned project memory pinned | killed (1) |
+| X5 | unchecked request project instead of the member-resolved one | equivalent under RLS; killed (1) with the read policy opened |
+| X6 | other users' memories not filtered (context) | equivalent under RLS; killed (3) with the read policy opened |
+| X7 | cap removed | killed (1) |
+| X8 | oldest first | killed (1) |
+| X9 | pinned not first | killed (1, after the order test was fixed; see below) |
+| X10 | fail-safe removed | killed (1) |
+| K1 | memories skip the claim resolution pass | killed (1) |
+| F1 | flag gate removed | killed (1) |
+| L1 | DELETE without rate limits | killed (1) |
+| L2 | create uses the higher read limits | killed (1) |
+| V1 | create schema not strict | killed (1) |
+
+**Test fixed (found by X9).** The order test set `updated_at` by hand and then pinned the oldest memory, but 0018's trigger stamps `updated_at` on every update. Pinning therefore also made that memory the newest, so "pinned first" was never actually tested. The memory is now created pinned and first, so it is the oldest, and X9 is killed.
+
+### Regression (on this branch, base `24d48af`)
+
+REGRESSION_PLACEHOLDER
+
+### Known limitations
+
+- The project page's link to its memories sits on the existing project page, which stays creator-only (unchanged legacy semantics). Other members reach `/projects/:id/memories` by its URL.
+- Over HTTP, the browser suite covers owner and stranger. The VIEWER, EDITOR, demoted and removed rows of the matrix are covered at the service and RLS layers (`test:memories:db`), which the routes call directly.
+- The capability is named `proposeMemory`, not `memory.propose`, because tool names may not contain dots.
+
 ## Remaining decisions (later PRs)
 
 - **Graph context, later.** A relevance-ranked (rather than lexical) focus choice, and an API or UI for a caller to name focus nodes; today only the assembler's `focusNodeIds` input does.
 - **Exact token counters.** Whether and when to register an exact offline counter per provider (bundle size, licence).
-- **Summary refresh.** Cadence, model, and metering through the gateway with an idempotency key per version.
-- **Memory API, UI and proposal flow.** Routes and limits, the "What Academic AI remembers" page, and when an agent may propose.

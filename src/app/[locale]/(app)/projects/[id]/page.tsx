@@ -1,4 +1,5 @@
 import { ArrowLeft, ArrowRight, Check, Circle, MessagesSquare, PenLine, Sparkles } from 'lucide-react';
+import { contextV2Enabled } from '@/server/context/flags';
 import { runsEnabled } from '@/server/runs/service';
 import type { Metadata } from 'next';
 import { getTranslations } from 'next-intl/server';
@@ -38,6 +39,9 @@ export default async function ProjectPage({ params }: Props) {
   const graphOn = graphEnabled();
   const runsOn = runsEnabled();
   const truns = await getTranslations({ locale, namespace: 'runs' });
+  /* P1-E: the project's memories, only with Context V2 on. */
+  const memoriesOn = contextV2Enabled();
+  const tmem = await getTranslations({ locale, namespace: 'memories' });
   const number = new Intl.NumberFormat(locale === 'ar' ? 'ar-EG' : 'en-US');
   const Arrow = locale === 'ar' ? ArrowLeft : ArrowRight;
 
@@ -202,6 +206,14 @@ export default async function ProjectPage({ params }: Props) {
                     className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink-soft transition-colors hover:border-line-strong hover:text-ink"
                   >
                     {truns('title')}
+                  </Link>
+                ) : null}
+                {memoriesOn ? (
+                  <Link
+                    href={`/projects/${project.id}/memories`}
+                    className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink-soft transition-colors hover:border-line-strong hover:text-ink"
+                  >
+                    {tmem('title')}
                   </Link>
                 ) : null}
               </div>

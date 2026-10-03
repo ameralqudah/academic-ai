@@ -37,7 +37,8 @@ async function main() {
   check('exactly the planned tools', [...TOOL_NAMES].sort(), [
     'createAnalysisSpec', 'createClaim', 'createDatasetVersion', 'createGraphNode', 'explainResult', 'extractEvidence', 'generateDraft',
     'generateFigureFromResult', 'generateTableFromResult', 'getAnalysisProvenance', 'getAnalysisResult', 'inspectDataset', 'listDatasets',
-    'readGraph', 'replaceDatasetVersion', 'retrieveSource', 'runAnalysis', 'searchLiterature', 'validateAnalysisSpec', 'validateDataset',
+    /* P1-E: proposes only; a person confirms. */
+    'proposeMemory', 'readGraph', 'replaceDatasetVersion', 'retrieveSource', 'runAnalysis', 'searchLiterature', 'validateAnalysisSpec', 'validateDataset',
   ]);
   check('unknown names are not tools', [toolByName('updateResultNumbers'), toolByName('createFakeResult'), toolByName('overwriteVerifiedResult'), toolByName(42), toolByName('__proto__')], [null, null, null, null, null]);
   check('no tool writes, fakes or overwrites results', TOOL_NAMES.some((name) => /fake|overwrite|updateResult|setResult|editResult|deleteResult/i.test(name)), false);

@@ -8,7 +8,7 @@
  * constraint or guard is VALIDATION. No API, UI or model call lives here.
  */
 
-import { and, desc, eq, max, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, max, sql, type SQL } from 'drizzle-orm';
 
 import { memories, threadSummaries, type Memory, type ThreadSummary } from '@/server/db/schema';
 import { AppError } from '@/server/http/errors';
@@ -101,7 +101,27 @@ export async function listMemories(
       .select()
       .from(memories)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(memories.pinned), desc(memories.updatedAt));
+      .orderBy(desc(memories.pinned), desc(memories.updatedAt), asc(memories.id));
+  });
+}
+
+/** One memory `userId` can see (the read policy decides), or null. */
+export async function getMemory(userId: string, id: string): Promise<Memory | null> {
+  return withMemoryScope(userId, async (tx) => {
+    const [row] = await tx.select().from(memories).where(eq(memories.id, id)).limit(1);
+    return row ?? null;
+  });
+}
+
+/** The memory a run step already proposed, if a previous attempt of the step got that far (P1-E, PR #5). */
+export async function findByStep(userId: string, stepId: string): Promise<Memory | null> {
+  return withMemoryScope(userId, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(memories)
+      .where(and(eq(memories.userId, userId), sql`${memories.origin} ->> 'stepId' = ${stepId}`))
+      .limit(1);
+    return row ?? null;
   });
 }
 

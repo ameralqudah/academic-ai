@@ -67,7 +67,9 @@ export type ContextKind =
   | 'instruction'
   | 'decision'
   /** Context V2 (P1-E): a conversation's rolling summary. */
-  | 'summary';
+  | 'summary'
+  /** Context V2 (P1-E): a confirmed user or project memory. */
+  | 'memory';
 
 /**
  * Why a context package is being built.

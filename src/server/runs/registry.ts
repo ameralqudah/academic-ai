@@ -16,6 +16,7 @@ import { defineTool } from '@/server/ai/gateway/tools';
 
 import { DATA_TOOLS } from './tools/data';
 import { GRAPH_TOOLS } from './tools/graph';
+import { MEMORY_TOOLS } from './tools/memory';
 import { RESEARCH_TOOLS } from './tools/research';
 import { STATISTICS_TOOLS } from './tools/statistics';
 import { WRITING_TOOLS } from './tools/writing';
@@ -37,7 +38,7 @@ function check(tool: ToolDef): ToolDef {
   return Object.freeze(tool);
 }
 
-const ALL: readonly ToolDef[] = Object.freeze([...DATA_TOOLS, ...STATISTICS_TOOLS, ...RESEARCH_TOOLS, ...WRITING_TOOLS, ...GRAPH_TOOLS].map(check));
+const ALL: readonly ToolDef[] = Object.freeze([...DATA_TOOLS, ...STATISTICS_TOOLS, ...RESEARCH_TOOLS, ...WRITING_TOOLS, ...GRAPH_TOOLS, ...MEMORY_TOOLS].map(check));
 
 const BY_NAME: ReadonlyMap<string, ToolDef> = (() => {
   const map = new Map<string, ToolDef>();

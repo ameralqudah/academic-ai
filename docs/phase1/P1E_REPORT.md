@@ -438,7 +438,7 @@ Eighteen mutations, each run against `test:snapshot:db`: all eighteen killed.
 
 ### Regression (on this branch, base `10501b9`)
 
-PR6_REGRESSION_PLACEHOLDER
+Typecheck, lint, `git diff --check` (worktree and against base), production audit (0 vulnerabilities), smoke, gateway 93/0, stats 361/0, runs 116/0, analysis 1329, knowledge, migrate and seed, integration 958, jobs 22, tasks 122/0, runs-db 221/0, graph 195/0, gateway-db 57/0, stats-db 172/0, memory 53/0, context 63/0, graph context 31/0, summary 35/0, memories 55/0, snapshot 31/0; `drizzle-kit generate`: no schema changes; production build. Browser tests over the four flag combinations (V2/GRAPH/RUNS): false/false/false 73 passed, 4 skipped; false/true/true 73 passed, 4 skipped; true/false/false 76 passed, 1 skipped; true/true/false 76 passed, 1 skipped (the skips are the flag-dependent tests of the other setting).
 
 ### Known limitations
 

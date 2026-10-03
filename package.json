@@ -35,6 +35,7 @@
     "test:graphctx:db": "tsx scripts/graph-context-integration.ts",
     "test:summary:db": "tsx scripts/summary-integration.ts",
     "test:memories:db": "tsx scripts/memory-api-integration.ts",
+    "test:snapshot:db": "tsx scripts/snapshot-integration.ts",
     "test:gateway:db": "tsx scripts/gateway-integration.ts",
     "test:gateway:live": "tsx scripts/gateway-live.ts"
   },

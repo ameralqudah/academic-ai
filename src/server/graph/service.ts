@@ -1358,6 +1358,20 @@ export async function listStale(projectId: string, actor: Actor, options: { incl
     .limit(1000);
 }
 
+/**
+ * P1-E (R7): the hypotheses of the project that a live (not superseded) result
+ * decides through a `tests` link, by id only. VIEWER and up, this project only.
+ */
+export async function testedHypothesisIds(projectId: string, actor: Actor): Promise<Set<string>> {
+  await authorize(projectId, actor, 'VIEWER');
+  const rows = await db
+    .select({ hypothesisId: graphEdges.dstId })
+    .from(graphEdges)
+    .innerJoin(graphNodes, and(eq(graphNodes.id, graphEdges.srcId), eq(graphNodes.projectId, projectId)))
+    .where(and(eq(graphEdges.projectId, projectId), eq(graphEdges.rel, 'tests'), sql`${graphNodes.status} <> 'superseded'`));
+  return new Set(rows.map((row) => row.hypothesisId));
+}
+
 export interface MarkKey {
   causeNodeId: string;
   causeVersion: number;

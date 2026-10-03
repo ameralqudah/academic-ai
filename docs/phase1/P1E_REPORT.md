@@ -370,7 +370,9 @@ Twenty-eight mutations, each run against `test:memories:db`: twenty-five killed.
 
 ### Regression (on this branch, base `24d48af`)
 
-REGRESSION_PLACEHOLDER
+Typecheck, lint, `git diff --check` (worktree and against base), production audit (0 vulnerabilities), smoke (after the fix below), gateway 93/0, stats 361/0, runs 116/0, analysis 1329, knowledge, migrate and seed, integration 958, jobs 22, tasks 122/0, runs-db 221/0, graph 195/0, gateway-db 57/0, stats-db 172/0, memory 53/0, context 63/0, graph context 31/0, summary 35/0, memories 55/0; `drizzle-kit generate`: no schema changes; production build. Browser tests over the four flag combinations (V2/GRAPH/RUNS): false/false/false 73 passed, 4 skipped; false/true/true 73 passed, 4 skipped; true/false/false 76 passed, 1 skipped; true/true/false 76 passed, 1 skipped (the skips are the flag-dependent tests of the other setting).
+
+**Smoke inventory updated.** The smoke suite's check that every `/api/v1` handler is flagged and rate-limited knew only the graph, statistics and runs gates and limits, so it flagged the new routes. It now recognises `memoriesFlagged` and the memory limits, and also requires a per-user limit on every memory handler (removing the DELETE limits, L1, fails it).
 
 ### Known limitations
 
